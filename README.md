@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="rbit-3.png">
+  <img src="orbit.png">
 </p>
 
 
@@ -8,7 +8,9 @@ productivity and provide higher abstraction layer for NATS clients.
 
 You can use the library as a whole, or pick just what you need.
 
-# Modules
+# Utilities
+
+This is a placeholder until first real utility lands in the repo.
 
 | Module   | Description  | Docs  |
 |----------|--------------|-------|
