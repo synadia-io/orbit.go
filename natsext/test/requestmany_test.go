@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ func TestRequestMany(t *testing.T) {
 	tests := []struct {
 		name          string
 		subject       string
+		timeout       time.Duration
 		opts          []natsext.RequestManyOpt
 		minTime       time.Duration
 		expectedMsgs  int
@@ -31,7 +33,7 @@ func TestRequestMany(t *testing.T) {
 		withIterError error
 	}{
 		{
-			name:         "default, only max wait",
+			name:         "default, context timeout",
 			subject:      "foo",
 			opts:         nil,
 			minTime:      400 * time.Millisecond,
@@ -47,11 +49,9 @@ func TestRequestMany(t *testing.T) {
 			expectedMsgs: 5,
 		},
 		{
-			name:    "with custom wait",
-			subject: "foo",
-			opts: []natsext.RequestManyOpt{
-				natsext.RequestManyMaxWait(500 * time.Millisecond),
-			},
+			name:         "with custom context",
+			subject:      "foo",
+			timeout:      500 * time.Millisecond,
 			minTime:      500 * time.Millisecond,
 			expectedMsgs: 6,
 		},
@@ -59,19 +59,18 @@ func TestRequestMany(t *testing.T) {
 			name:    "with count reached",
 			subject: "foo",
 			opts: []natsext.RequestManyOpt{
-				natsext.RequestManyMaxWait(5 * time.Second),
 				natsext.RequestManyMaxMessages(3),
 			},
 			minTime:      0,
 			expectedMsgs: 3,
 		},
 		{
-			name:    "with max wait and limit",
+			name:    "with custom timeout and limit",
 			subject: "foo",
 			opts: []natsext.RequestManyOpt{
-				natsext.RequestManyMaxWait(500 * time.Millisecond),
 				natsext.RequestManyMaxMessages(3),
 			},
+			timeout:      500 * time.Millisecond,
 			minTime:      0,
 			expectedMsgs: 3,
 		},
@@ -97,11 +96,11 @@ func TestRequestMany(t *testing.T) {
 			name:    "all options provided, stall timer short circuit",
 			subject: "foo",
 			opts: []natsext.RequestManyOpt{
-				natsext.RequestManyMaxWait(500 * time.Millisecond),
 				natsext.RequestManyStall(50 * time.Millisecond),
 				natsext.RequestManyMaxMessages(10),
 				natsext.RequestManySentinel(natsext.DefaultSentinel),
 			},
+			timeout:      500 * time.Millisecond,
 			minTime:      50 * time.Millisecond,
 			expectedMsgs: 5,
 		},
@@ -109,23 +108,23 @@ func TestRequestMany(t *testing.T) {
 			name:    "all options provided, msg count short circuit",
 			subject: "foo",
 			opts: []natsext.RequestManyOpt{
-				natsext.RequestManyMaxWait(500 * time.Millisecond),
 				natsext.RequestManyStall(50 * time.Millisecond),
 				natsext.RequestManyMaxMessages(3),
 				natsext.RequestManySentinel(natsext.DefaultSentinel),
 			},
+			timeout:      500 * time.Millisecond,
 			minTime:      0,
 			expectedMsgs: 3,
 		},
 		{
-			name:    "all options provided, max wait short circuit",
+			name:    "all options provided, context short circuit",
 			subject: "foo",
 			opts: []natsext.RequestManyOpt{
-				natsext.RequestManyMaxWait(50 * time.Millisecond),
 				natsext.RequestManyStall(100 * time.Millisecond),
 				natsext.RequestManyMaxMessages(10),
 				natsext.RequestManySentinel(natsext.DefaultSentinel),
 			},
+			timeout:      50 * time.Millisecond,
 			minTime:      0,
 			expectedMsgs: 5,
 		},
@@ -133,11 +132,11 @@ func TestRequestMany(t *testing.T) {
 			name:    "all options provided, sentinel short circuit",
 			subject: "foo",
 			opts: []natsext.RequestManyOpt{
-				natsext.RequestManyMaxWait(500 * time.Millisecond),
 				natsext.RequestManyStall(150 * time.Millisecond),
 				natsext.RequestManyMaxMessages(10),
 				natsext.RequestManySentinel(natsext.DefaultSentinel),
 			},
+			timeout:      500 * time.Millisecond,
 			minTime:      100 * time.Millisecond,
 			expectedMsgs: 5,
 		},
@@ -146,14 +145,6 @@ func TestRequestMany(t *testing.T) {
 			subject: "bar",
 			// no responders
 			withIterError: nats.ErrNoResponders,
-		},
-		{
-			name: "invalid options - max wait",
-			opts: []natsext.RequestManyOpt{
-				natsext.RequestManyMaxWait(-1),
-			},
-			subject:   "foo",
-			withError: nats.ErrInvalidArg,
 		},
 		{
 			name: "invalid options - stall timer",
@@ -197,7 +188,15 @@ func TestRequestMany(t *testing.T) {
 			defer sub.Unsubscribe()
 
 			now := time.Now()
-			msgs, err := natsext.RequestMany(nc, test.subject, nil, test.opts...)
+			var ctx context.Context
+			if test.timeout != 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(context.Background(), test.timeout)
+				defer cancel()
+			} else {
+				ctx = context.Background()
+			}
+			msgs, err := natsext.RequestMany(ctx, nc, test.subject, nil, test.opts...)
 			if test.withError != nil {
 				if !errors.Is(err, test.withError) {
 					t.Fatalf("Expected error %v, got %v", test.withError, err)
@@ -228,6 +227,51 @@ func TestRequestMany(t *testing.T) {
 	}
 }
 
+func TestRequestManyCancelContext(t *testing.T) {
+	s := RunDefaultServer()
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(s.ClientURL(), nats.Timeout(400*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer nc.Close()
+
+	sub, err := nc.Subscribe("foo", func(m *nats.Msg) {
+		nc.Publish(m.Reply, []byte("hello"))
+	})
+	if err != nil {
+		t.Fatalf("Received an error on subscribe: %s", err)
+	}
+	defer sub.Unsubscribe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	msgs, err := natsext.RequestMany(ctx, nc, "foo", nil)
+	if err != nil {
+		t.Fatalf("Received an error on Request test: %s", err)
+	}
+
+	var msgCount int
+	for _, err := range msgs {
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				if msgCount != 1 {
+					t.Fatalf("Expected 1 message, got %d", msgCount)
+				}
+				return
+			}
+			t.Fatalf("Received unexpected error in iterator: %s", err)
+		} else {
+			msgCount++
+		}
+	}
+	t.Fatalf("Expected context.Canceled error")
+}
+
 func TestRequestManySentinel(t *testing.T) {
 	s := RunDefaultServer()
 	defer s.Shutdown()
@@ -251,7 +295,7 @@ func TestRequestManySentinel(t *testing.T) {
 	defer sub.Unsubscribe()
 
 	expectedMsgs := []string{"hello", "world"}
-	msgs, err := natsext.RequestMany(nc, "foo", nil, natsext.RequestManySentinel(func(m *nats.Msg) bool {
+	msgs, err := natsext.RequestMany(context.Background(), nc, "foo", nil, natsext.RequestManySentinel(func(m *nats.Msg) bool {
 		return string(m.Data) == "goodbye"
 	}))
 	if err != nil {

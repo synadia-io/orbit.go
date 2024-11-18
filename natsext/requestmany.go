@@ -1,6 +1,7 @@
 package natsext
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"iter"
@@ -10,7 +11,6 @@ import (
 )
 
 type requestManyOpts struct {
-	maxWait  time.Duration
 	stall    time.Duration
 	count    int
 	sentinel func(*nats.Msg) bool
@@ -18,17 +18,6 @@ type requestManyOpts struct {
 
 // RequestManyOpt is a function that can be used to configure the behavior of the RequestMany function.
 type RequestManyOpt func(*requestManyOpts) error
-
-// RequestManyMaxWait sets the maximum time to wait for responses. Default is the client's timeout.
-func RequestManyMaxWait(maxWait time.Duration) RequestManyOpt {
-	return func(opts *requestManyOpts) error {
-		if maxWait <= 0 {
-			return fmt.Errorf("%w: max wait has to be greater than 0", nats.ErrInvalidArg)
-		}
-		opts.maxWait = maxWait
-		return nil
-	}
-}
 
 // RequestManyStall sets the stall timer, which can be used in scatter-gather scenarios where subsequent
 // responses are expected to arrive within a certain time frame.
@@ -70,38 +59,35 @@ func DefaultSentinel(msg *nats.Msg) bool {
 }
 
 // RequestMany will send a request payload and return an iterator to receive multiple responses.
-// By default, the number of messages received is constrained by the client's timeout.
+// If context timeout is not set, the number of messages received is constrained by the client's timeout.
 //
 // Use the RequestManyOpt functions to further configure this method's behavior.
-// - [RequestManyMaxWait] sets the maximum time to wait for responses (defaults to client's timeout).
 // - [RequestManyStall] sets the stall timer, which can be used in scatter-gather scenarios where subsequent
 // responses are expected to arrive within a certain time frame.
 // - [RequestManyMaxMessages] sets the maximum number of messages to receive.
 // - [RequestManySentinel] stops returning responses once a message for which the provided function returns true.
-func RequestMany(nc *nats.Conn, subject string, data []byte, opts ...RequestManyOpt) (iter.Seq2[*nats.Msg, error], error) {
-	return requestMany(nc, subject, data, nil, opts...)
+func RequestMany(ctx context.Context, nc *nats.Conn, subject string, data []byte, opts ...RequestManyOpt) (iter.Seq2[*nats.Msg, error], error) {
+	return requestMany(ctx, nc, subject, data, nil, opts...)
 }
 
 // RequestManyMsg will send a Msg request and return an iterator to receive multiple responses.
-// By default, the number of messages received is constrained by the client's timeout.
+// If context timeout is not set, the number of messages received is constrained by the client's timeout.
 //
 // Use the RequestManyOpt functions to further configure this method's behavior.
-// - [RequestManyMaxWait] sets the maximum time to wait for responses (defaults to client's timeout).
 // - [RequestManyStall] sets the stall timer, which can be used in scatter-gather scenarios where subsequent
 // responses are expected to arrive within a certain time frame.
 // - [RequestManyMaxMessages] sets the maximum number of messages to receive.
 // - [RequestManySentinel] stops returning responses once a message for which the provided function returns true.
-func RequestManyMsg(nc *nats.Conn, msg *nats.Msg, opts ...RequestManyOpt) (iter.Seq2[*nats.Msg, error], error) {
+func RequestManyMsg(ctx context.Context, nc *nats.Conn, msg *nats.Msg, opts ...RequestManyOpt) (iter.Seq2[*nats.Msg, error], error) {
 	if msg == nil {
 		return nil, nats.ErrInvalidMsg
 	}
-	return requestMany(nc, msg.Subject, msg.Data, msg.Header, opts...)
+	return requestMany(ctx, nc, msg.Subject, msg.Data, msg.Header, opts...)
 }
 
-func requestMany(nc *nats.Conn, subject string, data []byte, hdr nats.Header, opts ...RequestManyOpt) (iter.Seq2[*nats.Msg, error], error) {
+func requestMany(ctx context.Context, nc *nats.Conn, subject string, data []byte, hdr nats.Header, opts ...RequestManyOpt) (iter.Seq2[*nats.Msg, error], error) {
 	reqOpts := &requestManyOpts{
-		maxWait: nc.Opts.Timeout,
-		count:   -1,
+		count: -1,
 	}
 
 	for _, opt := range opts {
@@ -126,23 +112,44 @@ func requestMany(nc *nats.Conn, subject string, data []byte, hdr nats.Header, op
 	if err := nc.PublishMsg(msg); err != nil {
 		return nil, err
 	}
+	var cancel context.CancelFunc
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancel = context.WithTimeout(ctx, nc.Opts.Timeout)
+	}
 
 	return func(yield func(*nats.Msg, error) bool) {
 		first := true
-		time.AfterFunc(reqOpts.maxWait, func() {
+		completed := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				sub.Unsubscribe()
+			case <-completed:
+			}
+		}()
+		defer func() {
+			close(completed)
 			sub.Unsubscribe()
-		})
-		defer sub.Unsubscribe()
+			if cancel != nil {
+				cancel()
+			}
+		}()
 		for {
-			timeout := reqOpts.maxWait
+			var timeout time.Duration
 			if !first && reqOpts.stall != 0 {
 				timeout = reqOpts.stall
 			}
 			first = false
-			msg, err := sub.NextMsg(timeout)
+			var msg *nats.Msg
+			var err error
+			if timeout == 0 {
+				msg, err = sub.NextMsgWithContext(ctx)
+			} else {
+				msg, err = sub.NextMsg(timeout)
+			}
 			if err != nil {
 				// ErrBadSubscription is returned if the subscription was closed by the global timeout
-				if errors.Is(err, nats.ErrBadSubscription) || errors.Is(err, nats.ErrTimeout) {
+				if errors.Is(err, nats.ErrBadSubscription) || errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
 					return
 				}
 				yield(nil, err)
