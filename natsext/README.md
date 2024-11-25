@@ -19,7 +19,9 @@ Responses are returned in an iterator, which you can range over to receive messa
 When a termination condition is met, the iterator is closed (and no error is returned).
 
 ```go
-msgs, err := natsext.RequestMany(nc, "subject", []byte("request data"))
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+msgs, err := natsext.RequestMany(ctx, nc, "subject", []byte("request data"))
 if err != nil {
     // handle error
 }
@@ -41,18 +43,19 @@ msg := &nats.Msg{
         "Key": []string{"Value"},
     },
 }
-iter, err := natsext.RequestManyMsg(nc, msg)
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+iter, err := natsext.RequestManyMsg(ctx, nc, msg)
 if err != nil {
     // handle error
 }
 // gather responses
 ```
 
-#### Options
+#### Configuration
 
-Customize the termination behavior of `RequestMany` and `RequestManyMsg` using the following options:
+Timeout and cancellation are handled by the context passed to `RequestMany` and `RequestManyMsg`. In addition, you can configure the following options:
 
-- `RequestManyMaxWait`: Sets the maximum time to wait for responses (defaults to client's timeout).
-- `RequestManyStall`: Sets the stall timer, useful in scatter-gather scenarios where subsequent responses are - expected within a certain timeframe.
+- `RequestManyStall`: Sets the stall timer, useful in scatter-gather scenarios where subsequent responses are expected within a certain timeframe.
 - `RequestManyMaxMessages`: Sets the maximum number of messages to receive.
 - `RequestManySentinel`: Stops receiving messages once a sentinel message is received.
