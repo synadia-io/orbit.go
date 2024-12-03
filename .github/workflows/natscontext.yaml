@@ -1,0 +1,59 @@
+name: natscontext
+on:
+  push:
+    paths:
+      - 'natscontext/**'
+
+  pull_request:
+    paths:
+      - 'natscontext/**'
+
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install deps
+        working-directory: natscontext
+        shell: bash --noprofile --norc -x -eo pipefail {0}
+        run: |
+          go get -t ./...
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install github.com/client9/misspell/cmd/misspell@latest
+
+      - name: Run linters
+        working-directory: natscontext
+        shell: bash --noprofile --norc -x -eo pipefail {0}
+        run: |
+          $(exit $(go fmt  ./... | wc -l))
+          go vet ./...
+          go vet ./test/...
+          staticcheck ./...
+          staticcheck ./test/...
+          find . -type f -name "*.go" | xargs misspell -error -locale US
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Run tests
+        working-directory: natscontext
+        shell: bash --noprofile --norc -x -eo pipefail {0}
+        run: |
+          go test -v -count=1 ./...
+          go test -v -count=1 ./test/...
