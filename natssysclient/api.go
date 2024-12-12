@@ -13,7 +13,9 @@ import (
 const (
 	// DefaultRequestTimeout is the default timeout for requests, used when the provided context does not have a deadline.
 	DefaultRequestTimeout = 10 * time.Second
-	DefaultStall          = 300 * time.Millisecond
+
+	// DefaultStall is the default interval for subsequent responses when pinging the cluster.
+	DefaultStall = 300 * time.Millisecond
 )
 
 const (
@@ -28,6 +30,8 @@ const (
 var (
 	ErrValidation      = errors.New("validation error")
 	ErrInvalidServerID = errors.New("sever with given ID does not exist")
+	ErrRequest         = errors.New("error sending API request")
+	ErrPingResponse    = errors.New("error receiving ping response")
 )
 
 // System can be used to request monitoring data from the server.
@@ -59,6 +63,8 @@ func StallTimer(initialTimeout, interval time.Duration) SysClientOpt {
 }
 
 // ServerCount sets the maximum number of servers to wait for the response from.
+// Setting this value is not mandatory since the stall timer can be used to short-circuit the request.
+// If set, the value should represent the number of servers in the cluster (as seen by the connected server).
 func ServerCount(count int) SysClientOpt {
 	return func(opts *sysClientOpts) error {
 		if count <= 0 {
@@ -107,6 +113,28 @@ type APIError struct {
 	Description string `json:"description,omitempty"`
 }
 
+func (s *System) requestByID(ctx context.Context, id string, subject string, data []byte) (*nats.Msg, error) {
+	if id == "" {
+		return nil, fmt.Errorf("%w: server id cannot be empty", ErrValidation)
+	}
+	if subject == "" {
+		return nil, fmt.Errorf("%w: subject cannot be empty", ErrValidation)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, DefaultRequestTimeout)
+		defer cancel()
+	}
+	resp, err := s.nc.RequestWithContext(ctx, fmt.Sprintf(subject, id), data)
+	if err != nil {
+		if errors.Is(err, nats.ErrNoResponders) {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidServerID, id)
+		}
+		return nil, fmt.Errorf("%w: %s", ErrRequest, err)
+	}
+	return resp, nil
+}
+
 func (s *System) pingServers(ctx context.Context, subject string, data []byte) ([]*nats.Msg, error) {
 	if subject == "" {
 		return nil, fmt.Errorf("%w: subject cannot be empty", ErrValidation)
@@ -127,12 +155,12 @@ func (s *System) pingServers(ctx context.Context, subject string, data []byte) (
 	}
 	iter, err := natsext.RequestMany(ctx, s.nc, subject, data, opts...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %s", ErrRequest, err)
 	}
 	msgs := make([]*nats.Msg, 0)
 	for msg, err := range iter {
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %s", ErrPingResponse, err)
 		}
 		msgs = append(msgs, msg)
 	}

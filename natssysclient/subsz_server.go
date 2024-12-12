@@ -16,11 +16,8 @@ package natssysclient
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
-
-	"github.com/nats-io/nats.go"
 )
 
 type (
@@ -77,25 +74,12 @@ type (
 
 // ServerSubsz returns server subscriptions data
 func (s *System) ServerSubsz(ctx context.Context, id string, opts SubszOptions) (*SubszResp, error) {
-	if id == "" {
-		return nil, fmt.Errorf("%w: server id cannot be empty", ErrValidation)
-	}
-	conn := s.nc
-	subj := fmt.Sprintf(srvSubszSubj, id)
 	payload, err := json.Marshal(opts)
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, DefaultRequestTimeout)
-		defer cancel()
-	}
-	resp, err := conn.RequestWithContext(ctx, subj, payload)
+	resp, err := s.requestByID(ctx, id, srvSubszSubj, payload)
 	if err != nil {
-		if errors.Is(err, nats.ErrNoResponders) {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidServerID, id)
-		}
 		return nil, err
 	}
 

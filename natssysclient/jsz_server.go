@@ -16,7 +16,6 @@ package natssysclient
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -127,25 +126,12 @@ type (
 
 // Jsz returns server jetstream details.
 func (s *System) Jsz(ctx context.Context, id string, opts JszEventOptions) (*JSZResp, error) {
-	if id == "" {
-		return nil, fmt.Errorf("%w: server id cannot be empty", ErrValidation)
-	}
-	conn := s.nc
-	subj := fmt.Sprintf(srvJszSubj, id)
 	payload, err := json.Marshal(opts)
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, DefaultRequestTimeout)
-		defer cancel()
-	}
-	resp, err := conn.RequestWithContext(ctx, subj, payload)
+	resp, err := s.requestByID(ctx, id, srvJszSubj, payload)
 	if err != nil {
-		if errors.Is(err, nats.ErrNoResponders) {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidServerID, id)
-		}
 		return nil, err
 	}
 

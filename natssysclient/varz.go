@@ -280,18 +280,11 @@ type (
 
 // Varz returns general server information.
 func (s *System) Varz(ctx context.Context, id string, opts VarzEventOptions) (*VarzResp, error) {
-	conn := s.nc
-	subj := fmt.Sprintf(srvVarzSubj, id)
 	payload, err := json.Marshal(opts)
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, DefaultRequestTimeout)
-		defer cancel()
-	}
-	resp, err := conn.RequestWithContext(ctx, subj, payload)
+	resp, err := s.requestByID(ctx, id, srvVarzSubj, payload)
 	if err != nil {
 		return nil, err
 	}

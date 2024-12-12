@@ -16,12 +16,10 @@ package natssysclient
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/nats-io/jwt"
-	"github.com/nats-io/nats.go"
 )
 
 type (
@@ -183,25 +181,12 @@ const (
 
 // Connz returns server connection details.
 func (s *System) Connz(ctx context.Context, id string, opts ConnzEventOptions) (*ConnzResp, error) {
-	if id == "" {
-		return nil, fmt.Errorf("%w: server id cannot be empty", ErrValidation)
-	}
-	conn := s.nc
-	subj := fmt.Sprintf(srvConnzSubj, id)
 	payload, err := json.Marshal(opts)
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, DefaultRequestTimeout)
-		defer cancel()
-	}
-	resp, err := conn.RequestWithContext(ctx, subj, payload)
+	resp, err := s.requestByID(ctx, id, srvConnzSubj, payload)
 	if err != nil {
-		if errors.Is(err, nats.ErrNoResponders) {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidServerID, id)
-		}
 		return nil, err
 	}
 
