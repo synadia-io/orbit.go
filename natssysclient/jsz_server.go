@@ -31,12 +31,12 @@ type (
 	}
 
 	// JSInfo is the JetStream information for the server.
+
 	JSInfo struct {
 		ID       string          `json:"server_id"`
 		Now      time.Time       `json:"now"`
 		Disabled bool            `json:"disabled,omitempty"`
 		Config   JetStreamConfig `json:"config,omitempty"`
-		Limits   *JSLimitOpts    `json:"limits,omitempty"`
 		JetStreamStats
 		Streams   int              `json:"streams"`
 		Consumers int              `json:"consumers"`
@@ -74,14 +74,6 @@ type (
 	RaftGroupDetail struct {
 		Name      string `json:"name"`
 		RaftGroup string `json:"raft_group,omitempty"`
-	}
-
-	// JSLimitOpts are the JetStream limits for the server.
-	JSLimitOpts struct {
-		MaxRequestBatch int           `json:"max_request_batch,omitempty"`
-		MaxAckPending   int           `json:"max_ack_pending,omitempty"`
-		MaxHAAssets     int           `json:"max_ha_assets,omitempty"`
-		Duplicates      time.Duration `json:"max_duplicate_window,omitempty"`
 	}
 
 	// JsEventOptions are the options for the JSZ request.

@@ -87,7 +87,6 @@ type (
 		Subscriptions         uint32                 `json:"subscriptions"`
 		HTTPReqStats          map[string]uint64      `json:"http_req_stats"`
 		ConfigLoadTime        time.Time              `json:"config_load_time"`
-		ConfigDigest          string                 `json:"config_digest"`
 		Tags                  jwt.TagList            `json:"tags,omitempty"`
 		TrustedOperatorsJwt   []string               `json:"trusted_operators_jwt,omitempty"`
 		TrustedOperatorsClaim []*jwt.OperatorClaims  `json:"trusted_operators_claim,omitempty"`
@@ -197,7 +196,6 @@ type (
 		Config *JetStreamConfig `json:"config,omitempty"`
 		Stats  *JetStreamStats  `json:"stats,omitempty"`
 		Meta   *MetaClusterInfo `json:"meta,omitempty"`
-		Limits *JSLimitOpts     `json:"limits,omitempty"`
 	}
 
 	// Statistics about JetStream for this server.
@@ -222,11 +220,9 @@ type (
 		Domain       string        `json:"domain,omitempty"`
 		CompressOK   bool          `json:"compress_ok,omitempty"`
 		UniqueTag    string        `json:"unique_tag,omitempty"`
-		Strict       bool          `json:"strict,omitempty"`
 	}
 
 	JetStreamAPIStats struct {
-		Level    int    `json:"level"`
 		Total    uint64 `json:"total"`
 		Errors   uint64 `json:"errors"`
 		Inflight uint64 `json:"inflight,omitempty"`

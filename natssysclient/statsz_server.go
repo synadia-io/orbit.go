@@ -30,22 +30,21 @@ type (
 
 	// ServerStats hold various statistics that we will periodically send out.
 	ServerStats struct {
-		Start              time.Time           `json:"start"`
-		Mem                int64               `json:"mem"`
-		Cores              int                 `json:"cores"`
-		CPU                float64             `json:"cpu"`
-		Connections        int                 `json:"connections"`
-		TotalConnections   uint64              `json:"total_connections"`
-		ActiveAccounts     int                 `json:"active_accounts"`
-		NumSubs            uint32              `json:"subscriptions"`
-		Sent               DataStats           `json:"sent"`
-		Received           DataStats           `json:"received"`
-		SlowConsumers      int64               `json:"slow_consumers"`
-		SlowConsumersStats *SlowConsumersStats `json:"slow_consumer_stats,omitempty"`
-		Routes             []*RouteStat        `json:"routes,omitempty"`
-		Gateways           []*GatewayStat      `json:"gateways,omitempty"`
-		ActiveServers      int                 `json:"active_servers,omitempty"`
-		JetStream          *JetStreamVarz      `json:"jetstream,omitempty"`
+		Start            time.Time      `json:"start"`
+		Mem              int64          `json:"mem"`
+		Cores            int            `json:"cores"`
+		CPU              float64        `json:"cpu"`
+		Connections      int            `json:"connections"`
+		TotalConnections uint64         `json:"total_connections"`
+		ActiveAccounts   int            `json:"active_accounts"`
+		NumSubs          uint32         `json:"subscriptions"`
+		Sent             DataStats      `json:"sent"`
+		Received         DataStats      `json:"received"`
+		SlowConsumers    int64          `json:"slow_consumers"`
+		Routes           []*RouteStat   `json:"routes,omitempty"`
+		Gateways         []*GatewayStat `json:"gateways,omitempty"`
+		ActiveServers    int            `json:"active_servers,omitempty"`
+		JetStream        *JetStreamVarz `json:"jetstream,omitempty"`
 	}
 
 	// DataStats reports how may msg and bytes. Applicable for both sent and received.

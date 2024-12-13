@@ -2,6 +2,8 @@
 
 NATS System API Client exposes APIs to interact with the [NATS server monitoring endpoints](https://docs.nats.io/running-a-nats-service/configuration/sys_accounts).
 
+> **Note**: All response structures are compatible with the NATS server v2.10.23 and will be updated to support future additions.
+
 ## Installation
 
 ```bash
