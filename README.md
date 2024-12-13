@@ -12,7 +12,8 @@ You can use the library as a whole, or pick just what you need.
 
 # Utilities
 
-| Module               | Description                                  | Docs                               |
-|----------------------|----------------------------------------------|------------------------------------|
-| Core NATS Extensions | Core NATS extensions                         | [README.md](natsext/README.md)     |
-| `natscontext`        | Allow connecting to NATS using NATS Contexts | [README.md](natscontext/README.md) |
+| Module               | Description                                  | Docs                                 |
+|----------------------|----------------------------------------------|--------------------------------------|
+| Core NATS Extensions | Core NATS extensions                         | [README.md](natsext/README.md)       |
+| `natscontext`        | Allow connecting to NATS using NATS Contexts | [README.md](natscontext/README.md)   |
+| NATS System Client   | NATS client for NATS monitoring APIs         | [README.md](natssysclient/README.md) |
