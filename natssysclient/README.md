@@ -1,5 +1,19 @@
 # NATS System API Client
 
+[License-Url]: https://www.apache.org/licenses/LICENSE-2.0
+[License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
+[ReportCard-Url]: https://goreportcard.com/report/github.com/synadia-io/orbit.go/natssysclient
+[ReportCard-Image]: https://goreportcard.com/badge/github.com/synadia-io/orbit.go/natssysclient
+[Build-Status-Url]: https://github.com/synadia-io/orbit.go/actions/workflows/natssysclient.yaml
+[Build-Status-Image]: https://github.com/synadia-io/orbit.go/actions/workflows/natssysclient.yaml/badge.svg?branch=main
+[GoDoc-Url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/natssysclient
+[GoDoc-Image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/natssysclient.svg
+
+[![License][License-Image]][License-Url]
+[![Go Reference][GoDoc-Image]][GoDoc-Url]
+[![Build Status][Build-Status-Image]][Build-Status-Url]
+[![Go Report Card][ReportCard-Image]][ReportCard-Url]
+
 NATS System API Client exposes APIs to interact with the [NATS server monitoring endpoints](https://docs.nats.io/running-a-nats-service/configuration/sys_accounts).
 
 > **Note**: All response structures are compatible with the NATS server v2.10.23 and will be updated to support future additions.

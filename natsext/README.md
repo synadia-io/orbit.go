@@ -1,5 +1,19 @@
 # Core NATS Extensions
 
+[License-Url]: https://www.apache.org/licenses/LICENSE-2.0
+[License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
+[ReportCard-Url]: https://goreportcard.com/report/github.com/synadia-io/orbit.go/natsext
+[ReportCard-Image]: https://goreportcard.com/badge/github.com/synadia-io/orbit.go/natsext
+[Build-Status-Url]: https://github.com/synadia-io/orbit.go/actions/workflows/natsext.yaml
+[Build-Status-Image]: https://github.com/synadia-io/orbit.go/actions/workflows/natsext.yaml/badge.svg?branch=main
+[GoDoc-Url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/natsext
+[GoDoc-Image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/natsext.svg
+
+[![License][License-Image]][License-Url]
+[![Go Reference][GoDoc-Image]][GoDoc-Url]
+[![Build Status][Build-Status-Image]][Build-Status-Url]
+[![Go Report Card][ReportCard-Image]][ReportCard-Url]
+
 Core NATS Extensions is a set of utilities providing additional features to Core NATS component of nats.go client.
 
 ## Installation
