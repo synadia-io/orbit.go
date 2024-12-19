@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nats-io/jwt"
+	"github.com/nats-io/jwt/v2"
 )
 
 type (
