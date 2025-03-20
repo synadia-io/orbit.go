@@ -15,7 +15,7 @@ You can use the library as a whole, or pick just what you need.
 | Module               | Description                                  | Docs                                 | Version                                                   |
 |----------------------|----------------------------------------------|--------------------------------------|-----------------------------------------------------------|
 | Core NATS Extensions | Core NATS extensions                         | [README.md](natsext/README.md)       | [![Go Reference][natsext-image]][natsext-url]             |
-| JetStream Extensions | JetStream extensions                         | [README.md](jetstreamext/README.md)     | [![Go Reference][jetstreamext-image]][jetstreamext-url]         |
+| JetStream Extensions | JetStream extensions                         | [README.md](jetstreamext/README.md)  | [![Go Reference][jetstreamext-image]][jetstreamext-url]   |
 | `natscontext`        | Allow connecting to NATS using NATS Contexts | [README.md](natscontext/README.md)   | [![Go Reference][natscontext-image]][natscontext-url]     |
 | NATS System Client   | NATS client for NATS monitoring APIs         | [README.md](natssysclient/README.md) | [![Go Reference][natssysclient-image]][natssysclient-url] |
 
