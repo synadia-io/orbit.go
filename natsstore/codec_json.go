@@ -3,15 +3,15 @@ package natsstore
 import "encoding/json"
 
 func NewJsonCodec() Codec {
-    return &jsonCodec{}
+	return &jsonCodec{}
 }
 
 type jsonCodec struct{}
 
 func (c *jsonCodec) Encode(a any) ([]byte, error) {
-    return json.Marshal(a)
+	return json.Marshal(a)
 }
 
 func (c *jsonCodec) Decode(data []byte, a any) error {
-    return json.Unmarshal(data, a)
+	return json.Unmarshal(data, a)
 }
