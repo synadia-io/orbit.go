@@ -27,6 +27,7 @@ func testTreeGenerator(codec natsstore.Codec) func() {
             _, err = js.CreateKeyValue(context.Background(), jetstream.KeyValueConfig{
                 Bucket: bucket,
             })
+            Expect(err).To(BeNil())
 
             store, err = natsstore.NewKeyValueStore(js, bucket, codec)
             Expect(err).ToNot(HaveOccurred())
