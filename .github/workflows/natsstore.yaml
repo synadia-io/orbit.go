@@ -1,4 +1,4 @@
-name: natssysclient
+name: natsstore
 on: 
   push:
     paths:
