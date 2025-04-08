@@ -110,7 +110,7 @@ func GetBatchStartTime(startTime time.Time) GetBatchOpt {
 // GetBatch fetches a batch of messages from the specified stream.
 // The batch size is determined by the `batch` parameter.
 // The function returns an iterator that can be used to iterate over the
-// messages.
+// messages. Any error received during iteration will terminate the loop.
 // The iterator will return an error if there are no messages to fetch.
 func GetBatch(ctx context.Context, js jetstream.JetStream, stream string, batch int, opts ...GetBatchOpt) (iter.Seq2[*jetstream.RawStreamMsg, error], error) {
 	reqOpts := &getBatchOpts{
@@ -172,7 +172,7 @@ func GetLastMsgsBatchSize(batch int) GetLastForOpt {
 // GetLastMsgsFor fetches the last messages for the specified subjects from
 // the specified stream.
 // The function returns an iterator that can be used to iterate over the
-// messages.
+// messages. Any error received during iteration will terminate the loop.
 // It can be configured to fetch messages up to a certain stream sequence number or
 // time.
 func GetLastMsgsFor(ctx context.Context, js jetstream.JetStream, stream string, subjects []string, opts ...GetLastForOpt) (iter.Seq2[*jetstream.RawStreamMsg, error], error) {
