@@ -4,7 +4,7 @@ go 1.23.5
 
 require (
 	github.com/nats-io/nats-server/v2 v2.11.0
-	github.com/nats-io/nats.go v1.39.1
+	github.com/nats-io/nats.go v1.41.0
 	github.com/synadia-io/orbit.go/jetstreamext v0.1.0
 )
 

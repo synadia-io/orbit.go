@@ -21,7 +21,7 @@ type (
 	GetBatchOpt func(*getBatchOpts) error
 
 	// GetLastForOpt is a function that can be used to configure the behavior of
-	// the GetLastMessagesFor function.
+	// the GetLastMsgsFor function.
 	GetLastForOpt func(*getLastBatchOpts) error
 
 	getBatchOpts struct {
@@ -56,7 +56,7 @@ var (
 	// ErrInvalidOption is returned when an invalid option is provided.
 	ErrInvalidOption = errors.New("invalid option")
 
-	// ErrSubjectRequired is returned when no subjects are provided in GetLastMessagesFor.
+	// ErrSubjectRequired is returned when no subjects are provided in GetLastMsgsFor.
 	ErrSubjectRequired = errors.New("at least one subject is required")
 )
 
@@ -134,9 +134,9 @@ func GetBatch(ctx context.Context, js jetstream.JetStream, stream string, batch 
 	return getDirect(ctx, js, stream, reqJSON)
 }
 
-// GetLastMessagesUpToSeq sets the sequence number up to which to fetch messages
+// GetLastMsgsUpToSeq sets the sequence number up to which to fetch messages
 // (inclusive).
-func GetLastMessagesUpToSeq(seq uint64) GetLastForOpt {
+func GetLastMsgsUpToSeq(seq uint64) GetLastForOpt {
 	return func(opts *getLastBatchOpts) error {
 		if opts.UpToTime != nil {
 			return fmt.Errorf("%w: cannot set both up to sequence and up to time", ErrInvalidOption)
@@ -146,8 +146,8 @@ func GetLastMessagesUpToSeq(seq uint64) GetLastForOpt {
 	}
 }
 
-// GetLastMessagesUpToTime sets the time up to which to fetch messages.
-func GetLastMessagesUpToTime(tm time.Time) GetLastForOpt {
+// GetLastMsgsUpToTime sets the time up to which to fetch messages.
+func GetLastMsgsUpToTime(tm time.Time) GetLastForOpt {
 	return func(opts *getLastBatchOpts) error {
 		if opts.UpToSeq != 0 {
 			return fmt.Errorf("%w: cannot set both up to sequence and up to time", ErrInvalidOption)
@@ -157,9 +157,9 @@ func GetLastMessagesUpToTime(tm time.Time) GetLastForOpt {
 	}
 }
 
-// GetLastMessagesBatchSize sets the optional batch size for fetching messages
+// GetLastMsgsBatchSize sets the optional batch size for fetching messages
 // from multiple subjects.
-func GetLastMessagesBatchSize(batch int) GetLastForOpt {
+func GetLastMsgsBatchSize(batch int) GetLastForOpt {
 	return func(opts *getLastBatchOpts) error {
 		if batch <= 0 {
 			return fmt.Errorf("%w: batch size has to be greater than 0", ErrInvalidOption)
@@ -169,13 +169,13 @@ func GetLastMessagesBatchSize(batch int) GetLastForOpt {
 	}
 }
 
-// GetLastMessagesFor fetches the last messages for the specified subjects from
+// GetLastMsgsFor fetches the last messages for the specified subjects from
 // the specified stream.
 // The function returns an iterator that can be used to iterate over the
 // messages.
 // It can be configured to fetch messages up to a certain stream sequence number or
 // time.
-func GetLastMessagesFor(ctx context.Context, js jetstream.JetStream, stream string, subjects []string, opts ...GetLastForOpt) (iter.Seq2[*jetstream.RawStreamMsg, error], error) {
+func GetLastMsgsFor(ctx context.Context, js jetstream.JetStream, stream string, subjects []string, opts ...GetLastForOpt) (iter.Seq2[*jetstream.RawStreamMsg, error], error) {
 	if len(subjects) == 0 {
 		return nil, ErrSubjectRequired
 	}

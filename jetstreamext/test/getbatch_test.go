@@ -257,21 +257,21 @@ func TestGetLastMessagesFor(t *testing.T) {
 		{
 			name:         "match all up to sequence",
 			subjects:     []string{"foo.*"},
-			opts:         []jetstreamext.GetLastForOpt{jetstreamext.GetLastMessagesUpToSeq(3)},
+			opts:         []jetstreamext.GetLastForOpt{jetstreamext.GetLastMsgsUpToSeq(3)},
 			expectedMsgs: 2,
 			expectedSeqs: []uint64{2, 3},
 		},
 		{
 			name:         "match all up to time",
 			subjects:     []string{"foo.*"},
-			opts:         []jetstreamext.GetLastForOpt{jetstreamext.GetLastMessagesUpToTime(pause)},
+			opts:         []jetstreamext.GetLastForOpt{jetstreamext.GetLastMsgsUpToTime(pause)},
 			expectedMsgs: 2,
 			expectedSeqs: []uint64{4, 5},
 		},
 		{
 			name:         "with batch size",
 			subjects:     []string{"foo.*"},
-			opts:         []jetstreamext.GetLastForOpt{jetstreamext.GetLastMessagesBatchSize(2)},
+			opts:         []jetstreamext.GetLastForOpt{jetstreamext.GetLastMsgsBatchSize(2)},
 			expectedMsgs: 2,
 			expectedSeqs: []uint64{4, 6},
 		},
@@ -288,13 +288,13 @@ func TestGetLastMessagesFor(t *testing.T) {
 		{
 			name:      "time and sequence exclusive",
 			subjects:  []string{"foo.*"},
-			opts:      []jetstreamext.GetLastForOpt{jetstreamext.GetLastMessagesUpToTime(pause), jetstreamext.GetLastMessagesUpToSeq(3)},
+			opts:      []jetstreamext.GetLastForOpt{jetstreamext.GetLastMsgsUpToTime(pause), jetstreamext.GetLastMsgsUpToSeq(3)},
 			withError: jetstreamext.ErrInvalidOption,
 		},
 		{
 			name:      "invalid batch size",
 			subjects:  []string{"foo.*"},
-			opts:      []jetstreamext.GetLastForOpt{jetstreamext.GetLastMessagesBatchSize(0)},
+			opts:      []jetstreamext.GetLastForOpt{jetstreamext.GetLastMsgsBatchSize(0)},
 			withError: jetstreamext.ErrInvalidOption,
 		},
 	}
@@ -302,7 +302,7 @@ func TestGetLastMessagesFor(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 
-			batch, err := jetstreamext.GetLastMessagesFor(context.Background(), js, "TEST", test.subjects, test.opts...)
+			batch, err := jetstreamext.GetLastMsgsFor(context.Background(), js, "TEST", test.subjects, test.opts...)
 			if test.withError != nil {
 				if !errors.Is(err, test.withError) {
 					t.Fatalf("Expected error %v, got %v", test.withError, err)

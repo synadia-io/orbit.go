@@ -24,9 +24,9 @@ go get github.com/synadia-io/orbit.go/jetstreamext
 
 ## Utilities
 
-### GetBatch and GetLastMessagesFor
+### GetBatch and GetLastMsgsFor
 
-`GetBatch` and `GetLastMessagesFor` are utilities that allow you to fetch multiple messages from a JetStream stream.
+`GetBatch` and `GetLastMsgsFor` are utilities that allow you to fetch multiple messages from a JetStream stream.
 Responses are returned in an iterator, which you can range over to receive messages.
 
 #### GetBatch
@@ -83,10 +83,10 @@ if err != nil {
 // process msgs
 ```
 
-#### GetLastMessagesFor
+#### GetLastMsgsFor
 
-`GetLastMessagesFor` fetches the last messages for the specified subjects from the specified stream. It can be optionally configured to fetch messages up to the provided sequence (or time), rather than the latest messages available. It can also be configured to fetch messages up to a provided batch size.
-The provided subjects may contain wildcards, however it is important to note that the `GetLastMessagesFor` utility will match a maximum of 1024 subjects.
+`GetLastMsgsFor` fetches the last messages for the specified subjects from the specified stream. It can be optionally configured to fetch messages up to the provided sequence (or time), rather than the latest messages available. It can also be configured to fetch messages up to a provided batch size.
+The provided subjects may contain wildcards, however it is important to note that the NATS server will match a maximum of 1024 subjects.
 
 Responses are returned in an iterator, which you can range over to receive messages.
 
@@ -95,7 +95,7 @@ Examples:
 - fetching last messages from the stream for the provided subjects:
 
 ```go
-msgs, err := jetstreamext.GetLastMessagesFor(ctx, js, "stream", []string{"foo", "bar"})
+msgs, err := jetstreamext.GetLastMsgsFor(ctx, js, "stream", []string{"foo", "bar"})
 if err != nil {
     // handle error
 }
@@ -110,7 +110,7 @@ for msg, err := range msgs {
 - fetching last messages from the stream for the provided subjects up to stream sequence 100:
 
 ```go
-msgs, err := jetstreamext.GetLastMessagesFor(ctx, js, "stream", []string{"foo", "bar"}, jetstreamext.GetLastMessagesUpToSeq(100))
+msgs, err := jetstreamext.GetLastMsgsFor(ctx, js, "stream", []string{"foo", "bar"}, jetstreamext.GetLastMsgsUpToSeq(100))
 if err != nil {
     // handle error
 }
@@ -120,7 +120,7 @@ if err != nil {
 - fetching last messages from the stream for the provided subjects up to time 1 hour ago:
 
 ```go
-msgs, err := jetstreamext.GetLastMessagesFor(ctx, js, "stream", []string{"foo", "bar"}, jetstreamext.GetLastMessagesUpToTime(time.Now().Add(-time.Hour)))
+msgs, err := jetstreamext.GetLastMsgsFor(ctx, js, "stream", []string{"foo", "bar"}, jetstreamext.GetLastMsgsUpToTime(time.Now().Add(-time.Hour)))
 if err != nil {
     // handle error
 }
@@ -130,7 +130,7 @@ if err != nil {
 - fetching last messages from the stream for the provided subjects up to a batch size of 10:
 
 ```go
-msgs, err := jetstreamext.GetLastMessagesFor(ctx, js, "stream", []string{"foo.*"}, jetstreamext.GetLastMessagesBatchSize(10))
+msgs, err := jetstreamext.GetLastMsgsFor(ctx, js, "stream", []string{"foo.*"}, jetstreamext.GetLastMsgsBatchSize(10))
 if err != nil {
     // handle error
 }
