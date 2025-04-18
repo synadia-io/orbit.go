@@ -3,13 +3,13 @@ module partitioned_stream_consumer_test
 go 1.23.6
 
 require (
+	github.com/choria-io/fisk v0.7.0
 	github.com/nats-io/jsm.go v0.2.0
 	github.com/nats-io/nats-server/v2 v2.11.1
 	github.com/nats-io/nats.go v1.41.2
 )
 
 require (
-	github.com/choria-io/fisk v0.7.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/expr-lang/expr v1.17.2 // indirect
 	github.com/google/go-tpm v0.9.3 // indirect
@@ -27,5 +27,3 @@ require (
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-//replace github.com/nats-io/nats.go => /Users/jnmoyne/Documents/Synadia/code/nats.go
