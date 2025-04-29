@@ -400,13 +400,13 @@ func AddMembers(nc *nats.Conn, streamName string, consumerGroupName string, memb
 
 	consumerGroupConfig.Members = newMembers
 
-	marshalled, err := json.Marshal(consumerGroupConfig)
+	marshaled, err := json.Marshal(consumerGroupConfig)
 	if err != nil {
 		return nil, errors.Join(errors.New("couldn't marshall the consumer group's config"), err)
 	}
 
 	// update the config record
-	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshalled)
+	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshaled)
 	if err != nil {
 		return nil, errors.Join(errors.New("couldn't put the consumer group's config in the bucket"), err)
 	}
@@ -460,13 +460,13 @@ func DeleteMembers(nc *nats.Conn, streamName string, consumerGroupName string, m
 
 	consumerGroupConfig.Members = newMembers
 
-	marshalled, err := json.Marshal(consumerGroupConfig)
+	marshaled, err := json.Marshal(consumerGroupConfig)
 	if err != nil {
 		return nil, errors.Join(errors.New("couldn't marshall the consumer group's config"), err)
 	}
 
 	// update the config record
-	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshalled)
+	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshaled)
 	if err != nil {
 		return nil, errors.Join(errors.New("couldn't put the consumer group's config in the bucket"), err)
 	}
@@ -511,13 +511,13 @@ func SetMemberMappings(nc *nats.Conn, streamName string, consumerGroupName strin
 		return errors.Join(errors.New("invalid consumer group config"), err)
 	}
 
-	marshalled, err := json.Marshal(consumerGroupConfig)
+	marshaled, err := json.Marshal(consumerGroupConfig)
 	if err != nil {
 		return errors.Join(errors.New("couldn't marshall the consumer group's config"), err)
 	}
 
 	// update the config record
-	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshalled)
+	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshaled)
 	if err != nil {
 		return errors.Join(errors.New("couldn't put the consumer group's config in the bucket"), err)
 	}
@@ -553,13 +553,13 @@ func DeleteMemberMappings(nc *nats.Conn, streamName string, consumerGroupName st
 
 	consumerGroupConfig.MemberMappings = []MemberMapping{}
 
-	marshalled, err := json.Marshal(consumerGroupConfig)
+	marshaled, err := json.Marshal(consumerGroupConfig)
 	if err != nil {
 		return errors.Join(errors.New("couldn't marshall the consumer group's config"), err)
 	}
 
 	// update the config record
-	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshalled)
+	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshaled)
 	if err != nil {
 		return errors.Join(errors.New("couldn't put the consumer group's config in the bucket"), err)
 	}

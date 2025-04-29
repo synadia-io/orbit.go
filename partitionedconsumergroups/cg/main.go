@@ -179,7 +179,7 @@ func (cg *cgStruct) createElasticAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
 	myContext, cg.myContextCancel = context.WithCancel(myContext)
 
-	_, err := streamconsumergroup.CreateElastic(myContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.pwcis, int64(cg.maxBufferedMsgs), int64(cg.maxBufferedBytes))
+	_, err := streamconsumergroup.CreateElastic(myContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.pwcis, cg.maxBufferedMsgs, cg.maxBufferedBytes)
 	if err != nil {
 		return err
 	}
@@ -194,7 +194,7 @@ func (cg *cgStruct) deleteStaticAction(_ *fisk.ParseContext) error {
 		_, _ = fmt.Scanln(&confirmation)
 
 		if confirmation != "y" {
-			return errors.New("operation cancelled")
+			return errors.New("operation canceled")
 		}
 	}
 
@@ -215,7 +215,7 @@ func (cg *cgStruct) deleteElasticAction(_ *fisk.ParseContext) error {
 		_, _ = fmt.Scanln(&confirmation)
 
 		if confirmation != "y" {
-			return errors.New("operation cancelled")
+			return errors.New("operation canceled")
 		}
 	}
 
