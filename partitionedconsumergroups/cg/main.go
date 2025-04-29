@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/choria-io/fisk"
-	"github.com/nats-io/jsm.go/natscontext"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/synadia-io/orbit.go/natscontext"
 	"log"
 	"os"
 	"partitioned_stream_consumer_test/pkg/streamconsumergroup"
@@ -20,25 +20,26 @@ import (
 )
 
 type cgStruct struct {
-	streamName         string
-	consumerGroupName  string
-	memberName         string
-	memberNames        []string
-	memberMappingArgs  []string
-	processingDuration time.Duration
-	filter             string
-	maxMembers         uint
-	maxBufferedMsgs    int64
-	maxBufferedBytes   int64
-	pwcis              []int // partitioning wildcard indexes
-	consuming          bool
-	myContextCancel    context.CancelFunc
-	natsContext        string
-	consumerStatic     bool
-	force              bool
-	nc                 *nats.Conn
-	prompt             bool
-	qch                sync.WaitGroup
+	streamName          string
+	consumerGroupName   string
+	memberName          string
+	memberNames         []string
+	memberMappingArgs   []string
+	processingDuration  time.Duration
+	filter              string
+	maxMembers          uint
+	maxBufferedMsgs     int64
+	maxBufferedBytes    int64
+	pwcis               []int // partitioning wildcard indexes
+	consuming           bool
+	myContextCancel     context.CancelFunc
+	natsContext         string
+	natsContextSettings natscontext.Settings
+	consumerStatic      bool
+	force               bool
+	nc                  *nats.Conn
+	prompt              bool
+	qch                 sync.WaitGroup
 }
 
 var (
@@ -521,13 +522,14 @@ func main() {
 
 	var err error
 
-	cg.nc, err = natscontext.Connect(cg.natsContext)
+	cg.nc, cg.natsContextSettings, err = natscontext.Connect(cg.natsContext)
 	if err != nil {
 		log.Fatalf("can't connect using nats CLI context %s %v", cg.natsContext, err)
 	}
+	// TODO get the jetstream.JetStream here using jetstream.NewWithDomain(nc, cg.natsContextSettings.JSDomain) and pass it instead of nc to the functions
+
 	// auto start consuming if all required flags are set
 	app.MustParseWithUsage(os.Args[1:])
-	// fisk.Parse()
 
 	if cg.consuming {
 		fmt.Println("consuming...")
