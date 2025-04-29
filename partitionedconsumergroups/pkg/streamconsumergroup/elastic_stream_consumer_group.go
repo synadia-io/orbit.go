@@ -1,7 +1,6 @@
 package streamconsumergroup
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -335,26 +334,21 @@ func ListElasticConsumerGroups(nc *nats.Conn, streamName string) ([]string, erro
 		return nil, errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
 	}
 
-	lister, _ := kv.ListKeys(ctx)
+	lister, err := kv.ListKeys(ctx)
 	if err != nil {
 		return nil, errors.Join(errors.New("error creating a key lister on the consumer groups' bucket"), err)
 	}
 
 	var consumerGroupNames []string
 
-	for {
-		select {
-		case key, ok := <-lister.Keys():
-			if ok {
-				parts := strings.Split(key, ".")
-				if parts[0] == streamName {
-					consumerGroupNames = append(consumerGroupNames, parts[1])
-				}
-			} else {
-				return consumerGroupNames, nil
-			}
+	for key := range lister.Keys() {
+		parts := strings.Split(key, ".")
+		if parts[0] == streamName {
+			consumerGroupNames = append(consumerGroupNames, parts[1])
 		}
 	}
+
+	return consumerGroupNames, nil
 }
 
 // AddMembers adds members to a consumer group
@@ -600,30 +594,25 @@ func ListElasticActiveMembers(nc *nats.Conn, streamName string, consumerGroupNam
 	}
 
 	lister := s.ListConsumers(ctx)
-	for {
-		select {
-		case cInfo, ok := <-lister.Info():
-			if ok {
-				if len(cGC.Members) != 0 {
-					for _, m := range cGC.Members {
-						if cInfo.Name == m {
-							activeMembers = append(activeMembers, cInfo.Name)
-							break
-						}
-					}
-				} else if len(cGC.MemberMappings) != 0 {
-					for _, mapping := range cGC.MemberMappings {
-						if cInfo.Name == mapping.Member {
-							activeMembers = append(activeMembers, cInfo.Name)
-							break
-						}
-					}
+	for cInfo := range lister.Info() {
+		if len(cGC.Members) != 0 {
+			for _, m := range cGC.Members {
+				if cInfo.Name == m {
+					activeMembers = append(activeMembers, cInfo.Name)
+					break
 				}
-			} else {
-				return activeMembers, nil
+			}
+		} else if len(cGC.MemberMappings) != 0 {
+			for _, mapping := range cGC.MemberMappings {
+				if cInfo.Name == mapping.Member {
+					activeMembers = append(activeMembers, cInfo.Name)
+					break
+				}
 			}
 		}
 	}
+
+	return activeMembers, nil
 }
 
 // ElasticIsInMembershipAndActive checks if a member is included in the consumer group and is active
@@ -655,18 +644,26 @@ func ElasticIsInMembershipAndActive(nc *nats.Conn, streamName string, consumerGr
 	}
 
 	lister := s.ListConsumers(ctx)
-	for {
-		select {
-		case cInfo, ok := <-lister.Info():
-			if ok {
-				if cmp.Compare(cInfo.Name, memberName) == 0 {
-					return inMembership, true, nil
+
+	for cInfo := range lister.Info() {
+		if len(cGC.Members) != 0 {
+			for _, m := range cGC.Members {
+				if cInfo.Name == m {
+					inMembership = true
+					break
 				}
-			} else {
-				return inMembership, false, nil
+			}
+		} else if len(cGC.MemberMappings) != 0 {
+			for _, mapping := range cGC.MemberMappings {
+				if cInfo.Name == mapping.Member {
+					inMembership = true
+					break
+				}
 			}
 		}
 	}
+
+	return inMembership, false, nil
 }
 
 // ElasticMemberStepDown forces the current active instance of a member to step down

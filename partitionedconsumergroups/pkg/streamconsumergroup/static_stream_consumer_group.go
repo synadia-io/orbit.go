@@ -113,7 +113,10 @@ func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consum
 	}
 
 	if instance.CGConfig.IsInMembership(memberName) {
-		instance.joinMemberConsumerStatic(ctx)
+		err = instance.joinMemberConsumerStatic(ctx)
+		if err != nil {
+			return err
+		}
 	} else {
 		return errors.New("the member name is not in the current static consumer group membership")
 	}
@@ -290,26 +293,21 @@ func ListStaticConsumerGroups(nc *nats.Conn, streamName string) ([]string, error
 		return nil, errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
 	}
 
-	lister, _ := kv.ListKeys(ctx)
+	lister, err := kv.ListKeys(ctx)
 	if err != nil {
 		return nil, errors.Join(errors.New("error creating a key lister on the consumer groups' bucket"), err)
 	}
 
 	var consumerGroupNames []string
 
-	for {
-		select {
-		case key, ok := <-lister.Keys():
-			if ok {
-				parts := strings.Split(key, ".")
-				if parts[0] == streamName {
-					consumerGroupNames = append(consumerGroupNames, parts[1])
-				}
-			} else {
-				return consumerGroupNames, nil
-			}
+	for key := range lister.Keys() {
+		parts := strings.Split(key, ".")
+		if parts[0] == streamName {
+			consumerGroupNames = append(consumerGroupNames, parts[1])
 		}
 	}
+
+	return consumerGroupNames, nil
 }
 
 func ListStaticActiveMembers(nc *nats.Conn, streamName string, consumerGroupName string) ([]string, error) {
@@ -339,30 +337,26 @@ func ListStaticActiveMembers(nc *nats.Conn, streamName string, consumerGroupName
 	}
 
 	lister := s.ListConsumers(ctx)
-	for {
-		select {
-		case cInfo, ok := <-lister.Info():
-			if ok {
-				if len(cGC.Members) != 0 {
-					for _, m := range cGC.Members {
-						if cInfo.Name == composeStaticConsumerName(consumerGroupName, m) && cInfo.NumWaiting != 0 {
-							activeMembers = append(activeMembers, m)
-							break
-						}
-					}
-				} else if len(cGC.MemberMappings) != 0 {
-					for _, mapping := range cGC.MemberMappings {
-						if cInfo.Name == composeStaticConsumerName(consumerGroupName, mapping.Member) && cInfo.NumWaiting != 0 {
-							activeMembers = append(activeMembers, mapping.Member)
-							break
-						}
-					}
+
+	for cInfo := range lister.Info() {
+		if len(cGC.Members) != 0 {
+			for _, m := range cGC.Members {
+				if cInfo.Name == composeStaticConsumerName(consumerGroupName, m) && cInfo.NumWaiting != 0 {
+					activeMembers = append(activeMembers, m)
+					break
 				}
-			} else {
-				return activeMembers, nil
+			}
+		} else if len(cGC.MemberMappings) != 0 {
+			for _, mapping := range cGC.MemberMappings {
+				if cInfo.Name == composeStaticConsumerName(consumerGroupName, mapping.Member) && cInfo.NumWaiting != 0 {
+					activeMembers = append(activeMembers, mapping.Member)
+					break
+				}
 			}
 		}
 	}
+
+	return activeMembers, nil
 }
 
 // StaticMemberStepDown forces the current active instance of a member to step down

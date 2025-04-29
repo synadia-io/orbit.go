@@ -151,7 +151,7 @@ func (cg *cgStruct) dropElasticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) createStaticBalancedAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
-	myContext, cg.myContextCancel = context.WithCancel(myContext)
+	_, cg.myContextCancel = context.WithCancel(myContext)
 
 	_, err := streamconsumergroup.CreateStatic(myContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.memberNames, []streamconsumergroup.MemberMapping{})
 	if err != nil {
@@ -165,9 +165,9 @@ func (cg *cgStruct) createStaticMappedAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
 	myContext, cg.myContextCancel = context.WithCancel(myContext)
 
-	memberMappings, err := parseMemberMappings(cg.memberMappingArgs)
+	memberMappings, _ := parseMemberMappings(cg.memberMappingArgs)
 
-	_, err = streamconsumergroup.CreateStatic(myContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, []string{}, memberMappings)
+	_, err := streamconsumergroup.CreateStatic(myContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, []string{}, memberMappings)
 	if err != nil {
 		return err
 	}
@@ -231,7 +231,7 @@ func (cg *cgStruct) deleteElasticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) createElasticMappingAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
-	myContext, cg.myContextCancel = context.WithCancel(myContext)
+	_, cg.myContextCancel = context.WithCancel(myContext)
 
 	var config *streamconsumergroup.ElasticConsumerGroupConfig
 	config, err := streamconsumergroup.GetElasticConsumerGroupConfig(cg.nc, cg.streamName, cg.consumerGroupName)
@@ -239,7 +239,7 @@ func (cg *cgStruct) createElasticMappingAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	config.MemberMappings, err = parseMemberMappings(cg.memberMappingArgs)
+	config.MemberMappings, _ = parseMemberMappings(cg.memberMappingArgs)
 	err = streamconsumergroup.SetMemberMappings(cg.nc, cg.streamName, cg.consumerGroupName, config.MemberMappings)
 	if err != nil {
 		return err
@@ -251,7 +251,7 @@ func (cg *cgStruct) createElasticMappingAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) deleteElasticMappingAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
-	myContext, cg.myContextCancel = context.WithCancel(myContext)
+	_, cg.myContextCancel = context.WithCancel(myContext)
 
 	err := streamconsumergroup.DeleteMemberMappings(cg.nc, cg.streamName, cg.consumerGroupName)
 
@@ -303,7 +303,7 @@ func (cg *cgStruct) memberElasticInfoAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) stepDownStaticAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
-	myContext, cg.myContextCancel = context.WithCancel(myContext)
+	_, cg.myContextCancel = context.WithCancel(myContext)
 
 	err := streamconsumergroup.StaticMemberStepDown(cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName)
 	if err != nil {
@@ -315,7 +315,7 @@ func (cg *cgStruct) stepDownStaticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) stepDownElasticAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
-	myContext, cg.myContextCancel = context.WithCancel(myContext)
+	_, cg.myContextCancel = context.WithCancel(myContext)
 
 	err := streamconsumergroup.ElasticMemberStepDown(cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName)
 	if err != nil {
@@ -352,9 +352,9 @@ func (cg *cgStruct) consume(myContext context.Context, nc *nats.Conn, streamName
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	}
 
-	go func() {
-		cg.qch.Add(1)
+	cg.qch.Add(1)
 
+	go func() {
 		if cg.consumerStatic {
 			err = streamconsumergroup.StaticConsume(myContext, nc, streamName, consumerGroupName, memberName, messageHandler, config)
 		} else {
@@ -632,7 +632,6 @@ func prompt() {
 			}
 			if err != nil {
 				fmt.Printf("error: can't list partitioned consumer groups: %v\n", err)
-				break
 			}
 		case "add":
 			var memberNameInput string
@@ -663,7 +662,6 @@ func prompt() {
 
 			if err != nil {
 				fmt.Printf("can't add members: %v", err)
-				break
 			}
 		case "drop":
 			var memberNameInput string
@@ -693,7 +691,6 @@ func prompt() {
 
 			if err != nil {
 				fmt.Printf("can't drop members: %v", err)
-				break
 			}
 		case "createmapping", "create-mapping", "cm":
 			var err error
@@ -719,7 +716,6 @@ func prompt() {
 
 			if err != nil {
 				fmt.Printf("can't set member mappings: %v", err)
-				break
 			} else {
 				fmt.Printf("member mappings set: %+v\n", memberMappings)
 			}
@@ -746,105 +742,64 @@ func prompt() {
 			err = streamconsumergroup.DeleteMemberMappings(cg.nc, cg.streamName, cg.consumerGroupName)
 			if err != nil {
 				fmt.Printf("can't delete member mappings: %v", err)
-				break
 			} else {
 				fmt.Printf("member mappings deleted")
 			}
 		case "create":
-			var err error
+			fmt.Print("stream name: ")
+			_, _ = fmt.Scanln(&cg.streamName)
+			fmt.Print("consumer group name: ")
+			_, _ = fmt.Scanln(&cg.consumerGroupName)
+			fmt.Print("max members: ")
+			_, _ = fmt.Scanf("%d", &cg.maxMembers)
+			fmt.Print("filter: ")
+			_, _ = fmt.Scanln(&cg.filter)
+			if cg.consumerStatic {
+				fmt.Print("space separated set of members (hit return to set member mappings instead): ")
+				memberNameInput, _ := r.ReadString('\n')
+				memberNameInput = strings.TrimSpace(memberNameInput)
+				cg.memberNames = strings.Split(memberNameInput, " ")
 
-			if len(args) < 6 {
-				fmt.Print("stream name: ")
-				_, _ = fmt.Scanln(&cg.streamName)
-				fmt.Print("consumer group name: ")
-				_, _ = fmt.Scanln(&cg.consumerGroupName)
-				fmt.Print("max members: ")
-				_, _ = fmt.Scanf("%d", &cg.maxMembers)
-				fmt.Print("filter: ")
-				_, _ = fmt.Scanln(&cg.filter)
-				if cg.consumerStatic {
-					fmt.Print("space separated set of members (hit return to set member mappings instead): ")
-					memberNameInput, _ := r.ReadString('\n')
-					memberNameInput = strings.TrimSpace(memberNameInput)
-					cg.memberNames = strings.Split(memberNameInput, " ")
-
-					if len(cg.memberNames) == 1 && cg.memberNames[0] == "" {
-						fmt.Printf("enter the member mappings\n")
-						cg.memberMappingArgs = inputMemberMappings()
-						if len(cg.memberMappingArgs) == 0 {
-							fmt.Printf("member mappings not defined, can't create the paritioned consumer group")
-							break
-						}
-
-						err := cg.createStaticBalancedAction(nil)
-						if err != nil {
-							fmt.Printf("can't create static partitioned consumer group: %v", err)
-							break
-						}
-					} else {
-						err := cg.createStaticMappedAction(nil)
-						if err != nil {
-							fmt.Printf("can't create static partitioned consumer group: %v", err)
-							break
-						}
+				if len(cg.memberNames) == 1 && cg.memberNames[0] == "" {
+					fmt.Printf("enter the member mappings\n")
+					cg.memberMappingArgs = inputMemberMappings()
+					if len(cg.memberMappingArgs) == 0 {
+						fmt.Printf("member mappings not defined, can't create the paritioned consumer group")
+						break
 					}
-				} else { // Elastic
-					fmt.Print("space separated partitioning wildcard indexes: ")
-					pwciInput, _ := r.ReadString('\n')
-					pwciInput = strings.TrimSpace(pwciInput)
-					pwciArgs := strings.Split(pwciInput, " ")
-					fmt.Print("max buffered messages (0 for no limit): ")
-					_, _ = fmt.Scanf("%d", &cg.maxBufferedMsgs)
-					fmt.Print("max buffered bytes (0 for no limit): ")
-					_, _ = fmt.Scanf("%d", &cg.maxBufferedBytes)
 
-					cg.pwcis = make([]int, len(pwciArgs))
-
-					for i, pwci := range pwciArgs {
-						var err error
-						cg.pwcis[i], err = strconv.Atoi(pwci)
-						if err != nil {
-							fmt.Printf("can't parse partition %s: %v", pwci, err)
-							break
-						}
+					err := cg.createStaticMappedAction(nil)
+					if err != nil {
+						fmt.Printf("can't create static partitioned consumer group: %v", err)
+						break
+					}
+				} else {
+					err := cg.createStaticBalancedAction(nil)
+					if err != nil {
+						fmt.Printf("can't create static partitioned consumer group: %v", err)
+						break
 					}
 				}
-			} else {
-				cg.streamName = args[0]
-				cg.consumerGroupName = args[1]
-				mm, err := strconv.Atoi(args[2])
-				if err != nil {
-					fmt.Printf("can't parse max members: %v", err)
-					break
-				}
+			} else { // Elastic
+				fmt.Print("space separated partitioning wildcard indexes: ")
+				pwciInput, _ := r.ReadString('\n')
+				pwciInput = strings.TrimSpace(pwciInput)
+				pwciArgs := strings.Split(pwciInput, " ")
+				fmt.Print("max buffered messages (0 for no limit): ")
+				_, _ = fmt.Scanf("%d", &cg.maxBufferedMsgs)
+				fmt.Print("max buffered bytes (0 for no limit): ")
+				_, _ = fmt.Scanf("%d", &cg.maxBufferedBytes)
 
-				cg.maxMembers = uint(mm)
-				cg.filter = args[3]
-				pwciArgs := strings.Split(args[4], ",")
 				cg.pwcis = make([]int, len(pwciArgs))
 
 				for i, pwci := range pwciArgs {
+					var err error
 					cg.pwcis[i], err = strconv.Atoi(pwci)
 					if err != nil {
 						fmt.Printf("can't parse partition %s: %v", pwci, err)
 						break
 					}
 				}
-
-				maxBufferedMsgs, err := strconv.Atoi(args[5])
-				if err != nil {
-					fmt.Printf("can't parse max buffered messages: %v", err)
-					break
-				}
-				cg.maxBufferedMsgs = int64(maxBufferedMsgs)
-			}
-
-			myContext := context.Background()
-			myContext, cg.myContextCancel = context.WithCancel(myContext)
-
-			err = cg.createElasticAction(nil)
-			if err != nil {
-				fmt.Printf("can't create partitioned consumer group: %v", err)
 			}
 		case "delete", "rm":
 			if len(args) != 2 {
@@ -865,7 +820,6 @@ func prompt() {
 			}
 			if err != nil {
 				fmt.Printf("can't delete paritioned consumer group: %v", err)
-				break
 			}
 		case "info":
 			if len(args) != 2 {
@@ -882,13 +836,11 @@ func prompt() {
 				err = cg.infoStaticAction(nil)
 				if err != nil {
 					fmt.Printf("can't get static partitioned consumer group config: %v", err)
-					break
 				}
 			} else {
 				err = cg.infoElasticAction(nil)
 				if err != nil {
 					fmt.Printf("can't get elastic partitioned consumer group config: %v", err)
-					break
 				}
 			}
 		case "memberinfo", "member-info", "minfo":
@@ -933,9 +885,9 @@ func prompt() {
 			}
 			if err != nil {
 				fmt.Printf("can't step down member: %v", err)
-				break
+			} else {
+				fmt.Printf("member %s step down initiated", cg.memberName)
 			}
-			fmt.Printf("member %s step down initiated", cg.memberName)
 		case "consume", "join":
 			if cg.consuming {
 				fmt.Println("already consuming")
@@ -1000,7 +952,7 @@ func parseMemberMappings(mappings []string) ([]streamconsumergroup.MemberMapping
 	for _, mapping := range mappings {
 		memberName, partitionsInput, found := strings.Cut(mapping, ":")
 		if !found {
-			return nil, errors.New(fmt.Sprintf("can't parse member mapping %s: missing ':'", mapping))
+			return nil, fmt.Errorf("can't parse member mapping %s: missing ':'", mapping)
 		}
 		partitionsArgs := strings.Split(partitionsInput, ",")
 

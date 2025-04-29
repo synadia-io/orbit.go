@@ -25,11 +25,6 @@ func composeKey(streamName string, consumerGroupName string) string {
 	return streamName + "." + consumerGroupName
 }
 
-// Compose the priority group name
-func composePriorityGroupName(consumerGroupName string) string {
-	return "consumer-group-" + consumerGroupName
-}
-
 // jetstream.Msg shim to strip the partition number from the subject
 func newConsumerGroupMsg(msg jetstream.Msg) *ConsumerGroupMsg {
 	return &ConsumerGroupMsg{msg: msg}
