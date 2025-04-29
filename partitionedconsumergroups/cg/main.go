@@ -862,6 +862,9 @@ func prompt() {
 			} else {
 				err = cg.memberElasticInfoAction(nil)
 			}
+			if err != nil {
+				fmt.Printf("can't get partitioned consumer group member info: %v", err)
+			}
 		case "stepdown", "step-down", "sd":
 
 			if len(args) != 3 {
