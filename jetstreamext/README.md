@@ -1,4 +1,4 @@
-# Core NATS Extensions
+# NATS JetStream Extensions
 
 [License-Url]: https://www.apache.org/licenses/LICENSE-2.0
 [License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
