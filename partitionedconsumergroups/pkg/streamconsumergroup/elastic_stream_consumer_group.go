@@ -710,9 +710,18 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer
 	config.PriorityPolicy = jetstream.PriorityPolicyPinned
 	config.PinnedTTL = config.AckWait
 
-	consumerInstance.Consumer, err = consumerInstance.js.CreateOrUpdateConsumer(ctx, composeCGSName(consumerInstance.StreamName, consumerInstance.ConsumerGroupName), config)
+	consumerInstance.Consumer, err = consumerInstance.js.CreateConsumer(ctx, composeCGSName(consumerInstance.StreamName, consumerInstance.ConsumerGroupName), config)
 	if err != nil {
-		// not logging anything here as this is expected to happen in many recoverable failure scenarios
+		if errors.Is(err, jetstream.ErrConsumerExists) {
+			// try to delete the consumer if we can't create it to our desired config, we or someone else will try to re-create it within 5 seconds
+			err := consumerInstance.js.DeleteConsumer(ctx, composeCGSName(consumerInstance.StreamName, consumerInstance.ConsumerGroupName), consumerInstance.MemberName)
+			if err != nil {
+				log.Printf("Warning: error trying to delete our member's consumer after trying to create it to our desired config: %v\n", err)
+				return
+			}
+		}
+		// not logging because some errors can happen during normal operation
+		// e.g. JS API error: filtered consumer not unique on workqueue stream can happen because all the members cannot be perfectly synchronized processing membership changes
 		return
 	}
 

@@ -821,7 +821,7 @@ func prompt() {
 				cg.memberNames = strings.Split(memberNameInput, " ")
 
 				if len(cg.memberNames) == 1 && cg.memberNames[0] == "" {
-					fmt.Printf("enter the member mappings\n")
+					fmt.Println("enter the member mappings")
 					cg.memberMappingArgs = inputMemberMappings()
 					if len(cg.memberMappingArgs) == 0 {
 						fmt.Printf("member mappings not defined, can't create the paritioned consumer group")
@@ -830,14 +830,18 @@ func prompt() {
 
 					err := cg.createStaticMappedAction(nil)
 					if err != nil {
-						fmt.Printf("can't create static partitioned consumer group: %v", err)
+						fmt.Printf("can't create static partitioned consumer group: %v\n", err)
 						break
+					} else {
+						fmt.Println("static partitioned consumer group created")
 					}
 				} else {
 					err := cg.createStaticBalancedAction(nil)
 					if err != nil {
-						fmt.Printf("can't create static partitioned consumer group: %v", err)
+						fmt.Printf("can't create static partitioned consumer group: %v\n", err)
 						break
+					} else {
+						fmt.Println("static partitioned consumer group created")
 					}
 				}
 			} else { // Elastic
@@ -859,6 +863,13 @@ func prompt() {
 						fmt.Printf("can't parse partition %s: %v", pwci, err)
 						break
 					}
+				}
+				err := cg.createElasticAction(nil)
+				if err != nil {
+					fmt.Printf("can't create elastic partitioned consumer group: %v", err)
+					break
+				} else {
+					fmt.Println("elastic partitioned consumer group created")
 				}
 			}
 		case "delete", "rm":
