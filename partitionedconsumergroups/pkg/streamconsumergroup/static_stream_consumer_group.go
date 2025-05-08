@@ -243,7 +243,7 @@ func CreateStatic(ctx context.Context, nc *nats.Conn, streamName string, consume
 func DeleteStatic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
-		return fmt.Errorf("Couldn't get the JetStream instance: %w", err)
+		return fmt.Errorf("couldn't get the JetStream instance: %w", err)
 	}
 
 	// First delete the config bucket's entry all the consumers for the consumer group
