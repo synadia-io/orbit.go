@@ -49,11 +49,11 @@ type ElasticConsumerGroupConsumerInstance struct {
 type ElasticConsumerGroupConfig struct {
 	MaxMembers            uint            `json:"max_members"`
 	Filter                string          `json:"filter"`
-	PartitioningWildcards []int           `json:"partitioning-wildcards"`
-	MaxBufferedMsgs       int64           `json:"max-buffered-msg,omitempty"`
-	MaxBufferedBytes      int64           `json:"max-buffered-bytes,omitempty"`
+	PartitioningWildcards []int           `json:"partitioning_wildcards"`
+	MaxBufferedMsgs       int64           `json:"max_buffered_msg,omitempty"`
+	MaxBufferedBytes      int64           `json:"max_buffered_bytes,omitempty"`
 	Members               []string        `json:"members,omitempty"`
-	MemberMappings        []MemberMapping `json:"member-mappings,omitempty"`
+	MemberMappings        []MemberMapping `json:"member_mappings,omitempty"`
 }
 
 func (config *ElasticConsumerGroupConfig) IsInMembership(name string) bool {
@@ -62,19 +62,15 @@ func (config *ElasticConsumerGroupConfig) IsInMembership(name string) bool {
 }
 
 // GetElasticConsumerGroupConfig gets the consumer group's config from the KV bucket
-func GetElasticConsumerGroupConfig(nc *nats.Conn, streamName string, consumerGroupName string) (*ElasticConsumerGroupConfig, error) {
+func GetElasticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) (*ElasticConsumerGroupConfig, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
-		return nil, errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
+		return nil, fmt.Errorf("the elastic consumer group KV bucket doesn't exist: %w", err)
 	}
 
 	return getElasticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
@@ -84,26 +80,17 @@ func GetElasticConsumerGroupConfig(nc *nats.Conn, streamName string, consumerGro
 // meant to be used in a go routine
 func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig) error {
 	var err error
-
-	instance := ElasticConsumerGroupConsumerInstance{
-		StreamName:             streamName,
-		ConsumerGroupName:      consumerGroupName,
-		MemberName:             memberName,
-		CConfig:                config,
-		Config:                 nil,
-		Consumer:               nil,
-		ConsumerConsumeContext: nil,
-		CurrentPID:             "",
-		MessageHandlerCB:       nil,
-		js:                     nil,
-		kv:                     nil,
-	}
-
 	if messageHandler == nil {
 		return errors.New("a message handler must be provided")
 	}
 
-	instance.MessageHandlerCB = messageHandler
+	instance := ElasticConsumerGroupConsumerInstance{
+		StreamName:        streamName,
+		ConsumerGroupName: consumerGroupName,
+		MemberName:        memberName,
+		CConfig:           config,
+		MessageHandlerCB:  messageHandler,
+	}
 
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -114,12 +101,12 @@ func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consu
 
 	_, err = js.Stream(ctx, composeCGSName(streamName, consumerGroupName))
 	if err != nil {
-		return errors.Join(errors.New("the consumer group's stream does not exist"), err)
+		return fmt.Errorf("the elastic consumer group's stream does not exist: %w", err)
 	}
 
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
-		return errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
+		return fmt.Errorf("the elastic consumer group KV bucket doesn't exist: %w", err)
 	}
 
 	instance.kv = kv
@@ -127,7 +114,7 @@ func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consu
 	// Try to get the current config if there's one
 	instance.Config, err = getElasticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
 	if err != nil {
-		return errors.Join(errors.New("can not get the current consumer group's config"), err)
+		return fmt.Errorf("can not get the current elastic consumer group's config: %w", err)
 	}
 
 	if instance.Config.IsInMembership(memberName) {
@@ -141,49 +128,49 @@ func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consu
 	for {
 		select {
 		case updateMsg, ok := <-watcher.Updates():
-			if ok {
-				if updateMsg != nil {
-					if updateMsg.Operation() == jetstream.KeyValueDelete {
-						instance.stop()
-
-						return errors.New(" consumer group config has been deleted")
-					}
-
-					var newConfig ElasticConsumerGroupConfig
-					err := json.Unmarshal(updateMsg.Value(), &newConfig)
-					if err != nil {
-						// Human error is very possible if they put the config messages directly (e.g. using `nats kv put`)
-						// Best to ignore or better to error out?
-						log.Printf("Error:  consumer group %s config watcher received and is ignoring a bad JSON message", composeCGSName(streamName, memberName))
-						break
-					}
-
-					err = validateConfig(newConfig)
-					if err != nil {
-						// same question ignore or error out?
-						log.Printf("Error:  consumer group %s config watcher received and is ignoring an invalid config", composeCGSName(streamName, memberName))
-						break
-					}
-
-					if newConfig.MaxMembers != instance.Config.MaxMembers ||
-						newConfig.Filter != instance.Config.Filter || newConfig.MaxBufferedMsgs != instance.Config.MaxBufferedMsgs || newConfig.MaxBufferedBytes != instance.Config.MaxBufferedBytes ||
-						!reflect.DeepEqual(newConfig.PartitioningWildcards, instance.Config.PartitioningWildcards) {
-						log.Printf(" consumer group %s config watcher received a change in the configuration, terminating", composeCGSName(streamName, memberName))
-						instance.stop()
-						return errors.New(" consumer group config max number of members, buffered messages, filter or partitioning wildcards changed")
-					}
-					// new config looks ok to use
-
-					// optimization if nothing changed and already have the consumer for that member
-					if instance.Consumer != nil && reflect.DeepEqual(newConfig.Members, instance.Config.Members) && reflect.DeepEqual(newConfig.MemberMappings, instance.Config.MemberMappings) {
-						break
-					}
-
-					instance.Config.Members = newConfig.Members
-					instance.Config.MemberMappings = newConfig.MemberMappings
-					instance.processMembershipChange(ctx)
-				}
+			if !ok {
+				instance.stop()
+				return errors.New("the elastic consumer group config watcher has been closed, stopping")
 			}
+
+			if updateMsg == nil {
+				break
+			}
+
+			// If the message is a delete operation, we stop and return
+			if updateMsg.Operation() == jetstream.KeyValueDelete {
+				instance.stop()
+				return nil
+			}
+
+			var newConfig ElasticConsumerGroupConfig
+			err := json.Unmarshal(updateMsg.Value(), &newConfig)
+			if err != nil {
+				return fmt.Errorf("elastic consumer group %s config watcher received a bad JSON message: %w", composeKey(streamName, consumerGroupName), err)
+			}
+
+			err = validateConfig(newConfig)
+			if err != nil {
+				return fmt.Errorf("elastic consumer group %s config watcher received an invalid config: %w", composeKey(streamName, consumerGroupName), err)
+			}
+
+			if newConfig.MaxMembers != instance.Config.MaxMembers ||
+				newConfig.Filter != instance.Config.Filter || newConfig.MaxBufferedMsgs != instance.Config.MaxBufferedMsgs || newConfig.MaxBufferedBytes != instance.Config.MaxBufferedBytes ||
+				!reflect.DeepEqual(newConfig.PartitioningWildcards, instance.Config.PartitioningWildcards) {
+				instance.stop()
+				return fmt.Errorf("elastic consumer group config %s watcher received a bad change in the configuration: max number of members, buffered messages, filter or partitioning wildcards changed", composeCGSName(streamName, memberName))
+			}
+			// new config looks ok to use
+
+			// optimization if nothing changed and already have the consumer for that member
+			if instance.Consumer != nil && reflect.DeepEqual(newConfig.Members, instance.Config.Members) && reflect.DeepEqual(newConfig.MemberMappings, instance.Config.MemberMappings) {
+				break
+			}
+
+			instance.Config.Members = newConfig.Members
+			instance.Config.MemberMappings = newConfig.MemberMappings
+			instance.processMembershipChange(ctx)
+
 		case <-ctx.Done():
 			instance.stop()
 			return nil
@@ -208,14 +195,14 @@ func CreateElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 
 	err := validateConfig(config)
 	if err != nil {
-		return nil, errors.Join(errors.New("invalid consumer group config"), err)
+		return nil, fmt.Errorf("invalid elastic consumer group config: %w", err)
 	}
 
 	filterDest := getPartitioningTransformDest(config)
 
 	js, err := jetstream.New(nc)
 	if err != nil {
-		log.Fatalf("Couldn't get the JetStream instance: %v", err)
+		return nil, fmt.Errorf("couldn't get the JetStream instance:: %w", err)
 	}
 
 	stream, err := js.Stream(ctx, streamName)
@@ -268,7 +255,7 @@ func CreateElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 		}
 
 		if consumerGroupConfig.MaxMembers != maxNumMembers || consumerGroupConfig.Filter != filter || !slices.Equal(consumerGroupConfig.PartitioningWildcards, partitioningWildcards) {
-			return nil, errors.New("the existing consumer group config doesn't match ours")
+			return nil, errors.New("the existing elastic consumer group config can not be updated to the requested one, please delete the existing elastic consumer group and create a new one")
 		}
 	}
 
@@ -298,7 +285,7 @@ func CreateElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 		AllowDirect: true,
 	})
 	if err != nil {
-		return nil, errors.Join(errors.New("can't create the consumer group's stream"), err)
+		return nil, fmt.Errorf("can't create the elastic consumer group's stream: %w", err)
 	}
 
 	return &consumerGroupConfig, nil
@@ -308,7 +295,7 @@ func CreateElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 func DeleteElastic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
-		log.Fatalf("Couldn't get the JetStream instance: %v", err)
+		return fmt.Errorf("couldn't get the JetStream instance: %w", err)
 	}
 
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
@@ -319,37 +306,33 @@ func DeleteElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 	// First delete the PCG's entry in the KV bucket
 	err = kv.Delete(ctx, composeKey(streamName, consumerGroupName))
 	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
-		return errors.New("error deleting the consumer groups' configs")
+		return errors.New("error deleting the elastic consumer groups' configs")
 	}
 
 	// Then delete the PCG's stream
 	err = js.DeleteStream(ctx, composeCGSName(streamName, consumerGroupName))
 	if err != nil {
-		return errors.Join(errors.New("could not delete the consumer group's stream"), err)
+		return fmt.Errorf("could not delete the elastic consumer group's stream: %w", err)
 	}
 
 	return nil
 }
 
 // ListElasticConsumerGroups lists the consumer groups for a given stream
-func ListElasticConsumerGroups(nc *nats.Conn, streamName string) ([]string, error) {
+func ListElasticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName string) ([]string, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
-		return nil, errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
+		return nil, fmt.Errorf("error getting elastic consumer group KV bucket: %w", err)
 	}
 
 	lister, err := kv.ListKeys(ctx)
 	if err != nil {
-		return nil, errors.Join(errors.New("error creating a key lister on the consumer groups' bucket"), err)
+		return nil, fmt.Errorf("error creating a key lister on the elastic consumer groups' bucket: %w", err)
 	}
 
 	var consumerGroupNames []string
@@ -365,9 +348,9 @@ func ListElasticConsumerGroups(nc *nats.Conn, streamName string) ([]string, erro
 }
 
 // AddMembers adds members to a consumer group
-func AddMembers(nc *nats.Conn, streamName string, consumerGroupName string, memberNamesToAdd []string) ([]string, error) {
+func AddMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberNamesToAdd []string) ([]string, error) {
 	if streamName == "" || consumerGroupName == "" || len(memberNamesToAdd) == 0 {
-		return nil, errors.New("invalid stream name or consumer group name or no member names")
+		return nil, errors.New("invalid stream name or elastic consumer group name or no member names")
 	}
 
 	js, err := jetstream.New(nc)
@@ -375,25 +358,21 @@ func AddMembers(nc *nats.Conn, streamName string, consumerGroupName string, memb
 		return nil, err
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
-		return nil, errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
+		return nil, fmt.Errorf("the elastic consumer group KV bucket doesn't exist: %w", err)
 	}
 
 	// Get the consumer group config
 	consumerGroupConfig, err := getElasticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
 	if err != nil {
-		return nil, errors.Join(errors.New("can not get the current consumer group's config"), err)
+		return nil, fmt.Errorf("can not get the current elastic consumer group's config: %w", err)
 	}
 
 	var existingMembers = make(map[string]struct{})
 
 	if len(consumerGroupConfig.MemberMappings) != 0 {
-		return nil, errors.New("can't add members to a consumer group that uses member mappings")
+		return nil, errors.New("can't add members to an elastic consumer group that uses member mappings")
 	}
 
 	for _, existingMember := range consumerGroupConfig.Members {
@@ -415,22 +394,22 @@ func AddMembers(nc *nats.Conn, streamName string, consumerGroupName string, memb
 
 	marshaled, err := json.Marshal(consumerGroupConfig)
 	if err != nil {
-		return nil, errors.Join(errors.New("couldn't marshall the consumer group's config"), err)
+		return nil, fmt.Errorf("couldn't marshall the elastic consumer group's config: %w", err)
 	}
 
 	// update the config record
 	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshaled)
 	if err != nil {
-		return nil, errors.Join(errors.New("couldn't put the consumer group's config in the bucket"), err)
+		return nil, fmt.Errorf("couldn't put the elastic consumer group's config in the bucket: %w", err)
 	}
 
 	return consumerGroupConfig.Members, nil
 }
 
 // DeleteMembers drops members from a consumer group
-func DeleteMembers(nc *nats.Conn, streamName string, consumerGroupName string, memberNamesToDrop []string) ([]string, error) {
+func DeleteMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberNamesToDrop []string) ([]string, error) {
 	if streamName == "" || consumerGroupName == "" || len(memberNamesToDrop) == 0 {
-		return nil, errors.New("invalid stream name or consumer group name or no member names")
+		return nil, errors.New("invalid stream name or elastic consumer group name or no member names")
 	}
 
 	js, err := jetstream.New(nc)
@@ -438,25 +417,21 @@ func DeleteMembers(nc *nats.Conn, streamName string, consumerGroupName string, m
 		return nil, err
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
-		return nil, errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
+		return nil, fmt.Errorf("the elastic consumer group KV bucket doesn't exist: %w", err)
 	}
 
-	// Get or create the consumer group config
+	// Get the consumer group config
 	consumerGroupConfig, err := getElasticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
 	if err != nil {
-		return nil, errors.Join(errors.New("can not get the current consumer group's config"), err)
+		return nil, fmt.Errorf("can not get the current elastic consumer group's config: %w", err)
 	}
 
-	var droppingMembers = make(map[string]struct{})
+	droppingMembers := make(map[string]struct{})
 
 	if len(consumerGroupConfig.MemberMappings) != 0 {
-		return nil, errors.New("can't drop members from a consumer group that uses member mappings")
+		return nil, errors.New("can't drop members from a elastic consumer group that uses member mappings")
 	}
 
 	for _, droppingMember := range memberNamesToDrop {
@@ -475,22 +450,22 @@ func DeleteMembers(nc *nats.Conn, streamName string, consumerGroupName string, m
 
 	marshaled, err := json.Marshal(consumerGroupConfig)
 	if err != nil {
-		return nil, errors.Join(errors.New("couldn't marshall the consumer group's config"), err)
+		return nil, fmt.Errorf("couldn't marshall the elastic consumer group's config: %w", err)
 	}
 
 	// update the config record
 	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshaled)
 	if err != nil {
-		return nil, errors.Join(errors.New("couldn't put the consumer group's config in the bucket"), err)
+		return nil, fmt.Errorf("couldn't put the elastic consumer group's config in the bucket: %w", err)
 	}
 
 	return consumerGroupConfig.Members, nil
 }
 
 // SetMemberMappings sets the custom member mappings for a consumer group
-func SetMemberMappings(nc *nats.Conn, streamName string, consumerGroupName string, memberMappings []MemberMapping) error {
+func SetMemberMappings(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberMappings []MemberMapping) error {
 	if streamName == "" || consumerGroupName == "" || len(memberMappings) == 0 {
-		return errors.New("invalid stream name or consumer group name or member mappings")
+		return errors.New("invalid stream name or elastic consumer group name or member mappings")
 	}
 
 	js, err := jetstream.New(nc)
@@ -498,19 +473,15 @@ func SetMemberMappings(nc *nats.Conn, streamName string, consumerGroupName strin
 		return err
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
-		return errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
+		return fmt.Errorf("the elastic consumer group KV bucket doesn't exist: %w", err)
 	}
 
 	// Get the consumer group config
 	consumerGroupConfig, err := getElasticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
 	if err != nil {
-		return errors.Join(errors.New("can not get the current consumer group's config"), err)
+		return fmt.Errorf("can not get the current elastic consumer group's config: %w", err)
 	}
 
 	if len(consumerGroupConfig.Members) != 0 {
@@ -521,27 +492,27 @@ func SetMemberMappings(nc *nats.Conn, streamName string, consumerGroupName strin
 
 	err = validateConfig(*consumerGroupConfig)
 	if err != nil {
-		return errors.Join(errors.New("invalid consumer group config"), err)
+		return fmt.Errorf("invalid elastic consumer group config: %w", err)
 	}
 
 	marshaled, err := json.Marshal(consumerGroupConfig)
 	if err != nil {
-		return errors.Join(errors.New("couldn't marshall the consumer group's config"), err)
+		return fmt.Errorf("couldn't marshall the elastic consumer group's config: %w", err)
 	}
 
 	// update the config record
 	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshaled)
 	if err != nil {
-		return errors.Join(errors.New("couldn't put the consumer group's config in the bucket"), err)
+		return fmt.Errorf("couldn't put the elastic consumer group's config in the bucket: %w", err)
 	}
 
 	return nil
 }
 
 // DeleteMemberMappings deletes the custom member mappings for a consumer group
-func DeleteMemberMappings(nc *nats.Conn, streamName string, consumerGroupName string) error {
+func DeleteMemberMappings(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) error {
 	if streamName == "" || consumerGroupName == "" {
-		return errors.New("invalid stream name or consumer group name or member mappings")
+		return errors.New("invalid stream name or elastic consumer group name or member mappings")
 	}
 
 	js, err := jetstream.New(nc)
@@ -549,46 +520,39 @@ func DeleteMemberMappings(nc *nats.Conn, streamName string, consumerGroupName st
 		return err
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
-		return errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
+		return fmt.Errorf("the elastic consumer group KV bucket doesn't exist: %w", err)
 	}
 
 	// Get the consumer group config
 	consumerGroupConfig, err := getElasticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
 	if err != nil {
-		return errors.Join(errors.New("can not get the current consumer group's config"), err)
+		return fmt.Errorf("can not get the current elastic consumer group's config: %w", err)
 	}
 
 	consumerGroupConfig.MemberMappings = []MemberMapping{}
 
 	marshaled, err := json.Marshal(consumerGroupConfig)
 	if err != nil {
-		return errors.Join(errors.New("couldn't marshall the consumer group's config"), err)
+		return fmt.Errorf("couldn't marshall the elastic consumer group's config: %w", err)
 	}
 
 	// update the config record
 	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshaled)
 	if err != nil {
-		return errors.Join(errors.New("couldn't put the consumer group's config in the bucket"), err)
+		return fmt.Errorf("couldn't put the elastic consumer group's config in the bucket: %w", err)
 	}
 
 	return nil
 }
 
-func ListElasticActiveMembers(nc *nats.Conn, streamName string, consumerGroupName string) ([]string, error) {
+func ListElasticActiveMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) ([]string, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
-	defer cancel()
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
 		return nil, err
@@ -629,15 +593,11 @@ func ListElasticActiveMembers(nc *nats.Conn, streamName string, consumerGroupNam
 }
 
 // ElasticIsInMembershipAndActive checks if a member is included in the consumer group and is active
-func ElasticIsInMembershipAndActive(nc *nats.Conn, streamName string, consumerGroupName string, memberName string) (bool, bool, error) {
+func ElasticIsInMembershipAndActive(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string) (bool, bool, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return false, false, err
 	}
-
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
-	defer cancel()
 
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
@@ -680,15 +640,11 @@ func ElasticIsInMembershipAndActive(nc *nats.Conn, streamName string, consumerGr
 }
 
 // ElasticMemberStepDown forces the current active instance of a member to step down
-func ElasticMemberStepDown(nc *nats.Conn, streamName string, consumerGroupName string, memberName string) error {
+func ElasticMemberStepDown(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return err
 	}
-
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
 	s, err := js.Stream(ctx, composeCGSName(streamName, consumerGroupName))
 	if err != nil {
@@ -696,11 +652,7 @@ func ElasticMemberStepDown(nc *nats.Conn, streamName string, consumerGroupName s
 	}
 
 	err = s.UnpinConsumer(ctx, memberName, memberName)
-	if err != nil {
-		log.Printf("Error trying to unpin our member's consumer: %v\n", err)
-		return err
-	}
-	return nil
+	return err
 }
 
 // ElasticGetPartitionFilters For the given ElasticConsumerGroupConfig returns the list of partition filters for a given member
@@ -787,12 +739,9 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) processMembershipC
 
 	if consumerInstance.Consumer != nil {
 		ci, err := consumerInstance.Consumer.Info(ctx)
-		if err == nil { // ignoring error ad the consumer may not exist yet
+		if err == nil { // ignoring error as the consumer may not exist yet
 			if slices.ContainsFunc(ci.PriorityGroups, func(pg jetstream.PriorityGroupState) bool {
-				if pg.Group == consumerInstance.MemberName && pg.PinnedClientID == consumerInstance.CurrentPID {
-					return true
-				}
-				return false
+				return pg.Group == consumerInstance.MemberName && pg.PinnedClientID == consumerInstance.CurrentPID
 			}) {
 				isPinned = true
 			}
@@ -859,7 +808,7 @@ func validateConfig(config ElasticConsumerGroupConfig) error {
 		return errors.New("the number of partitioning wildcards must be between 1 and the total number of * wildcards in the filter")
 	}
 
-	pwcs := make(map[int]any) // partitioning wildcard presence
+	pwcs := make(map[int]struct{}) // partitioning wildcard presence
 
 	for _, pWildcard := range config.PartitioningWildcards {
 		if _, ok := pwcs[pWildcard]; ok {
@@ -885,8 +834,8 @@ func validateConfig(config ElasticConsumerGroupConfig) error {
 			return errors.New("the number of member mappings must be between 1 and the max number of members")
 		}
 
-		members := make(map[string]any)
-		partitions := make(map[int]any)
+		members := make(map[string]struct{})
+		partitions := make(map[int]struct{})
 
 		for _, mm := range config.MemberMappings {
 			if _, ok := members[mm.Member]; ok {
@@ -930,7 +879,6 @@ func getPartitioningTransformDest(config ElasticConsumerGroupConfig) string {
 	}
 
 	wildcardList := strings.Join(wildcards, ",")
-	var destFromFilter string
 	cwIndex := 1
 	filterTokens := strings.Split(config.Filter, ".")
 
@@ -941,21 +889,21 @@ func getPartitioningTransformDest(config ElasticConsumerGroupConfig) string {
 		}
 	}
 
-	destFromFilter = strings.Join(filterTokens, ".")
+	destFromFilter := strings.Join(filterTokens, ".")
 	return fmt.Sprintf("{{Partition(%d,%s)}}.%s", config.MaxMembers, wildcardList, destFromFilter)
 }
 
 func getElasticConsumerGroupConfig(ctx context.Context, kv jetstream.KeyValue, streamName string, consumerGroupName string) (*ElasticConsumerGroupConfig, error) {
 	if streamName == "" || consumerGroupName == "" {
-		return nil, errors.New("invalid stream name or consumer group name")
+		return nil, errors.New("invalid stream name or elastic consumer group name")
 	}
 
 	message, err := kv.Get(ctx, composeKey(streamName, consumerGroupName))
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, errors.New("error getting the consumer group's config: not found")
+			return nil, errors.New("error getting the elastic consumer group's config: not found")
 		} else {
-			return nil, errors.Join(errors.New("error getting the consumer group's config"), err)
+			return nil, fmt.Errorf("error getting the elastic consumer group's config: %w", err)
 		}
 	}
 
@@ -963,12 +911,12 @@ func getElasticConsumerGroupConfig(ctx context.Context, kv jetstream.KeyValue, s
 
 	err = json.Unmarshal(message.Value(), &consumerGroupConfig)
 	if err != nil {
-		return nil, errors.Join(errors.New("invalid JSON value for the consumer group's config"), err)
+		return nil, fmt.Errorf("invalid JSON value for the elastic consumer group's config: %w", err)
 	}
 
 	err = validateConfig(consumerGroupConfig)
 	if err != nil {
-		return nil, errors.Join(errors.New("invalid consumer group config"), err)
+		return nil, fmt.Errorf("invalid elastic consumer group config: %w", err)
 	}
 
 	return &consumerGroupConfig, nil

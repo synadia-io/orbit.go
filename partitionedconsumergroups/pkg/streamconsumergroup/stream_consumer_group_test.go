@@ -26,7 +26,7 @@ func requireValidationError(t testing.TB, testConfig ElasticConsumerGroupConfig)
 
 func TestBaseFunctions(t *testing.T) {
 
-	var partitions = uint(4)
+	partitions := uint(4)
 
 	testingC1 := ElasticConsumerGroupConfig{
 		MaxMembers:            partitions,
@@ -87,7 +87,7 @@ func TestBaseFunctions(t *testing.T) {
 	requireNoValidationError(t, testConfig)
 
 	testConfig.MemberMappings = []MemberMapping{{Member: "m1", Partitions: []int{0, 1}}}
-	requireValidationError(t, testConfig) // members is still set
+	requireValidationError(t, testConfig) // the Members field is still set
 	testConfig.Members = nil
 	requireNoValidationError(t, testConfig)
 	testConfig.MemberMappings = []MemberMapping{{Member: "m1", Partitions: []int{1, 1}}} // duplicate partition
@@ -115,8 +115,8 @@ func TestBaseFunctions(t *testing.T) {
 }
 
 func TestStatic(t *testing.T) {
-	var streamName = "test"
-	var cgName = "group"
+	streamName := "test"
+	cgName := "group"
 	var c1, c2 int
 
 	server := RunBasicJetStreamServer()
@@ -241,7 +241,7 @@ func TestElastic(t *testing.T) {
 	go ec1()
 	go ec2()
 
-	_, err = AddMembers(nc, streamName, cgName, []string{"m1"})
+	_, err = AddMembers(ctx, nc, streamName, cgName, []string{"m1"})
 	require_NoError(t, err)
 
 	now := time.Now()
@@ -256,7 +256,7 @@ func TestElastic(t *testing.T) {
 	}
 	require_Equal(t, c1 == 10 && c2 == 0, true)
 
-	_, err = AddMembers(nc, streamName, cgName, []string{"m2"})
+	_, err = AddMembers(ctx, nc, streamName, cgName, []string{"m2"})
 	require_NoError(t, err)
 
 	// wait a little bit for m2 to be effectively added (deletion and re-creation of the consumers)
@@ -279,7 +279,7 @@ func TestElastic(t *testing.T) {
 		}
 	}
 
-	_, err = DeleteMembers(nc, streamName, cgName, []string{"m1"})
+	_, err = DeleteMembers(ctx, nc, streamName, cgName, []string{"m1"})
 	require_NoError(t, err)
 
 	// wait a little bit for m1 to be effectively deleted (deletion and re-creation of the consumers)

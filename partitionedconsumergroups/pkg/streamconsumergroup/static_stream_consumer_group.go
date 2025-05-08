@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"log"
@@ -48,7 +49,7 @@ type StaticConsumerGroupConfig struct {
 	MaxMembers     uint            `json:"max_members"`
 	Filter         string          `json:"filter"`
 	Members        []string        `json:"members,omitempty"`
-	MemberMappings []MemberMapping `json:"member-mappings,omitempty"`
+	MemberMappings []MemberMapping `json:"member_mappings,omitempty"`
 }
 
 func (config *StaticConsumerGroupConfig) IsInMembership(name string) bool {
@@ -57,19 +58,15 @@ func (config *StaticConsumerGroupConfig) IsInMembership(name string) bool {
 }
 
 // GetStaticConsumerGroupConfig gets the static consumer group's config from the KV bucket
-func GetStaticConsumerGroupConfig(nc *nats.Conn, streamName string, consumerGroupName string) (*StaticConsumerGroupConfig, error) {
+func GetStaticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) (*StaticConsumerGroupConfig, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-
 	kv, err := js.KeyValue(ctx, kvStaticBucketName)
 	if err != nil {
-		return nil, errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
+		return nil, fmt.Errorf("the static consumer group KV bucket doesn't exist: %w", err)
 	}
 
 	return getStaticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
@@ -80,25 +77,17 @@ func GetStaticConsumerGroupConfig(nc *nats.Conn, streamName string, consumerGrou
 func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), cconfig jetstream.ConsumerConfig) error {
 	var err error
 
-	instance := StaticConsumerGroupConsumerInstance{
-		StreamName:             streamName,
-		ConsumerGroupName:      consumerGroupName,
-		MemberName:             memberName,
-		CConfig:                cconfig,
-		CGConfig:               nil,
-		Consumer:               nil,
-		ConsumerConsumeContext: nil,
-		CurrentPID:             "",
-		MessageHandlerCB:       nil,
-		js:                     nil,
-		kv:                     nil,
-	}
-
 	if messageHandler == nil {
 		return errors.New("a message handler must be provided")
 	}
 
-	instance.MessageHandlerCB = messageHandler
+	instance := StaticConsumerGroupConsumerInstance{
+		StreamName:        streamName,
+		ConsumerGroupName: consumerGroupName,
+		MemberName:        memberName,
+		CConfig:           cconfig,
+		MessageHandlerCB:  messageHandler,
+	}
 
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -109,12 +98,12 @@ func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consum
 
 	_, err = js.Stream(ctx, streamName)
 	if err != nil {
-		return errors.Join(errors.New("the consumer group's stream does not exist"), err)
+		return fmt.Errorf("the static consumer group's stream does not exist: %w", err)
 	}
 
 	kv, err := js.KeyValue(ctx, kvStaticBucketName)
 	if err != nil {
-		return errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
+		return fmt.Errorf("the static consumer group KV bucket doesn't exist: %w", err)
 	}
 
 	instance.kv = kv
@@ -122,7 +111,7 @@ func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consum
 	// Try to get the current config if there's one
 	instance.CGConfig, err = getStaticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
 	if err != nil {
-		return errors.Join(errors.New("can not get the current consumer group's config"), err)
+		return fmt.Errorf("can not get the current static consumer group's config: %w", err)
 	}
 
 	if instance.CGConfig.IsInMembership(memberName) {
@@ -153,17 +142,12 @@ func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consum
 					var newConfig StaticConsumerGroupConfig
 					err := json.Unmarshal(updateMsg.Value(), &newConfig)
 					if err != nil {
-						// Human error is very possible if they put the config messages directly (e.g. using `nats kv put`)
-						// Best to ignore or better to error out?
-						log.Printf("Error:  consumer group %s config watcher received and is ignoring a bad JSON message", composeKey(streamName, consumerGroupName))
-						break
+						return fmt.Errorf("static consumer group %s config watcher received a bad JSON message: %w", composeKey(streamName, consumerGroupName), err)
 					}
 
 					err = validateStaticConfig(newConfig)
 					if err != nil {
-						// same question ignore or error out?
-						log.Printf("Error:  consumer group %s config watcher received and is ignoring an invalid config", composeKey(streamName, consumerGroupName))
-						break
+						return fmt.Errorf("static consumer group %s config watcher received an invalid config: %w", composeKey(streamName, consumerGroupName), err)
 					}
 
 					if newConfig.MaxMembers != instance.CGConfig.MaxMembers ||
@@ -193,12 +177,12 @@ func CreateStatic(ctx context.Context, nc *nats.Conn, streamName string, consume
 
 	err := validateStaticConfig(config)
 	if err != nil {
-		return nil, errors.Join(errors.New("invalid static consumer group config"), err)
+		return nil, fmt.Errorf("invalid static consumer group config: %w", err)
 	}
 
 	js, err := jetstream.New(nc)
 	if err != nil {
-		log.Fatalf("Couldn't get the JetStream instance: %v", err)
+		return nil, fmt.Errorf("couldn't get the JetStream instance: %w", err)
 	}
 
 	stream, err := js.Stream(ctx, streamName)
@@ -244,11 +228,11 @@ func CreateStatic(ctx context.Context, nc *nats.Conn, streamName string, consume
 		// check that the current entry matches the max number of members (i.e. number of partitions) and filter
 		err = json.Unmarshal(value.Value(), &cgConfig)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("static consumer group config already exists and is not valid JSON: %w", err)
 		}
 
 		if cgConfig.MaxMembers != maxNumMembers || cgConfig.Filter != filter || !slices.Equal(cgConfig.Members, members) || !reflect.DeepEqual(cgConfig.MemberMappings, memberMappings) {
-			return nil, errors.New("the existing consumer group config doesn't match ours")
+			return nil, errors.New("the existing static consumer group config doesn't match ours")
 		}
 	}
 
@@ -259,21 +243,13 @@ func CreateStatic(ctx context.Context, nc *nats.Conn, streamName string, consume
 func DeleteStatic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
-		log.Fatalf("Couldn't get the JetStream instance: %v", err)
+		return fmt.Errorf("Couldn't get the JetStream instance: %w", err)
 	}
 
-	// First delete all the consumers for the consumer group
+	// First delete the config bucket's entry all the consumers for the consumer group
 	s, err := js.Stream(ctx, streamName)
 	if err != nil {
 		return err
-	}
-
-	lister := s.ListConsumers(ctx)
-
-	for i := range lister.Info() {
-		if strings.HasPrefix(i.Name, consumerGroupName+"-") {
-			_ = s.DeleteConsumer(ctx, i.Name)
-		}
 	}
 
 	kv, err := js.KeyValue(ctx, kvStaticBucketName)
@@ -284,31 +260,40 @@ func DeleteStatic(ctx context.Context, nc *nats.Conn, streamName string, consume
 	// Just delete the PCG's entry in the KV bucket
 	err = kv.Delete(ctx, composeKey(streamName, consumerGroupName))
 	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
-		return errors.New("error deleting the consumer groups' configs")
+		return errors.New("error deleting the static consumer groups' configs")
 	}
 
-	return nil
+	lister := s.ListConsumers(ctx)
+
+	var consumerDeleteErrors []error
+
+	for i := range lister.Info() {
+		if strings.HasPrefix(i.Name, consumerGroupName+"-") {
+			err = s.DeleteConsumer(ctx, i.Name)
+			if err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+				consumerDeleteErrors = append(consumerDeleteErrors, fmt.Errorf("error deleting consumer %s: %w", i.Name, err))
+			}
+		}
+	}
+
+	return errors.Join(consumerDeleteErrors...)
 }
 
 // ListStaticConsumerGroups lists the consumer groups for a given stream
-func ListStaticConsumerGroups(nc *nats.Conn, streamName string) ([]string, error) {
+func ListStaticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName string) ([]string, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-
 	kv, err := js.KeyValue(ctx, kvStaticBucketName)
 	if err != nil {
-		return nil, errors.Join(errors.New("the consumer group KV bucket doesn't exist"), err)
+		return nil, fmt.Errorf("the static consumer group's KV bucket doesn't exist: %w", err)
 	}
 
 	lister, err := kv.ListKeys(ctx)
 	if err != nil {
-		return nil, errors.Join(errors.New("error creating a key lister on the consumer groups' bucket"), err)
+		return nil, fmt.Errorf("error creating a key lister on the static consumer groups' bucket: %w", err)
 	}
 
 	var consumerGroupNames []string
@@ -323,15 +308,12 @@ func ListStaticConsumerGroups(nc *nats.Conn, streamName string) ([]string, error
 	return consumerGroupNames, nil
 }
 
-func ListStaticActiveMembers(nc *nats.Conn, streamName string, consumerGroupName string) ([]string, error) {
+func ListStaticActiveMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) ([]string, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
-	defer cancel()
 	kv, err := js.KeyValue(ctx, kvStaticBucketName)
 	if err != nil {
 		return nil, err
@@ -373,15 +355,11 @@ func ListStaticActiveMembers(nc *nats.Conn, streamName string, consumerGroupName
 }
 
 // StaticMemberStepDown forces the current active instance of a member to step down
-func StaticMemberStepDown(nc *nats.Conn, streamName string, consumerGroupName string, memberName string) error {
+func StaticMemberStepDown(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return err
 	}
-
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
 	s, err := js.Stream(ctx, streamName)
 	if err != nil {
@@ -440,7 +418,7 @@ func (consumerInstance *StaticConsumerGroupConsumerInstance) joinMemberConsumerS
 
 	consumerInstance.Consumer, err = consumerInstance.js.CreateConsumer(ctx, consumerInstance.StreamName, config)
 	if err != nil {
-		return errors.Join(errors.New("error creating our member's consumer"), err)
+		return fmt.Errorf("error creating our member's consumer: %w", err)
 	}
 
 	consumerInstance.startConsuming()
@@ -546,9 +524,9 @@ func getStaticConsumerGroupConfig(ctx context.Context, kv jetstream.KeyValue, st
 	message, err := kv.Get(ctx, composeKey(streamName, consumerGroupName))
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, errors.New("error getting the consumer group's config: not found")
+			return nil, errors.New("error getting the static consumer group's config: not found")
 		} else {
-			return nil, errors.Join(errors.New("error getting the consumer group's config"), err)
+			return nil, fmt.Errorf("error getting the static consumer group's config: %w", err)
 		}
 	}
 
@@ -556,12 +534,12 @@ func getStaticConsumerGroupConfig(ctx context.Context, kv jetstream.KeyValue, st
 
 	err = json.Unmarshal(message.Value(), &consumerGroupConfig)
 	if err != nil {
-		return nil, errors.Join(errors.New("invalid JSON value for the consumer group's config"), err)
+		return nil, fmt.Errorf("invalid JSON value for the static consumer group's config: %w", err)
 	}
 
 	err = validateStaticConfig(consumerGroupConfig)
 	if err != nil {
-		return nil, errors.Join(errors.New("invalid consumer group config"), err)
+		return nil, fmt.Errorf("invalid static consumer group config: %w", err)
 	}
 
 	return &consumerGroupConfig, nil

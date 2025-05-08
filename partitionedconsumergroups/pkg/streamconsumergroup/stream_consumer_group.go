@@ -58,11 +58,11 @@ func GeneratePartitionFilters(members []string, maxMembers uint, memberMappings 
 
 		if numMembers > 0 {
 			// rounded number of partitions per member
-			var numPer = maxMembers / numMembers
+			numPer := maxMembers / numMembers
 			var myFilters []string
 
 			for i := uint(0); i < maxMembers; i++ {
-				var memberIndex = i / numPer
+				memberIndex := i / numPer
 
 				if i < (numMembers * numPer) {
 					if members[memberIndex%numMembers] == memberName {

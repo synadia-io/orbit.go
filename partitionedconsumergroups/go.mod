@@ -1,11 +1,11 @@
 module partitioned_stream_consumer_test
 
-go 1.23.6
+go 1.23.7
 
 require (
 	github.com/choria-io/fisk v0.7.0
 	github.com/nats-io/nats-server/v2 v2.11.1
-	github.com/nats-io/nats.go v1.41.2
+	github.com/nats-io/nats.go v1.42.0
 	github.com/synadia-io/orbit.go/natscontext v0.1.1
 )
 
