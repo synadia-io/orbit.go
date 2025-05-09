@@ -21,6 +21,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"log"
+	"math/rand/v2"
 	"reflect"
 	"slices"
 	"strconv"
@@ -79,7 +80,6 @@ func GetElasticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamNam
 // ElasticConsume is the main consume function that will consume messages from the stream (when active) and call the message handler for each message
 // meant to be used in a go routine
 func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig) error {
-	var err error
 	if messageHandler == nil {
 		return errors.New("a message handler must be provided")
 	}
@@ -174,7 +174,10 @@ func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consu
 		case <-ctx.Done():
 			instance.stop()
 			return nil
-		case <-time.After(time.Second * 15):
+		case <-time.After(consumerIdleTimeout + 1*time.Second):
+			// We want it to always be trying to self-correct if it's not currently joined (and in membership, so we should really be trying to consume something).
+			// This is what does the 'catch-all' if no-one deletes and re-creates the elastic consumers when the membership changes, because of the elastic consumer's idle time out eventually cleans up the old consumer.
+			// Which means that the consumer Create in joinMemberConsumer will then re-create it with the right filters for our membership's view, and then we can start actually consuming from it.
 			if instance.Consumer == nil && instance.Config.IsInMembership(instance.MemberName) {
 				instance.joinMemberConsumer(ctx)
 			}
@@ -248,13 +251,14 @@ func CreateElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 			return nil, err
 		}
 	} else {
-		// check that the current entry matches the max number of members (i.e. number of partitions) and filter
+		// check that the current entry matches the max number of members (i.e., number of partitions) and filter
 		err = json.Unmarshal(value.Value(), &consumerGroupConfig)
 		if err != nil {
 			return nil, err
 		}
 
-		if consumerGroupConfig.MaxMembers != maxNumMembers || consumerGroupConfig.Filter != filter || !slices.Equal(consumerGroupConfig.PartitioningWildcards, partitioningWildcards) {
+		if consumerGroupConfig.MaxMembers != maxNumMembers || consumerGroupConfig.Filter != filter || consumerGroupConfig.MaxBufferedMsgs != maxBufferedMessages || consumerGroupConfig.MaxBufferedBytes != maxBufferedBytes ||
+			!slices.Equal(consumerGroupConfig.PartitioningWildcards, partitioningWildcards) {
 			return nil, errors.New("the existing elastic consumer group config can not be updated to the requested one, please delete the existing elastic consumer group and create a new one")
 		}
 	}
@@ -340,7 +344,9 @@ func ListElasticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName st
 	for key := range lister.Keys() {
 		parts := strings.Split(key, ".")
 		if parts[0] == streamName {
-			consumerGroupNames = append(consumerGroupNames, parts[1])
+			if len(parts) >= 2 {
+				consumerGroupNames = append(consumerGroupNames, parts[1])
+			}
 		}
 	}
 
@@ -565,6 +571,10 @@ func ListElasticActiveMembers(ctx context.Context, nc *nats.Conn, streamName str
 		return nil, err
 	}
 
+	if len(cGC.Members) == 0 && len(cGC.MemberMappings) == 0 {
+		return []string{}, nil
+	}
+
 	s, err := js.Stream(ctx, composeCGSName(streamName, consumerGroupName))
 	if err != nil {
 		return nil, err
@@ -616,27 +626,28 @@ func ElasticIsInMembershipAndActive(ctx context.Context, nc *nats.Conn, streamNa
 		return false, false, err
 	}
 
+	isActive := false
 	lister := s.ListConsumers(ctx)
 
 	for cInfo := range lister.Info() {
 		if len(cGC.Members) != 0 {
 			for _, m := range cGC.Members {
 				if cInfo.Name == m {
-					inMembership = true
+					isActive = true
 					break
 				}
 			}
 		} else if len(cGC.MemberMappings) != 0 {
 			for _, mapping := range cGC.MemberMappings {
 				if cInfo.Name == mapping.Member {
-					inMembership = true
+					isActive = true
 					break
 				}
 			}
 		}
 	}
 
-	return inMembership, false, nil
+	return inMembership, isActive, nil
 }
 
 // ElasticMemberStepDown forces the current active instance of a member to step down
@@ -699,17 +710,18 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer
 	config.AckPolicy = jetstream.AckExplicitPolicy
 
 	if config.InactiveThreshold == 0 {
-		config.InactiveThreshold = 12 * time.Second
+		config.InactiveThreshold = consumerIdleTimeout
 	}
 
 	if config.AckWait == 0 {
-		config.AckWait = 6 * time.Second
+		config.AckWait = ackWait
 	}
 
 	config.PriorityGroups = []string{consumerInstance.MemberName}
 	config.PriorityPolicy = jetstream.PriorityPolicyPinned
 	config.PinnedTTL = config.AckWait
 
+	// before starting to actually consume messages from the stream consumer, we need to verify that the consumer is created with the correct filters, so Create() must be successful
 	consumerInstance.Consumer, err = consumerInstance.js.CreateConsumer(ctx, composeCGSName(consumerInstance.StreamName, consumerInstance.ConsumerGroupName), config)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrConsumerExists) {
@@ -717,10 +729,18 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer
 			err := consumerInstance.js.DeleteConsumer(ctx, composeCGSName(consumerInstance.StreamName, consumerInstance.ConsumerGroupName), consumerInstance.MemberName)
 			if err != nil {
 				log.Printf("Warning: error trying to delete our member's consumer after trying to create it to our desired config: %v\n", err)
+				// will try again later
 				return
+			} else {
+				consumerInstance.Consumer, err = consumerInstance.js.CreateConsumer(ctx, composeCGSName(consumerInstance.StreamName, consumerInstance.ConsumerGroupName), config)
+				if err != nil {
+					// will try again later
+					return
+				}
 			}
 		}
-		// not logging because some errors can happen during normal operation
+		// just return in any case
+		// not logging here because some errors can happen during normal operation
 		// e.g. JS API error: filtered consumer not unique on workqueue stream can happen because all the members cannot be perfectly synchronized processing membership changes
 		return
 	}
@@ -728,11 +748,11 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer
 	consumerInstance.startConsuming()
 }
 
-// when instance becomes the active one
+// start consuming messages from the consumer after being successful doing a Create() on it (a way to check the consumer is set exactly according to the membership distribution we expect).
 func (consumerInstance *ElasticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
-	consumerInstance.ConsumerConsumeContext, err = consumerInstance.Consumer.Consume(consumerInstance.consumerCallback, jetstream.PullExpiry(3*time.Second), jetstream.PullPriorityGroup(consumerInstance.MemberName))
+	consumerInstance.ConsumerConsumeContext, err = consumerInstance.Consumer.Consume(consumerInstance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(consumerInstance.MemberName))
 	if err != nil {
 		log.Printf("Error starting to consume on my consumer: %v\n", err)
 		return
@@ -775,7 +795,8 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) processMembershipC
 			}
 		}
 	} else {
-		time.Sleep(250 * time.Millisecond)
+		// backoff, if someone else believes they are pinned let them delete and re-create the consumer first (to try and avoid flapping)
+		time.Sleep(time.Duration(rand.IntN(100)+400) * time.Millisecond)
 	}
 
 	consumerInstance.joinMemberConsumer(ctx)

@@ -24,7 +24,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"time"
 )
 
 const (
@@ -75,8 +74,6 @@ func GetStaticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamName
 // StaticConsume is the main consume function that will consume messages from the stream (when active) and call the message handler for each message
 // meant to be used in a go routine
 func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), cconfig jetstream.ConsumerConfig) error {
-	var err error
-
 	if messageHandler == nil {
 		return errors.New("a message handler must be provided")
 	}
@@ -301,7 +298,9 @@ func ListStaticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName str
 	for key := range lister.Keys() {
 		parts := strings.Split(key, ".")
 		if parts[0] == streamName {
-			consumerGroupNames = append(consumerGroupNames, parts[1])
+			if len(parts) >= 2 {
+				consumerGroupNames = append(consumerGroupNames, parts[1])
+			}
 		}
 	}
 
@@ -409,7 +408,7 @@ func (consumerInstance *StaticConsumerGroupConsumerInstance) joinMemberConsumerS
 	config.FilterSubjects = filters
 
 	if config.AckWait == 0 {
-		config.AckWait = 6 * time.Second
+		config.AckWait = ackWait
 	}
 
 	config.PriorityGroups = []string{consumerInstance.MemberName}
@@ -430,7 +429,7 @@ func (consumerInstance *StaticConsumerGroupConsumerInstance) joinMemberConsumerS
 func (consumerInstance *StaticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
-	consumerInstance.ConsumerConsumeContext, err = consumerInstance.Consumer.Consume(consumerInstance.consumerCallback, jetstream.PullExpiry(3*time.Second), jetstream.PullPriorityGroup(consumerInstance.MemberName))
+	consumerInstance.ConsumerConsumeContext, err = consumerInstance.Consumer.Consume(consumerInstance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(consumerInstance.MemberName))
 	if err != nil {
 		log.Printf("Error starting to consume on my consumer: %v\n", err)
 		return

@@ -24,6 +24,12 @@ import (
 
 // Contains the things that are common to all types of consumer-groups
 
+const (
+	pullTimeout         = 3 * time.Second
+	ackWait             = 2 * pullTimeout
+	consumerIdleTimeout = 2 * pullTimeout
+)
+
 type MemberMapping struct {
 	Member     string `json:"member"`
 	Partitions []int  `json:"partitions"`
