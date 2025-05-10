@@ -44,13 +44,15 @@ type StaticConsumerGroupConsumerInstance struct {
 	kv                     jetstream.KeyValue
 }
 
+// StaticConsumerGroupConfig is the configuration for a static consumer group
 type StaticConsumerGroupConfig struct {
-	MaxMembers     uint            `json:"max_members"`
-	Filter         string          `json:"filter"`
-	Members        []string        `json:"members,omitempty"`
-	MemberMappings []MemberMapping `json:"member_mappings,omitempty"`
+	MaxMembers     uint            `json:"max_members"`               // the maximum number of members the consumer group can have, i.e. the number of partitions
+	Filter         string          `json:"filter"`                    // Optional filter
+	Members        []string        `json:"members,omitempty"`         // the list of members in the consumer group (automatically mapped to partitions)
+	MemberMappings []MemberMapping `json:"member_mappings,omitempty"` // Or the member mappings, which is a list of member names and the partitions that are assigned to them
 }
 
+// IsInMembership returns true if the member is in the current membership of the static consumer group
 func (config *StaticConsumerGroupConfig) IsInMembership(name string) bool {
 	// valid config has either members or member mappings
 	return slices.ContainsFunc(config.MemberMappings, func(mapping MemberMapping) bool { return mapping.Member == name }) || slices.Contains(config.Members, name)
@@ -72,7 +74,7 @@ func GetStaticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamName
 }
 
 // StaticConsume is the main consume function that will consume messages from the stream (when active) and call the message handler for each message
-// meant to be used in a go routine
+// Will not return until the context is done or the consumer group config is deleted, or some unrecoverable error occurs
 func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), cconfig jetstream.ConsumerConfig) error {
 	if messageHandler == nil {
 		return errors.New("a message handler must be provided")
@@ -163,7 +165,7 @@ func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consum
 	}
 }
 
-// CreateStatic creates a consumer group
+// CreateStatic creates a static consumer group
 func CreateStatic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, maxNumMembers uint, filter string, members []string, memberMappings []MemberMapping) (*StaticConsumerGroupConfig, error) {
 	config := StaticConsumerGroupConfig{
 		MaxMembers:     maxNumMembers,
@@ -236,7 +238,7 @@ func CreateStatic(ctx context.Context, nc *nats.Conn, streamName string, consume
 	return &cgConfig, nil
 }
 
-// DeleteStatic Deletes a consumer group
+// DeleteStatic Deletes a static consumer group
 func DeleteStatic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -276,7 +278,7 @@ func DeleteStatic(ctx context.Context, nc *nats.Conn, streamName string, consume
 	return errors.Join(consumerDeleteErrors...)
 }
 
-// ListStaticConsumerGroups lists the consumer groups for a given stream
+// ListStaticConsumerGroups lists the static consumer groups for a given stream
 func ListStaticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName string) ([]string, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -307,6 +309,7 @@ func ListStaticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName str
 	return consumerGroupNames, nil
 }
 
+// ListStaticActiveMembers lists the active members of a static consumer group
 func ListStaticActiveMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) ([]string, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -353,7 +356,7 @@ func ListStaticActiveMembers(ctx context.Context, nc *nats.Conn, streamName stri
 	return activeMembers, nil
 }
 
-// StaticMemberStepDown forces the current active instance of a member to step down
+// StaticMemberStepDown forces the current active (pinned) application instance for a member of a static consumer group to step down
 func StaticMemberStepDown(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -393,7 +396,7 @@ func (consumerInstance *StaticConsumerGroupConsumerInstance) consumerCallback(ms
 	consumerInstance.MessageHandlerCB(strippedMessage)
 }
 
-// CreateStatic the member's consumer if the member is in the current list of members and starts consuming
+// CreateStatic attempts to create the member's consumer if the member is in the current list of members and if successful, starts consuming messages from it
 func (consumerInstance *StaticConsumerGroupConsumerInstance) joinMemberConsumerStatic(ctx context.Context) error {
 	var err error
 
@@ -425,7 +428,7 @@ func (consumerInstance *StaticConsumerGroupConsumerInstance) joinMemberConsumerS
 	return nil
 }
 
-// when instance becomes the active one
+// Start to actively consume (pull) messages from the consumer
 func (consumerInstance *StaticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 

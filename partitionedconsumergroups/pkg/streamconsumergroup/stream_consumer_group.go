@@ -22,8 +22,7 @@ import (
 	"time"
 )
 
-// Contains the things that are common to all types of consumer-groups
-
+// Contains the things that are common to both types of consumer groups
 const (
 	pullTimeout         = 3 * time.Second
 	ackWait             = 2 * pullTimeout
@@ -49,6 +48,7 @@ func newConsumerGroupMsg(msg jetstream.Msg) *ConsumerGroupMsg {
 	return &ConsumerGroupMsg{msg: msg}
 }
 
+// GeneratePartitionFilters generates the partition filters for a particular member of a consumer group, according to the provided max number of members and the membership
 func GeneratePartitionFilters(members []string, maxMembers uint, memberMappings []MemberMapping, memberName string) []string {
 	if len(members) != 0 {
 		members := deduplicateStringSlice(members)

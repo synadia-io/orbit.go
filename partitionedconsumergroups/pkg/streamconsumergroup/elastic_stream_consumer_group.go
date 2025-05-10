@@ -47,16 +47,18 @@ type ElasticConsumerGroupConsumerInstance struct {
 	kv                     jetstream.KeyValue
 }
 
+// ElasticConsumerGroupConfig is the configuration of an elastic consumer group
 type ElasticConsumerGroupConfig struct {
-	MaxMembers            uint            `json:"max_members"`
-	Filter                string          `json:"filter"`
-	PartitioningWildcards []int           `json:"partitioning_wildcards"`
-	MaxBufferedMsgs       int64           `json:"max_buffered_msg,omitempty"`
-	MaxBufferedBytes      int64           `json:"max_buffered_bytes,omitempty"`
-	Members               []string        `json:"members,omitempty"`
-	MemberMappings        []MemberMapping `json:"member_mappings,omitempty"`
+	MaxMembers            uint            `json:"max_members"`                  // the maximum number of members the consumer group can have, i.e. the number of partitions
+	Filter                string          `json:"filter"`                       // The filter, used to both filter the message and partition them, must include at least one "*" wildcard
+	PartitioningWildcards []int           `json:"partitioning_wildcards"`       // The indexes of the wildcards in the filter that will be used for partitioning. For example, if the subject has the pattern `"foo.<key>", then the filter is "foo.*" and the partitioning wildcard is 1.
+	MaxBufferedMsgs       int64           `json:"max_buffered_msg,omitempty"`   // The max number of messages buffered in the consumer group's stream
+	MaxBufferedBytes      int64           `json:"max_buffered_bytes,omitempty"` // The max number of bytes buffered in the consumer group's stream
+	Members               []string        `json:"members,omitempty"`            // The list of members in the consumer group
+	MemberMappings        []MemberMapping `json:"member_mappings,omitempty"`    // Or the member mappings, which is a list of member names and the partitions that are assigned to them
 }
 
+// IsInMembership returns true if the member name is in the current membership of the elastic consumer group
 func (config *ElasticConsumerGroupConfig) IsInMembership(name string) bool {
 	// valid config has either members or member mappings
 	return slices.ContainsFunc(config.MemberMappings, func(mapping MemberMapping) bool { return mapping.Member == name }) || slices.Contains(config.Members, name)
@@ -78,7 +80,7 @@ func GetElasticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamNam
 }
 
 // ElasticConsume is the main consume function that will consume messages from the stream (when active) and call the message handler for each message
-// meant to be used in a go routine
+// Will not return until the context is done or the consumer group config is deleted, or some unrecoverable error occurs
 func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig) error {
 	if messageHandler == nil {
 		return errors.New("a message handler must be provided")
@@ -186,7 +188,7 @@ func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consu
 }
 
 // CreateElastic creates an elastic consumer group
-// Creates the sourcing stream that is going to be used by the members to consume from
+// Creates the sourcing work queue stream that is going to be used by the members to actually consume messages
 func CreateElastic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, maxNumMembers uint, filter string, partitioningWildcards []int, maxBufferedMessages int64, maxBufferedBytes int64) (*ElasticConsumerGroupConfig, error) {
 	config := ElasticConsumerGroupConfig{
 		MaxMembers:            maxNumMembers,
@@ -295,7 +297,7 @@ func CreateElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 	return &consumerGroupConfig, nil
 }
 
-// DeleteElastic Deletes a consumer group
+// DeleteElastic Deletes an elastic consumer group
 func DeleteElastic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -322,7 +324,7 @@ func DeleteElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 	return nil
 }
 
-// ListElasticConsumerGroups lists the consumer groups for a given stream
+// ListElasticConsumerGroups lists the elastic consumer groups for a given stream
 func ListElasticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName string) ([]string, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -353,7 +355,7 @@ func ListElasticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName st
 	return consumerGroupNames, nil
 }
 
-// AddMembers adds members to a consumer group
+// AddMembers adds members to an elastic consumer group
 func AddMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberNamesToAdd []string) ([]string, error) {
 	if streamName == "" || consumerGroupName == "" || len(memberNamesToAdd) == 0 {
 		return nil, errors.New("invalid stream name or elastic consumer group name or no member names")
@@ -412,7 +414,7 @@ func AddMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerG
 	return consumerGroupConfig.Members, nil
 }
 
-// DeleteMembers drops members from a consumer group
+// DeleteMembers drops members from an elastic consumer group
 func DeleteMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberNamesToDrop []string) ([]string, error) {
 	if streamName == "" || consumerGroupName == "" || len(memberNamesToDrop) == 0 {
 		return nil, errors.New("invalid stream name or elastic consumer group name or no member names")
@@ -468,7 +470,7 @@ func DeleteMembers(ctx context.Context, nc *nats.Conn, streamName string, consum
 	return consumerGroupConfig.Members, nil
 }
 
-// SetMemberMappings sets the custom member mappings for a consumer group
+// SetMemberMappings sets the custom member mappings for an elastic consumer group
 func SetMemberMappings(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberMappings []MemberMapping) error {
 	if streamName == "" || consumerGroupName == "" || len(memberMappings) == 0 {
 		return errors.New("invalid stream name or elastic consumer group name or member mappings")
@@ -515,7 +517,7 @@ func SetMemberMappings(ctx context.Context, nc *nats.Conn, streamName string, co
 	return nil
 }
 
-// DeleteMemberMappings deletes the custom member mappings for a consumer group
+// DeleteMemberMappings deletes the custom member mappings for an elastic consumer group
 func DeleteMemberMappings(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) error {
 	if streamName == "" || consumerGroupName == "" {
 		return errors.New("invalid stream name or elastic consumer group name or member mappings")
@@ -553,6 +555,7 @@ func DeleteMemberMappings(ctx context.Context, nc *nats.Conn, streamName string,
 	return nil
 }
 
+// ListElasticActiveMembers lists the active members of an elastic consumer group
 func ListElasticActiveMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) ([]string, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -602,7 +605,7 @@ func ListElasticActiveMembers(ctx context.Context, nc *nats.Conn, streamName str
 	return activeMembers, nil
 }
 
-// ElasticIsInMembershipAndActive checks if a member is included in the consumer group and is active
+// ElasticIsInMembershipAndActive checks if a member is included in the elastic consumer group and is active
 func ElasticIsInMembershipAndActive(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string) (bool, bool, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -650,7 +653,7 @@ func ElasticIsInMembershipAndActive(ctx context.Context, nc *nats.Conn, streamNa
 	return inMembership, isActive, nil
 }
 
-// ElasticMemberStepDown forces the current active instance of a member to step down
+// ElasticMemberStepDown forces the current active (pinned) application instance for a member of an elastic consumer group to step down
 func ElasticMemberStepDown(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
@@ -666,7 +669,7 @@ func ElasticMemberStepDown(ctx context.Context, nc *nats.Conn, streamName string
 	return err
 }
 
-// ElasticGetPartitionFilters For the given ElasticConsumerGroupConfig returns the list of partition filters for a given member
+// ElasticGetPartitionFilters For the given ElasticConsumerGroupConfig returns the list of partition filters for the given member
 func ElasticGetPartitionFilters(config ElasticConsumerGroupConfig, memberName string) []string {
 	return GeneratePartitionFilters(config.Members, config.MaxMembers, config.MemberMappings, memberName)
 }
@@ -691,7 +694,7 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) consumerCallback(m
 	consumerInstance.MessageHandlerCB(strippedMessage)
 }
 
-// CreateElastic the member's consumer if the member is in the current list of members
+// joinMemberConsumer attempts to create (which is idempotent for a given consumer configuration) the member's consumer if the member is in the current list of members and if successful, starts consuming messages from it
 func (consumerInstance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer(ctx context.Context) {
 	var err error
 
@@ -748,7 +751,7 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer
 	consumerInstance.startConsuming()
 }
 
-// start consuming messages from the consumer after being successful doing a Create() on it (a way to check the consumer is set exactly according to the membership distribution we expect).
+// Start to actively consume (pull) messages from the consumer
 func (consumerInstance *ElasticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
