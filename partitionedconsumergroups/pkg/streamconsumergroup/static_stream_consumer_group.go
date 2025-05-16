@@ -34,21 +34,24 @@ type StaticConsumerGroupConsumerInstance struct {
 	StreamName             string
 	ConsumerGroupName      string
 	MemberName             string
-	CConfig                jetstream.ConsumerConfig
-	CGConfig               *StaticConsumerGroupConfig
-	Consumer               jetstream.Consumer
-	CurrentPID             string
-	ConsumerConsumeContext jetstream.ConsumeContext
+	Config                 *StaticConsumerGroupConfig
 	MessageHandlerCB       func(msg jetstream.Msg)
+	consumerUserConfig     jetstream.ConsumerConfig // The user provided config
+	consumer               jetstream.Consumer
+	currentPinnedID        string
+	consumerConsumeContext jetstream.ConsumeContext
 	js                     jetstream.JetStream
 	kv                     jetstream.KeyValue
+	contextCancel          context.CancelFunc
+	keyWatcher             jetstream.KeyWatcher
+	doneChan               chan error
 }
 
 // StaticConsumerGroupConfig is the configuration for a static consumer group
 type StaticConsumerGroupConfig struct {
-	MaxMembers     uint            `json:"max_members"`               // the maximum number of members the consumer group can have, i.e. the number of partitions
+	MaxMembers     uint            `json:"max_members"`               // The maximum number of members the consumer group can have, i.e. the number of partitions
 	Filter         string          `json:"filter"`                    // Optional filter
-	Members        []string        `json:"members,omitempty"`         // the list of members in the consumer group (automatically mapped to partitions)
+	Members        []string        `json:"members,omitempty"`         // The list of members in the consumer group (automatically mapped to partitions)
 	MemberMappings []MemberMapping `json:"member_mappings,omitempty"` // Or the member mappings, which is a list of member names and the partitions that are assigned to them
 }
 
@@ -73,94 +76,124 @@ func GetStaticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamName
 	return getStaticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
 }
 
-// StaticConsume is the main consume function that will consume messages from the stream (when active) and call the message handler for each message
-// Will not return until the context is done or the consumer group config is deleted, or some unrecoverable error occurs
-func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), cconfig jetstream.ConsumerConfig) error {
+// StaticConsume is the function that will start a go routine to consume messages from the stream (when active)
+func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), cconfig jetstream.ConsumerConfig) (ConsumerGroupConsumeContext, error) {
+	var err error
+
 	if messageHandler == nil {
-		return errors.New("a message handler must be provided")
+		return nil, errors.New("a message handler must be provided")
 	}
 
 	instance := StaticConsumerGroupConsumerInstance{
-		StreamName:        streamName,
-		ConsumerGroupName: consumerGroupName,
-		MemberName:        memberName,
-		CConfig:           cconfig,
-		MessageHandlerCB:  messageHandler,
+		StreamName:         streamName,
+		ConsumerGroupName:  consumerGroupName,
+		MemberName:         memberName,
+		consumerUserConfig: cconfig,
+		MessageHandlerCB:   messageHandler,
 	}
 
-	js, err := jetstream.New(nc)
+	instance.js, err = jetstream.New(nc)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	instance.js = js
-
-	_, err = js.Stream(ctx, streamName)
+	_, err = instance.js.Stream(ctx, streamName)
 	if err != nil {
-		return fmt.Errorf("the static consumer group's stream does not exist: %w", err)
+		return nil, fmt.Errorf("the static consumer group's stream does not exist: %w", err)
 	}
 
-	kv, err := js.KeyValue(ctx, kvStaticBucketName)
+	instance.kv, err = instance.js.KeyValue(ctx, kvStaticBucketName)
 	if err != nil {
-		return fmt.Errorf("the static consumer group KV bucket doesn't exist: %w", err)
+		return nil, fmt.Errorf("the static consumer group KV bucket doesn't exist: %w", err)
 	}
-
-	instance.kv = kv
 
 	// Try to get the current config if there's one
-	instance.CGConfig, err = getStaticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
+	instance.Config, err = getStaticConsumerGroupConfig(ctx, instance.kv, streamName, consumerGroupName)
 	if err != nil {
-		return fmt.Errorf("can not get the current static consumer group's config: %w", err)
+		return nil, fmt.Errorf("can not get the current static consumer group's config: %w", err)
 	}
 
-	if instance.CGConfig.IsInMembership(memberName) {
+	instanceRoutineContext := context.Background()
+	instanceRoutineContext, instance.contextCancel = context.WithCancel(instanceRoutineContext)
+
+	instance.keyWatcher, err = instance.kv.Watch(ctx, composeKey(streamName, consumerGroupName))
+	if err != nil {
+		return nil, err
+	}
+
+	if instance.Config.IsInMembership(memberName) {
 		err = instance.joinMemberConsumerStatic(ctx)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	} else {
-		return errors.New("the member name is not in the current static consumer group membership")
+		return nil, errors.New("the member name is not in the current static consumer group membership")
 	}
 
-	// Since static config doesn't change, we can just watch for the deletion of the consumer group's config
-	watcher, err := kv.Watch(ctx, composeKey(streamName, consumerGroupName))
-	if err != nil {
-		return err
+	instance.doneChan = make(chan error, 1)
+
+	go instance.instanceRoutine(instanceRoutineContext)
+
+	return &instance, nil
+
+}
+
+// Stop stops the consumer group instance
+func (instance *StaticConsumerGroupConsumerInstance) Stop() {
+	if instance.contextCancel != nil {
+		instance.contextCancel()
 	}
+}
+
+// Done returns the error (if any) when the consumer group instance is done or an unrecoverable error occurs
+func (instance *StaticConsumerGroupConsumerInstance) Done() <-chan error {
+	return instance.doneChan
+}
+
+// The control routine that will watch for changes in the consumer group config
+func (instance *StaticConsumerGroupConsumerInstance) instanceRoutine(ctx context.Context) {
+	// Since static config doesn't change, we can just watch for the deletion of the consumer group's config
 	for {
 		select {
-		case updateMsg, ok := <-watcher.Updates():
+		case updateMsg, ok := <-instance.keyWatcher.Updates():
 			if ok {
 				if updateMsg != nil {
-					// If the message is a delete operation, we stop and return
+					// If the message is a delete operation, we stop consuming and return
 					if updateMsg.Operation() == jetstream.KeyValueDelete {
 						instance.stopAndDeleteMemberConsumer()
-						return nil
+						instance.doneChan <- nil
+						return
 					}
 
 					var newConfig StaticConsumerGroupConfig
 					err := json.Unmarshal(updateMsg.Value(), &newConfig)
 					if err != nil {
-						return fmt.Errorf("static consumer group %s config watcher received a bad JSON message: %w", composeKey(streamName, consumerGroupName), err)
+						instance.stopAndDeleteMemberConsumer()
+						instance.doneChan <- fmt.Errorf("static consumer group %s config watcher received a bad JSON message: %w", composeKey(instance.StreamName, instance.ConsumerGroupName), err)
+						return
 					}
 
 					err = validateStaticConfig(newConfig)
 					if err != nil {
-						return fmt.Errorf("static consumer group %s config watcher received an invalid config: %w", composeKey(streamName, consumerGroupName), err)
+						instance.stopAndDeleteMemberConsumer()
+						instance.doneChan <- fmt.Errorf("static consumer group %s config watcher received an invalid config: %w", composeKey(instance.StreamName, instance.ConsumerGroupName), err)
+						return
 					}
 
-					if newConfig.MaxMembers != instance.CGConfig.MaxMembers ||
-						newConfig.Filter != instance.CGConfig.Filter ||
-						!reflect.DeepEqual(newConfig.Members, instance.CGConfig.Members) || !reflect.DeepEqual(newConfig.MemberMappings, instance.CGConfig.MemberMappings) {
+					if newConfig.MaxMembers != instance.Config.MaxMembers ||
+						newConfig.Filter != instance.Config.Filter ||
+						!reflect.DeepEqual(newConfig.Members, instance.Config.Members) || !reflect.DeepEqual(newConfig.MemberMappings, instance.Config.MemberMappings) {
 						instance.stopAndDeleteMemberConsumer()
-						return errors.New(" static consumer group config watcher received a change in the configuration, terminating")
+						instance.doneChan <- errors.New(" static consumer group config watcher received a change in the configuration, terminating")
+						return
 					}
 					// No change in the config, ignore
 				}
 			}
 		case <-ctx.Done():
-			instance.stop()
-			return nil
+			instance.stopConsuming()
+			instance.doneChan <- nil
+			return
 		}
 	}
 }
@@ -377,83 +410,85 @@ func StaticMemberStepDown(ctx context.Context, nc *nats.Conn, streamName string,
 }
 
 // Shim callback function to strip the partition number from the subject before passing the message to the user's callback
-func (consumerInstance *StaticConsumerGroupConsumerInstance) consumerCallback(msg jetstream.Msg) {
+func (instance *StaticConsumerGroupConsumerInstance) consumerCallback(msg jetstream.Msg) {
 	// check pinned-id is there
 	pid := msg.Headers().Get("Nats-Pin-Id")
 	if pid == "" {
 		log.Println("Warning: received a message without a pinned-id header")
 		// TODO should we give up here and say there's a problem? (maybe running over a pre 2.11 version of the server?)
 	} else {
-		if consumerInstance.CurrentPID == "" {
-			consumerInstance.CurrentPID = pid
-		} else if consumerInstance.CurrentPID != pid {
+		if instance.currentPinnedID == "" {
+			instance.currentPinnedID = pid
+		} else if instance.currentPinnedID != pid {
 			// received a message with a different pinned-id header, assuming there was a change of pinned member
-			consumerInstance.CurrentPID = pid
+			instance.currentPinnedID = pid
 		}
 	}
 
 	strippedMessage := newConsumerGroupMsg(msg)
-	consumerInstance.MessageHandlerCB(strippedMessage)
+	instance.MessageHandlerCB(strippedMessage)
 }
 
 // CreateStatic attempts to create the member's consumer if the member is in the current list of members and if successful, starts consuming messages from it
-func (consumerInstance *StaticConsumerGroupConsumerInstance) joinMemberConsumerStatic(ctx context.Context) error {
+func (instance *StaticConsumerGroupConsumerInstance) joinMemberConsumerStatic(ctx context.Context) error {
 	var err error
 
-	filters := GeneratePartitionFilters(consumerInstance.CGConfig.Members, consumerInstance.CGConfig.MaxMembers, consumerInstance.CGConfig.MemberMappings, consumerInstance.MemberName)
+	filters := GeneratePartitionFilters(instance.Config.Members, instance.Config.MaxMembers, instance.Config.MemberMappings, instance.MemberName)
 
 	if len(filters) == 0 {
 		return nil
 	}
 
-	config := consumerInstance.CConfig
-	config.Durable = composeStaticConsumerName(consumerInstance.ConsumerGroupName, consumerInstance.MemberName)
+	config := instance.consumerUserConfig
+	config.Durable = composeStaticConsumerName(instance.ConsumerGroupName, instance.MemberName)
 	config.FilterSubjects = filters
 
 	if config.AckWait == 0 {
 		config.AckWait = ackWait
 	}
 
-	config.PriorityGroups = []string{consumerInstance.MemberName}
+	config.PriorityGroups = []string{instance.MemberName}
 	config.PriorityPolicy = jetstream.PriorityPolicyPinned
 	config.PinnedTTL = config.AckWait
 
-	consumerInstance.Consumer, err = consumerInstance.js.CreateConsumer(ctx, consumerInstance.StreamName, config)
+	instance.consumer, err = instance.js.CreateConsumer(ctx, instance.StreamName, config)
 	if err != nil {
 		return fmt.Errorf("error creating our member's consumer: %w", err)
 	}
 
-	consumerInstance.startConsuming()
+	instance.startConsuming()
 
 	return nil
 }
 
 // Start to actively consume (pull) messages from the consumer
-func (consumerInstance *StaticConsumerGroupConsumerInstance) startConsuming() {
+func (instance *StaticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
-	consumerInstance.ConsumerConsumeContext, err = consumerInstance.Consumer.Consume(consumerInstance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(consumerInstance.MemberName))
+	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(instance.MemberName))
 	if err != nil {
 		log.Printf("Error starting to consume on my consumer: %v\n", err)
 		return
 	}
 }
 
-func (consumerInstance *StaticConsumerGroupConsumerInstance) stop() {
-	if consumerInstance.Consumer != nil {
-		if consumerInstance.ConsumerConsumeContext != nil {
-			consumerInstance.ConsumerConsumeContext.Stop()
-			consumerInstance.ConsumerConsumeContext = nil
+// Stops the consumption of messages from the consumer
+func (instance *StaticConsumerGroupConsumerInstance) stopConsuming() {
+	if instance.consumer != nil {
+		if instance.consumerConsumeContext != nil {
+			instance.consumerConsumeContext.Stop()
+			instance.consumerConsumeContext = nil
 		}
 
-		consumerInstance.Consumer = nil
+		instance.consumer = nil
 	}
 }
 
-func (consumerInstance *StaticConsumerGroupConsumerInstance) stopAndDeleteMemberConsumer() {
-	consumerInstance.stop()
+// stopAndDeleteMemberConsumer stops the consumption of messages from the consumer and deletes the durable consumer for the member
+func (instance *StaticConsumerGroupConsumerInstance) stopAndDeleteMemberConsumer() {
+	instance.stopConsuming()
 
-	err := consumerInstance.js.DeleteConsumer(context.Background(), consumerInstance.StreamName, composeStaticConsumerName(consumerInstance.ConsumerGroupName, consumerInstance.MemberName))
+	err := instance.js.DeleteConsumer(context.Background(), instance.StreamName, composeStaticConsumerName(instance.ConsumerGroupName, instance.MemberName))
 	if errors.Is(err, jetstream.ErrConsumerNotFound) {
 		return
 	}

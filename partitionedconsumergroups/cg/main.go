@@ -28,7 +28,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -52,7 +51,7 @@ type cgStruct struct {
 	force                  bool
 	nc                     *nats.Conn
 	prompt                 bool
-	qwg                    sync.WaitGroup
+	cgContext              streamconsumergroup.ConsumerGroupConsumeContext
 }
 
 var (
@@ -216,7 +215,8 @@ func (cg *cgStruct) createStaticMappedAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) createElasticAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
-	myContext, cg.myConsumeContextCancel = context.WithCancel(myContext)
+	myContext, cancel := context.WithTimeout(myContext, time.Second*5)
+	defer cancel()
 
 	_, err := streamconsumergroup.CreateElastic(myContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.pwcis, cg.maxBufferedMsgs, cg.maxBufferedBytes)
 	if err != nil {
@@ -239,8 +239,8 @@ func (cg *cgStruct) deleteStaticAction(_ *fisk.ParseContext) error {
 
 	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+	defer cancel()
 	err := streamconsumergroup.DeleteStatic(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
-	cancel()
 	if err != nil {
 		return err
 	}
@@ -260,8 +260,8 @@ func (cg *cgStruct) deleteElasticAction(_ *fisk.ParseContext) error {
 
 	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+	defer cancel()
 	err := streamconsumergroup.DeleteElastic(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
-	cancel()
 	if err != nil {
 		return err
 	}
@@ -386,21 +386,19 @@ func (cg *cgStruct) consumeStaticAction(_ *fisk.ParseContext) error {
 	myConsumeContext := context.Background()
 	myConsumeContext, cg.myConsumeContextCancel = context.WithCancel(myConsumeContext)
 	cg.static()
-	cg.consume(myConsumeContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
-	return nil
+	return cg.consume(myConsumeContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
 }
 
 func (cg *cgStruct) consumeElasticAction(_ *fisk.ParseContext) error {
 	myConsumeContext := context.Background()
 	myConsumeContext, cg.myConsumeContextCancel = context.WithCancel(myConsumeContext)
 	cg.elastic()
-	cg.consume(myConsumeContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
-	return nil
+	return cg.consume(myConsumeContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
 }
 
 // Example of consuming messages.
 // Can be used to demonstrate the consumer group functionality using this CLI tool.
-func (cg *cgStruct) consume(myContext context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), maxAcksPending int) {
+func (cg *cgStruct) consume(myContext context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), maxAcksPending int) error {
 	cg.consuming = true
 	var err error
 	config := jetstream.ConsumerConfig{
@@ -409,20 +407,12 @@ func (cg *cgStruct) consume(myContext context.Context, nc *nats.Conn, streamName
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	}
 
-	cg.qwg.Add(1)
-
-	go func() {
-		if cg.consumerStatic {
-			err = streamconsumergroup.StaticConsume(myContext, nc, streamName, consumerGroupName, memberName, messageHandler, config)
-		} else {
-			err = streamconsumergroup.ElasticConsume(myContext, nc, streamName, consumerGroupName, memberName, messageHandler, config)
-		}
-		if err != nil {
-			log.Printf("could not join or remain in the consumer group: %v\n", err)
-		}
-		time.Sleep(1 * time.Second)
-		cg.qwg.Done()
-	}()
+	if cg.consumerStatic {
+		cg.cgContext, err = streamconsumergroup.StaticConsume(myContext, nc, streamName, consumerGroupName, memberName, messageHandler, config)
+	} else {
+		cg.cgContext, err = streamconsumergroup.ElasticConsume(myContext, nc, streamName, consumerGroupName, memberName, messageHandler, config)
+	}
+	return err
 }
 
 // Example callback, waits for 'processing time' and acks the message.
@@ -435,7 +425,7 @@ func messageHandler(processingTime time.Duration) func(msg jetstream.Msg) {
 			fmt.Printf("can't get message metadata: %v", err)
 		}
 		seqNumber = mmd.Sequence.Stream
-		fmt.Printf("[%s] received a message on (subject=%s, seq=%d, pinnedID=%s). Processing ... ", cg.memberName, msg.Subject(), seqNumber, pid)
+		fmt.Printf("[%s] subject=%s, seq=%d, pinnedID=%s. Processing for %v ... ", cg.memberName, msg.Subject(), seqNumber, pid, processingTime)
 		time.Sleep(processingTime)
 		ctx := context.Background()
 		ctx, cancel := context.WithTimeout(ctx, time.Second*5)
@@ -481,7 +471,10 @@ func main() {
 	elasticCommand := app.Command("elastic", "elastic consumer groups mode")
 
 	staticCommand.Command("prompt", "interactive prompt").Action(cg.promptStaticAction)
+	staticCommand.Flag("sleep", "sleep to simulate processing time").Default("20ms").DurationVar(&cg.processingDuration)
+
 	elasticCommand.Command("prompt", "interactive prompt").Action(cg.promptAction)
+	elasticCommand.Flag("sleep", "sleep to simulate processing time").Default("20ms").DurationVar(&cg.processingDuration)
 
 	//
 	// Static
@@ -522,7 +515,6 @@ func main() {
 	staticConsumeCommand := staticCommand.Command("consume", "join a static partitioned consumer group").Alias("join").Action(cg.consumeStaticAction)
 	addCommonArgs(staticConsumeCommand)
 	staticConsumeCommand.Arg("member", "member name").Required().StringVar(&cg.memberName)
-	staticConsumeCommand.Flag("sleep", "sleep to simulate processing time").Default("20ms").DurationVar(&cg.processingDuration)
 
 	//
 	// Elastic
@@ -575,7 +567,6 @@ func main() {
 	elasticConsumeCommand := elasticCommand.Command("consume", "join a partitioned consumer group").Alias("join").Action(cg.consumeElasticAction)
 	addCommonArgs(elasticConsumeCommand)
 	elasticConsumeCommand.Arg("member", "member name").Required().StringVar(&cg.memberName)
-	elasticConsumeCommand.Flag("sleep", "sleep to simulate processing time").Default("20ms").DurationVar(&cg.processingDuration)
 
 	var err error
 
@@ -590,7 +581,12 @@ func main() {
 
 	if cg.consuming {
 		fmt.Println("consuming...")
-		cg.qwg.Wait()
+		err = <-cg.cgContext.Done()
+		if err != nil {
+			log.Printf("instanced returned with an error: %v\n", err)
+		} else {
+			log.Printf("instanced returned with no error\n")
+		}
 	}
 
 	if cg.prompt {
@@ -644,14 +640,10 @@ func prompt() {
 			fmt.Println("createmapping <stream name> <partitioned consumer group name> - create member mappings for a partitioned consumer group")
 			fmt.Println("stepdown/sd <stream name> <partitioned consumer group name> <member name> - initiate a step down for a member")
 			fmt.Println("consume/join <stream name> <partitioned consumer group name> <member name> - join a partitioned consumer group")
-			fmt.Println("stop/leave - stop consuming and leave the partitioned consumer group")
 			fmt.Println("static - static consumer groups mode")
 			fmt.Println("elastic - elastic consumer groups mode")
 		case "exit", "quit":
 			log.Println("Exiting...")
-			if cg.consuming {
-				cg.myConsumeContextCancel()
-			}
 			os.Exit(0)
 		case "static":
 			cg.static()
@@ -777,10 +769,6 @@ func prompt() {
 				fmt.Printf("member mappings set: %+v\n", memberMappings)
 			}
 		case "deletemapping", "delete-mapping", "dm":
-			ctx := context.Background()
-			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-			defer cancel()
-
 			if len(args) != 2 {
 				fmt.Print("stream name: ")
 				_, _ = fmt.Scanln(&cg.streamName)
@@ -799,12 +787,16 @@ func prompt() {
 				break
 			}
 
+			ctx := context.Background()
+			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
 			err = streamconsumergroup.DeleteMemberMappings(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+			cancel()
 			if err != nil {
 				fmt.Printf("can't delete member mappings: %v", err)
 			} else {
 				fmt.Printf("member mappings deleted")
 			}
+
 		case "create":
 			fmt.Print("stream name: ")
 			_, _ = fmt.Scanln(&cg.streamName)
@@ -864,6 +856,7 @@ func prompt() {
 						break
 					}
 				}
+
 				err := cg.createElasticAction(nil)
 				if err != nil {
 					fmt.Printf("can't create elastic partitioned consumer group: %v", err)
@@ -981,25 +974,29 @@ func prompt() {
 				cg.memberName = strings.TrimSpace(args[2])
 			}
 
-			myContext := context.Background()
-			myContext, cg.myConsumeContextCancel = context.WithCancel(myContext)
+			cg.setProcessingTime(cg.processingDuration.String())
 
-			cg.consume(myContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
-			cg.consuming = true
-			cg.qwg.Wait()
-			cg.consuming = false
-		case "stop", "leave":
-			if !cg.consuming {
-				fmt.Println("not consuming")
+			myContext := context.Background()
+			myContext, cancel := context.WithTimeout(myContext, time.Second*5)
+			err = cg.consume(myContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
+			cancel()
+			if err != nil {
+				fmt.Printf("can't join the partitioned consumer group: %v\n", err)
+				cg.consuming = false
 				break
 			}
 
-			cg.myConsumeContextCancel()
+			// wait for the go routine to stop consuming (because of an error happening or because of the consumer getting deleted)
+			err = <-cg.cgContext.Done()
+			if err != nil {
+				log.Printf("instanced returned with an error: %v\n", err)
+			} else {
+				log.Printf("instanced returned with no error\n")
+			}
 			cg.consuming = false
-			cg.memberName = ""
 		case "":
 		default:
-			fmt.Printf("unknown command: %s", command)
+			fmt.Printf("unknown command: %s\n", command)
 		}
 	}
 }

@@ -37,19 +37,22 @@ type ElasticConsumerGroupConsumerInstance struct {
 	StreamName             string
 	ConsumerGroupName      string
 	MemberName             string
-	CConfig                jetstream.ConsumerConfig
 	Config                 *ElasticConsumerGroupConfig
-	Consumer               jetstream.Consumer
-	CurrentPID             string
-	ConsumerConsumeContext jetstream.ConsumeContext
 	MessageHandlerCB       func(msg jetstream.Msg)
+	consumerUserConfig     jetstream.ConsumerConfig // The user provided config
+	consumer               jetstream.Consumer
+	currentPinnedID        string
+	consumerConsumeContext jetstream.ConsumeContext
 	js                     jetstream.JetStream
 	kv                     jetstream.KeyValue
+	contextCancel          context.CancelFunc
+	keyWatcher             jetstream.KeyWatcher
+	doneChan               chan error
 }
 
 // ElasticConsumerGroupConfig is the configuration of an elastic consumer group
 type ElasticConsumerGroupConfig struct {
-	MaxMembers            uint            `json:"max_members"`                  // the maximum number of members the consumer group can have, i.e. the number of partitions
+	MaxMembers            uint            `json:"max_members"`                  // The maximum number of members the consumer group can have, i.e. the number of partitions
 	Filter                string          `json:"filter"`                       // The filter, used to both filter the message and partition them, must include at least one "*" wildcard
 	PartitioningWildcards []int           `json:"partitioning_wildcards"`       // The indexes of the wildcards in the filter that will be used for partitioning. For example, if the subject has the pattern `"foo.<key>", then the filter is "foo.*" and the partitioning wildcard is 1.
 	MaxBufferedMsgs       int64           `json:"max_buffered_msg,omitempty"`   // The max number of messages buffered in the consumer group's stream
@@ -79,93 +82,122 @@ func GetElasticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamNam
 	return getElasticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
 }
 
-// ElasticConsume is the main consume function that will consume messages from the stream (when active) and call the message handler for each message
-// Will not return until the context is done or the consumer group config is deleted, or some unrecoverable error occurs
-func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig) error {
+// ElasticConsume is the function that will start a go routine to consume messages from the stream (when active)
+func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig) (ConsumerGroupConsumeContext, error) {
+	var err error
+
 	if messageHandler == nil {
-		return errors.New("a message handler must be provided")
+		return nil, errors.New("a message handler must be provided")
 	}
 
 	instance := ElasticConsumerGroupConsumerInstance{
-		StreamName:        streamName,
-		ConsumerGroupName: consumerGroupName,
-		MemberName:        memberName,
-		CConfig:           config,
-		MessageHandlerCB:  messageHandler,
+		StreamName:         streamName,
+		ConsumerGroupName:  consumerGroupName,
+		MemberName:         memberName,
+		consumerUserConfig: config,
+		MessageHandlerCB:   messageHandler,
 	}
 
-	js, err := jetstream.New(nc)
+	instance.js, err = jetstream.New(nc)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	instance.js = js
-
-	_, err = js.Stream(ctx, composeCGSName(streamName, consumerGroupName))
+	_, err = instance.js.Stream(ctx, composeCGSName(streamName, consumerGroupName))
 	if err != nil {
-		return fmt.Errorf("the elastic consumer group's stream does not exist: %w", err)
+		return nil, fmt.Errorf("the elastic consumer group's stream does not exist: %w", err)
 	}
 
-	kv, err := js.KeyValue(ctx, kvElasticBucketName)
+	instance.kv, err = instance.js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
-		return fmt.Errorf("the elastic consumer group KV bucket doesn't exist: %w", err)
+		return nil, fmt.Errorf("the elastic consumer group KV bucket doesn't exist: %w", err)
 	}
-
-	instance.kv = kv
 
 	// Try to get the current config if there's one
-	instance.Config, err = getElasticConsumerGroupConfig(ctx, kv, streamName, consumerGroupName)
+	instance.Config, err = getElasticConsumerGroupConfig(ctx, instance.kv, streamName, consumerGroupName)
 	if err != nil {
-		return fmt.Errorf("can not get the current elastic consumer group's config: %w", err)
+		return nil, fmt.Errorf("can not get the current elastic consumer group's config: %w", err)
+	}
+
+	instanceRoutineContext := context.Background()
+	instanceRoutineContext, instance.contextCancel = context.WithCancel(instanceRoutineContext)
+
+	instance.keyWatcher, err = instance.kv.Watch(ctx, composeKey(streamName, consumerGroupName))
+	if err != nil {
+		return nil, err
 	}
 
 	if instance.Config.IsInMembership(memberName) {
 		instance.joinMemberConsumer(ctx)
 	}
 
-	watcher, err := kv.Watch(ctx, composeKey(streamName, consumerGroupName))
-	if err != nil {
-		return err
+	instance.doneChan = make(chan error, 1)
+
+	go instance.instanceRoutine(instanceRoutineContext)
+
+	return &instance, nil
+}
+
+// Stop stops the consumer instance
+func (instance *ElasticConsumerGroupConsumerInstance) Stop() {
+	if instance.contextCancel != nil {
+		instance.contextCancel()
 	}
+}
+
+// Done returns the error (if any) when the consumer group instance is done or an unrecoverable error occurs
+func (instance *ElasticConsumerGroupConsumerInstance) Done() <-chan error {
+	return instance.doneChan
+}
+
+// The control routine that will watch for changes in the consumer group config
+func (instance *ElasticConsumerGroupConsumerInstance) instanceRoutine(ctx context.Context) {
 	for {
 		select {
-		case updateMsg, ok := <-watcher.Updates():
+		case updateMsg, ok := <-instance.keyWatcher.Updates():
 			if !ok {
-				instance.stop()
-				return errors.New("the elastic consumer group config watcher has been closed, stopping")
+				instance.stopConsuming()
+				instance.doneChan <- errors.New("the elastic consumer group config watcher has been closed, stopping")
+				return
 			}
 
 			if updateMsg == nil {
 				break
 			}
 
-			// If the message is a delete operation, we stop and return
+			// If the message is a delete operation, we stop consuming and return
 			if updateMsg.Operation() == jetstream.KeyValueDelete {
-				instance.stop()
-				return nil
+				instance.stopConsuming()
+				instance.doneChan <- nil
+				return
 			}
 
 			var newConfig ElasticConsumerGroupConfig
 			err := json.Unmarshal(updateMsg.Value(), &newConfig)
 			if err != nil {
-				return fmt.Errorf("elastic consumer group %s config watcher received a bad JSON message: %w", composeKey(streamName, consumerGroupName), err)
+				instance.stopConsuming()
+				instance.doneChan <- fmt.Errorf("elastic consumer group %s config watcher received a bad JSON message: %w", composeKey(instance.StreamName, instance.ConsumerGroupName), err)
+				return
 			}
 
 			err = validateConfig(newConfig)
 			if err != nil {
-				return fmt.Errorf("elastic consumer group %s config watcher received an invalid config: %w", composeKey(streamName, consumerGroupName), err)
+				instance.stopConsuming()
+				instance.doneChan <- fmt.Errorf("elastic consumer group %s config watcher received an invalid config: %w", composeKey(instance.StreamName, instance.ConsumerGroupName), err)
+				return
 			}
 
 			if newConfig.MaxMembers != instance.Config.MaxMembers ||
 				newConfig.Filter != instance.Config.Filter || newConfig.MaxBufferedMsgs != instance.Config.MaxBufferedMsgs || newConfig.MaxBufferedBytes != instance.Config.MaxBufferedBytes ||
 				!reflect.DeepEqual(newConfig.PartitioningWildcards, instance.Config.PartitioningWildcards) {
-				instance.stop()
-				return fmt.Errorf("elastic consumer group config %s watcher received a bad change in the configuration: max number of members, buffered messages, filter or partitioning wildcards changed", composeCGSName(streamName, memberName))
+				instance.stopConsuming()
+				instance.doneChan <- fmt.Errorf("elastic consumer group config %s watcher received a bad change in the configuration: max number of members, buffered messages, filter or partitioning wildcards changed", composeCGSName(instance.StreamName, instance.MemberName))
+				return
 			}
 			// new config looks ok to use
 
 			// optimization if nothing changed and already have the consumer for that member
-			if instance.Consumer != nil && reflect.DeepEqual(newConfig.Members, instance.Config.Members) && reflect.DeepEqual(newConfig.MemberMappings, instance.Config.MemberMappings) {
+			if instance.consumer != nil && reflect.DeepEqual(newConfig.Members, instance.Config.Members) && reflect.DeepEqual(newConfig.MemberMappings, instance.Config.MemberMappings) {
 				break
 			}
 
@@ -174,13 +206,14 @@ func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consu
 			instance.processMembershipChange(ctx)
 
 		case <-ctx.Done():
-			instance.stop()
-			return nil
+			instance.stopConsuming()
+			instance.doneChan <- nil
+			return
 		case <-time.After(consumerIdleTimeout + 1*time.Second):
 			// We want it to always be trying to self-correct if it's not currently joined (and in membership, so we should really be trying to consume something).
 			// This is what does the 'catch-all' if no-one deletes and re-creates the elastic consumers when the membership changes, because of the elastic consumer's idle time out eventually cleans up the old consumer.
 			// Which means that the consumer Create in joinMemberConsumer will then re-create it with the right filters for our membership's view, and then we can start actually consuming from it.
-			if instance.Consumer == nil && instance.Config.IsInMembership(instance.MemberName) {
+			if instance.consumer == nil && instance.Config.IsInMembership(instance.MemberName) {
 				instance.joinMemberConsumer(ctx)
 			}
 		}
@@ -675,39 +708,39 @@ func ElasticGetPartitionFilters(config ElasticConsumerGroupConfig, memberName st
 }
 
 // Shim callback function to strip the partition number from the subject before passing the message to the user's callback
-func (consumerInstance *ElasticConsumerGroupConsumerInstance) consumerCallback(msg jetstream.Msg) {
+func (instance *ElasticConsumerGroupConsumerInstance) consumerCallback(msg jetstream.Msg) {
 	// check pinned-id is there
 	pid := msg.Headers().Get("Nats-Pin-Id")
 	if pid == "" {
 		log.Println("Warning: received a message without a pinned-id header")
 		// TODO should we give up here and say there's a problem? (maybe running over a pre 2.11 version of the server?)
 	} else {
-		if consumerInstance.CurrentPID == "" {
-			consumerInstance.CurrentPID = pid
-		} else if consumerInstance.CurrentPID != pid {
+		if instance.currentPinnedID == "" {
+			instance.currentPinnedID = pid
+		} else if instance.currentPinnedID != pid {
 			// received a message with a different pinned-id header, assuming there was a change of pinned member
-			consumerInstance.CurrentPID = pid
+			instance.currentPinnedID = pid
 		}
 	}
 
 	strippedMessage := newConsumerGroupMsg(msg)
-	consumerInstance.MessageHandlerCB(strippedMessage)
+	instance.MessageHandlerCB(strippedMessage)
 }
 
 // joinMemberConsumer attempts to create (which is idempotent for a given consumer configuration) the member's consumer if the member is in the current list of members and if successful, starts consuming messages from it
-func (consumerInstance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer(ctx context.Context) {
+func (instance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer(ctx context.Context) {
 	var err error
 
-	filters := ElasticGetPartitionFilters(*consumerInstance.Config, consumerInstance.MemberName)
+	filters := ElasticGetPartitionFilters(*instance.Config, instance.MemberName)
 
 	// if we are no longer in the membership list, nothing to do
 	if len(filters) == 0 {
 		return
 	}
 
-	config := consumerInstance.CConfig
+	config := instance.consumerUserConfig
 	config.Durable = ""
-	config.Name = consumerInstance.MemberName
+	config.Name = instance.MemberName
 	config.FilterSubjects = filters
 
 	config.AckPolicy = jetstream.AckExplicitPolicy
@@ -720,22 +753,22 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer
 		config.AckWait = ackWait
 	}
 
-	config.PriorityGroups = []string{consumerInstance.MemberName}
+	config.PriorityGroups = []string{instance.MemberName}
 	config.PriorityPolicy = jetstream.PriorityPolicyPinned
 	config.PinnedTTL = config.AckWait
 
 	// before starting to actually consume messages from the stream consumer, we need to verify that the consumer is created with the correct filters, so Create() must be successful
-	consumerInstance.Consumer, err = consumerInstance.js.CreateConsumer(ctx, composeCGSName(consumerInstance.StreamName, consumerInstance.ConsumerGroupName), config)
+	instance.consumer, err = instance.js.CreateConsumer(ctx, composeCGSName(instance.StreamName, instance.ConsumerGroupName), config)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrConsumerExists) {
 			// try to delete the consumer if we can't create it to our desired config, we or someone else will try to re-create it within 5 seconds
-			err := consumerInstance.js.DeleteConsumer(ctx, composeCGSName(consumerInstance.StreamName, consumerInstance.ConsumerGroupName), consumerInstance.MemberName)
+			err := instance.js.DeleteConsumer(ctx, composeCGSName(instance.StreamName, instance.ConsumerGroupName), instance.MemberName)
 			if err != nil {
 				log.Printf("Warning: error trying to delete our member's consumer after trying to create it to our desired config: %v\n", err)
 				// will try again later
 				return
 			} else {
-				consumerInstance.Consumer, err = consumerInstance.js.CreateConsumer(ctx, composeCGSName(consumerInstance.StreamName, consumerInstance.ConsumerGroupName), config)
+				instance.consumer, err = instance.js.CreateConsumer(ctx, composeCGSName(instance.StreamName, instance.ConsumerGroupName), config)
 				if err != nil {
 					// will try again later
 					return
@@ -748,37 +781,47 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer
 		return
 	}
 
-	consumerInstance.startConsuming()
+	instance.startConsuming()
 }
 
 // Start to actively consume (pull) messages from the consumer
-func (consumerInstance *ElasticConsumerGroupConsumerInstance) startConsuming() {
+func (instance *ElasticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
-	consumerInstance.ConsumerConsumeContext, err = consumerInstance.Consumer.Consume(consumerInstance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(consumerInstance.MemberName))
+	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(instance.MemberName))
 	if err != nil {
 		log.Printf("Error starting to consume on my consumer: %v\n", err)
 		return
 	}
-
 }
 
-func (consumerInstance *ElasticConsumerGroupConsumerInstance) processMembershipChange(ctx context.Context) {
-	// there's a membership change
+// Stops the consumption of messages from the consumer
+func (instance *ElasticConsumerGroupConsumerInstance) stopConsuming() {
+	if instance.consumer != nil {
+		if instance.consumerConsumeContext != nil {
+			instance.consumerConsumeContext.Stop()
+			instance.consumerConsumeContext = nil
+		}
 
+		instance.consumer = nil
+	}
+}
+
+// Processes membership changes
+func (instance *ElasticConsumerGroupConsumerInstance) processMembershipChange(ctx context.Context) {
 	// get the current consumer info to get the current pinned-id
 	var isPinned bool
 
-	if consumerInstance.Consumer != nil {
-		ci, err := consumerInstance.Consumer.Info(ctx)
+	if instance.consumer != nil {
+		ci, err := instance.consumer.Info(ctx)
 		if err == nil { // ignoring error as the consumer may not exist yet
 			if slices.ContainsFunc(ci.PriorityGroups, func(pg jetstream.PriorityGroupState) bool {
-				return pg.Group == consumerInstance.MemberName && pg.PinnedClientID == consumerInstance.CurrentPID
+				return pg.Group == instance.MemberName && pg.PinnedClientID == instance.currentPinnedID
 			}) {
 				isPinned = true
 			}
 		}
-		consumerInstance.stop()
+		instance.stopConsuming()
 	}
 
 	// We must first delete the consumer in case some new partitions got assigned to us as a member was removed.
@@ -791,7 +834,7 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) processMembershipC
 
 	// only the pinned member should delete the consumer
 	if isPinned {
-		err := consumerInstance.js.DeleteConsumer(ctx, composeCGSName(consumerInstance.StreamName, consumerInstance.ConsumerGroupName), consumerInstance.MemberName)
+		err := instance.js.DeleteConsumer(ctx, composeCGSName(instance.StreamName, instance.ConsumerGroupName), instance.MemberName)
 		if err != nil {
 			if !errors.Is(err, jetstream.ErrConsumerNotFound) && !errors.Is(err, context.DeadlineExceeded) {
 				log.Printf("Error trying to delete our member's consumer: %v\n", err)
@@ -802,22 +845,11 @@ func (consumerInstance *ElasticConsumerGroupConsumerInstance) processMembershipC
 		time.Sleep(time.Duration(rand.IntN(100)+400) * time.Millisecond)
 	}
 
-	consumerInstance.joinMemberConsumer(ctx)
-}
-
-func (consumerInstance *ElasticConsumerGroupConsumerInstance) stop() {
-	if consumerInstance.Consumer != nil {
-		if consumerInstance.ConsumerConsumeContext != nil {
-			consumerInstance.ConsumerConsumeContext.Stop()
-			consumerInstance.ConsumerConsumeContext = nil
-		}
-
-		consumerInstance.Consumer = nil
-	}
+	instance.joinMemberConsumer(ctx)
 }
 
 func validateConfig(config ElasticConsumerGroupConfig) error {
-	// First validate the max number of members
+	// Validate the max number of members
 	numActualPartitions := config.MaxMembers
 	if numActualPartitions < 1 {
 		return errors.New("the max number of members must be >= 1")

@@ -38,6 +38,11 @@ type ConsumerGroupMsg struct {
 	msg jetstream.Msg
 }
 
+type ConsumerGroupConsumeContext interface {
+	Stop()
+	Done() <-chan error
+}
+
 // Compose the consumer group's config key name
 func composeKey(streamName string, consumerGroupName string) string {
 	return streamName + "." + consumerGroupName
