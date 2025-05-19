@@ -422,7 +422,7 @@ func messageHandler(processingTime time.Duration) func(msg jetstream.Msg) {
 		var seqNumber uint64
 		mmd, err := msg.Metadata()
 		if err != nil {
-			fmt.Printf("can't get message metadata: %v", err)
+			fmt.Printf("can't get message metadata: %v\n", err)
 		}
 		seqNumber = mmd.Sequence.Stream
 		fmt.Printf("[%s] subject=%s, seq=%d, pinnedID=%s. Processing for %v ... ", cg.memberName, msg.Subject(), seqNumber, pid, processingTime)
@@ -974,7 +974,11 @@ func prompt() {
 				cg.memberName = strings.TrimSpace(args[2])
 			}
 
-			cg.setProcessingTime(cg.processingDuration.String())
+			_, err := cg.setProcessingTime(cg.processingDuration.String())
+			if err != nil {
+				fmt.Printf("error: can't parse processing time: %v\n", err)
+				break
+			}
 
 			myContext := context.Background()
 			myContext, cancel := context.WithTimeout(myContext, time.Second*5)

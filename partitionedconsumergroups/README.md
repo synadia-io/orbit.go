@@ -16,8 +16,6 @@
 
 Initial implementation of a client-side partitioned consumer group feature for NATS streams leveraging some of the new features introduced in `nats-server` version 2.11.
 
-
-
 Note that post 2.11 versions of `nats-server` may include new features related to the consumer group use case that could render this client-side library unneeded (or make much smaller) 
 # Overview
 
@@ -35,17 +33,18 @@ NATS Partitioned consumer groups come in two flavors: *elastic* and *static*.
 
 ***Elastic*** partitioned consumer groups on the other hand are implemented differently: the stream doesn't need to already contain a partition number subject token and you can administratively add and drop members from the consumer group's config whenever you want without having to delete and re-create the consumer (like you have to with static consumer groups).
 
-In both cases you must specify when creating the consumer group the maximum number of members for the group (which is actually the number of partitions used when partitioning the messages), plus a list of "members" (named instances of the consuming application). The library takes care of distributing the members over the list of partitions using either a 'balanced' distribution (the partitions are evenly distributed between the members) or 'mappings' (where you assign administratively the partitions to the members). The membership list or mappings must be specified at consumer group creation time for static consumer groups, but can be changed at any time for elastic consumer groups. You can run multiple instances of a member at a time, only one of them will be 'pinned' and receive messages at a time.
+***In both cases***
+In both cases you must specify when creating the consumer group the maximum number of members for the group (which is actually the number of partitions used when partitioning the messages), plus a list of "members" (named instances of the consuming application). The library takes care of distributing the members over the list of partitions using either a 'balanced' distribution (the partitions are evenly distributed between the members) or 'mappings' (where you assign administratively the mappings of partitions to the members). The membership list or mappings must be specified once at consumer group creation time for static consumer groups, but can be changed at any time for elastic consumer groups.
 
 Each consumer groups has a configuration which is stored in a KV bucket (named `static-consumer-groups` or `elastic-consumer-groups`).
 
 ## Static
 
-Static consumer groups operate on a stream where the partition number has already been inserted in the subject as the first token of the messages. This is not elastic: you create the consumer with a list of members once, and you can not adjust that membership list or mapping for the life of the consumer group (if you want to change the mapping, up to you to delete and re-create the static partitioned consumer group, and to figure out which sequence number you may want this new static partitioned consumer group to start at).
+Static consumer groups operate on a stream where the partition number has already been inserted in the subject as the first token of the messages. In this mode of operation, the library creates JetStream consumers (one per member of the group) directly on the stream. This is not elastic: you create the consumer with a list of members once, and you can not adjust that membership list or mapping for the life of the consumer group (if you want to change the mapping, up to you to delete and re-create the static partitioned consumer group, and to figure out which sequence number you may want this new static partitioned consumer group to start from).
 
 ## Elastic
 
-Elastic consumer groups operate on any stream, the messages in the stream do not have the partition number present in their subjects. The membership list (or mapping) for the consumer can be adjusted administratively at any time and up to the max number of members defined initially. The consumer group in this case creates a new work-queue stream that sources from the stream, inserting the partition number subject token on the way. The consumer group takes care of creating this sourced stream and managing all the consumers on this stream according to the current membership, the developer only needs to provide a stream name, consumer group name and a member name and callback and make sure to ack the messages.
+Elastic consumer groups operate on any stream, the messages in the stream do not have the partition number present in their subjects. The membership list (or mapping) for the consumer can be adjusted administratively at any time and up to the max number of members defined initially. The consumer group library in this case creates a new work-queue stream that sources from the stream, inserting the partition number subject token on the way. The consumer group library takes care of creating this sourced stream and managing all the consumers on this stream according to the current membership, the developer only needs to provide a stream name, consumer group name and a member name and callback and make sure to ack the messages. You can specify (at creation time) a maximum size (in number of messages or bytes) for this working queue stream, but be aware that once this stream has reached its limit, it will pause the sourcing for at least 1 second (expecting messages to be consumed from the consumer group, thereby making room for more messages to be sourced) so you will want to set this value to more than 1 second's worth of message consumption by the clients of the consumer group or this could result in small delays in the consumption of messages from the consumer group.
 
 ## High availability
 
@@ -53,9 +52,9 @@ You can deploy and run multiple instances of the consuming application using the
 
 ## Using Partitioned Consumer Groups
 
-For the client application programmer, there is one basic functionality exposed by both static and elastic partitioned consumer groups: join and consume messages (when selected) from a named consumer group on a stream by specifying a _member name_ and a _callback_.
+For the client application programmer, there is one basic functionality exposed by both static and elastic partitioned consumer groups: join and consume messages (when selected) from a named consumer group on a stream by specifying a _member name_, a regular JetStream consumer config, and a _callback_. The library takes care of stripping the partition number token from the subject such that you can use any existing callback code you may already have as is.
 
-There also are administrative function to create and delete consumer groups, plus, in the case of elastic consumer groups only, the ability to add or drop members or to set a custom member to partition mapping on an existing elastic consumer group.
+There are also administrative functions to create and delete consumer groups, plus, in the case of elastic consumer groups only, the ability to add/drop members or to change the custom member to partition mappings on an existing elastic consumer group.
 
 ## CLI
 
@@ -83,6 +82,28 @@ At this point the elastic consumer group is created, but no members have been ad
 
 Add "m1" and "m2" to the membership: `cg elastic add foo cg m1 m2`, see how they start receiving messages. Then drop "m1" from the membership `cg elastic drop foo cg m1`, add it again, and each time watch as the consumer starts and stops receiving messages, run another consumer "m3" and add/drop it from the membership, etc...
 
+As soon as the elastic consumer group is created, you can start instances of consuming clients (e.g. `cg elastic consume foo cg m1`), and they will start to consume messages as soon as (and as long as) they are in the group's membership.
+
+### Example
+
+To start consuming from a static consumer group, you call `streamconsumergroup.StaticConsume`. To start consuming from an elastic consumer group you call `streamconsumergroup.ElasticConsume`. These calls will return an error and a `ConsumerGroupConsumeContext`. Assuming no error is returned,this will create a Go routine that handles consumption and monitoring for changes in the consumer group's config. 
+
+e.g. for static
+```golang
+consumerGroupContext, err = streamconsumergroup.StaticConsume(myContext, nc, streamName, consumerGroupName, memberName, messageHandler, config)
+```
+The arguments are:
+- `myContext` is a Golang `context.Context` which is going to be used only for the operations that are part of joining the consumer group. You must use `Stop()` on the `ConsumerGroupContext` being returned to stop the consumption.
+- `nc` is a NATS connection object.
+- `streamName` is the name of the Stream on which the consumer group has been created.
+- `consumerGroupName` is the name of the consumer group that has been created on the stream.
+- `memberName` is the name of the member you want to join the consumer group as.
+- `messageHandler` is a callback function that gets invoked and passed the messages for consumption. Note that if you are using an elastic consumer group you _must_ explicitly acknowledge (positively or negatively) the message in your callback.
+- `config` is a regular JetStream consumer config to let you specify your own values. Note that some of the values in that consumer config could get overwritten by the consumer group library. For example, for elastic consumer groups it will set the acknowledgement mode of the consumer to 'explicit acknowledgements', while for static consumer groups you can use any acknowledgement mode you want. Also, the 'ack wait' can be overwritten to if it is too small (as there is a relationship that must be maintained between the ack wait, consumer fetch time out and pinned TTL values in order to avoid 'flapping' of the pinned client).
+
+Consumption stops either when some error is encountered (for example, any change to the consumer group's config in the case of a static consumer group), the consumer group's config gets deleted, or you invoke `Stop()` on the `ConsumerGroupConsumeContext`. Invoking `Done()` on the `ConsumerGroupConsumeContext` will return a channel on which you can receive the error code indicating why the consumption was stopped. This error code will be `nil` if the consumption terminates normally (due to the consumer group getting deleted or `Stop()` being invoked on the `ConsumerGroupConsumeContext`).
+
+You can look at the `cg` CLI tool's source code for examples of how to create and consume for both static and elastic consumer groups.
 # Requirements
 
 Note: partitioned consumer groups require NATS server version 2.11 or above.
