@@ -84,6 +84,18 @@ func ElasticConsume(ctx context.Context, js jetstream.JetStream, streamName stri
 		return nil, errors.New("a message handler must be provided")
 	}
 
+	if config.AckPolicy != jetstream.AckExplicitPolicy {
+		return nil, errors.New("the ack policy when consuming from elastic consumer groups must be explicit")
+	}
+
+	if config.InactiveThreshold == 0 {
+		config.InactiveThreshold = consumerIdleTimeout
+	}
+
+	if config.AckWait < ackWait {
+		config.AckWait = ackWait
+	}
+
 	instance := ElasticConsumerGroupConsumerInstance{
 		StreamName:         streamName,
 		ConsumerGroupName:  consumerGroupName,
@@ -685,16 +697,6 @@ func (instance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer() {
 	config.Durable = ""
 	config.Name = instance.MemberName
 	config.FilterSubjects = filters
-
-	config.AckPolicy = jetstream.AckExplicitPolicy
-
-	if config.InactiveThreshold == 0 {
-		config.InactiveThreshold = consumerIdleTimeout
-	}
-
-	if config.AckWait == 0 {
-		config.AckWait = ackWait
-	}
 
 	config.PriorityGroups = []string{instance.MemberName}
 	config.PriorityPolicy = jetstream.PriorityPolicyPinned

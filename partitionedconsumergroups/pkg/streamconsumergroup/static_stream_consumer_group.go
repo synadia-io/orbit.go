@@ -71,18 +71,22 @@ func GetStaticConsumerGroupConfig(ctx context.Context, js jetstream.JetStream, s
 }
 
 // StaticConsume is the function that will start a go routine to consume messages from the stream (when active)
-func StaticConsume(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), cconfig jetstream.ConsumerConfig) (ConsumerGroupConsumeContext, error) {
+func StaticConsume(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig) (ConsumerGroupConsumeContext, error) {
 	var err error
 
 	if messageHandler == nil {
 		return nil, errors.New("a message handler must be provided")
 	}
 
+	if config.AckWait < ackWait {
+		config.AckWait = ackWait
+	}
+
 	instance := StaticConsumerGroupConsumerInstance{
 		StreamName:         streamName,
 		ConsumerGroupName:  consumerGroupName,
 		MemberName:         memberName,
-		consumerUserConfig: cconfig,
+		consumerUserConfig: config,
 		MessageHandlerCB:   messageHandler,
 	}
 
@@ -407,10 +411,6 @@ func (instance *StaticConsumerGroupConsumerInstance) joinMemberConsumerStatic(ct
 	config := instance.consumerUserConfig
 	config.Durable = composeStaticConsumerName(instance.ConsumerGroupName, instance.MemberName)
 	config.FilterSubjects = filters
-
-	if config.AckWait == 0 {
-		config.AckWait = ackWait
-	}
 
 	config.PriorityGroups = []string{instance.MemberName}
 	config.PriorityPolicy = jetstream.PriorityPolicyPinned
