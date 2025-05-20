@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/choria-io/fisk"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-io/orbit.go/natscontext"
 	"log"
@@ -46,10 +45,9 @@ type cgStruct struct {
 	consuming              bool
 	myConsumeContextCancel context.CancelFunc
 	natsContext            string
-	natsContextSettings    natscontext.Settings
 	consumerStatic         bool
 	force                  bool
-	nc                     *nats.Conn
+	js                     jetstream.JetStream
 	prompt                 bool
 	cgContext              streamconsumergroup.ConsumerGroupConsumeContext
 }
@@ -77,10 +75,8 @@ func (cg *cgStruct) setProcessingTime(processingTimeInput string) (time.Duration
 
 func (cg *cgStruct) lsStaticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	groups, err := streamconsumergroup.ListStaticConsumerGroups(ctx, cg.nc, cg.streamName)
+	groups, err := streamconsumergroup.ListStaticConsumerGroups(ctx, cg.js, cg.streamName)
 	if err != nil {
 		return err
 	}
@@ -91,10 +87,8 @@ func (cg *cgStruct) lsStaticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) lsElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	groups, err := streamconsumergroup.ListElasticConsumerGroups(ctx, cg.nc, cg.streamName)
+	groups, err := streamconsumergroup.ListElasticConsumerGroups(ctx, cg.js, cg.streamName)
 	if err != nil {
 		return err
 	}
@@ -105,10 +99,8 @@ func (cg *cgStruct) lsElasticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) infoStaticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	config, err := streamconsumergroup.GetStaticConsumerGroupConfig(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+	config, err := streamconsumergroup.GetStaticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	} else {
@@ -120,7 +112,7 @@ func (cg *cgStruct) infoStaticAction(_ *fisk.ParseContext) error {
 		} else {
 			fmt.Printf("no members or mappings defined\n")
 		}
-		activeMembers, err := streamconsumergroup.ListStaticActiveMembers(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+		activeMembers, err := streamconsumergroup.ListStaticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 		if err != nil {
 			return err
 		}
@@ -131,10 +123,8 @@ func (cg *cgStruct) infoStaticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) infoElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	config, err := streamconsumergroup.GetElasticConsumerGroupConfig(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+	config, err := streamconsumergroup.GetElasticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	} else {
@@ -146,7 +136,7 @@ func (cg *cgStruct) infoElasticAction(_ *fisk.ParseContext) error {
 		} else {
 			fmt.Printf("no members or mappings defined\n")
 		}
-		activeMembers, err := streamconsumergroup.ListElasticActiveMembers(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+		activeMembers, err := streamconsumergroup.ListElasticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 		if err != nil {
 			return err
 		}
@@ -157,10 +147,8 @@ func (cg *cgStruct) infoElasticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) addElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	members, err := streamconsumergroup.AddMembers(ctx, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberNames)
+	members, err := streamconsumergroup.AddMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberNames)
 
 	if err != nil {
 		return err
@@ -172,10 +160,8 @@ func (cg *cgStruct) addElasticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) dropElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	members, err := streamconsumergroup.DeleteMembers(ctx, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberNames)
+	members, err := streamconsumergroup.DeleteMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberNames)
 
 	if err != nil {
 		return err
@@ -187,10 +173,8 @@ func (cg *cgStruct) dropElasticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) createStaticBalancedAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	_, err := streamconsumergroup.CreateStatic(ctx, cg.nc, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.memberNames, []streamconsumergroup.MemberMapping{})
+	_, err := streamconsumergroup.CreateStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.memberNames, []streamconsumergroup.MemberMapping{})
 	if err != nil {
 		return err
 	}
@@ -200,12 +184,9 @@ func (cg *cgStruct) createStaticBalancedAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) createStaticMappedAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-
 	memberMappings, _ := parseMemberMappings(cg.memberMappingArgs)
 
-	_, err := streamconsumergroup.CreateStatic(ctx, cg.nc, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, []string{}, memberMappings)
+	_, err := streamconsumergroup.CreateStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, []string{}, memberMappings)
 	if err != nil {
 		return err
 	}
@@ -215,10 +196,8 @@ func (cg *cgStruct) createStaticMappedAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) createElasticAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
-	myContext, cancel := context.WithTimeout(myContext, time.Second*5)
-	defer cancel()
 
-	_, err := streamconsumergroup.CreateElastic(myContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.pwcis, cg.maxBufferedMsgs, cg.maxBufferedBytes)
+	_, err := streamconsumergroup.CreateElastic(myContext, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.pwcis, cg.maxBufferedMsgs, cg.maxBufferedBytes)
 	if err != nil {
 		return err
 	}
@@ -238,9 +217,7 @@ func (cg *cgStruct) deleteStaticAction(_ *fisk.ParseContext) error {
 	}
 
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-	err := streamconsumergroup.DeleteStatic(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+	err := streamconsumergroup.DeleteStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	}
@@ -259,9 +236,8 @@ func (cg *cgStruct) deleteElasticAction(_ *fisk.ParseContext) error {
 	}
 
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
-	err := streamconsumergroup.DeleteElastic(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+
+	err := streamconsumergroup.DeleteElastic(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	}
@@ -270,20 +246,18 @@ func (cg *cgStruct) deleteElasticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) createElasticMappingAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
 	myConsumeContext := context.Background()
 	_, cg.myConsumeContextCancel = context.WithCancel(myConsumeContext)
 
 	var config *streamconsumergroup.ElasticConsumerGroupConfig
-	config, err := streamconsumergroup.GetElasticConsumerGroupConfig(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+	config, err := streamconsumergroup.GetElasticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	}
 
 	config.MemberMappings, _ = parseMemberMappings(cg.memberMappingArgs)
-	err = streamconsumergroup.SetMemberMappings(ctx, cg.nc, cg.streamName, cg.consumerGroupName, config.MemberMappings)
+	err = streamconsumergroup.SetMemberMappings(ctx, cg.js, cg.streamName, cg.consumerGroupName, config.MemberMappings)
 	if err != nil {
 		return err
 	}
@@ -294,25 +268,21 @@ func (cg *cgStruct) createElasticMappingAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) deleteElasticMappingAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	err := streamconsumergroup.DeleteMemberMappings(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+	err := streamconsumergroup.DeleteMemberMappings(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 
 	return err
 }
 
 func (cg *cgStruct) memberStaticInfoAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	cgConfig, err := streamconsumergroup.GetStaticConsumerGroupConfig(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+	cgConfig, err := streamconsumergroup.GetStaticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	}
 
-	actives, err := streamconsumergroup.ListStaticActiveMembers(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
+	actives, err := streamconsumergroup.ListStaticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	}
@@ -332,10 +302,8 @@ func (cg *cgStruct) memberStaticInfoAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) memberElasticInfoAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	member, active, err := streamconsumergroup.ElasticIsInMembershipAndActive(ctx, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName)
+	member, active, err := streamconsumergroup.ElasticIsInMembershipAndActive(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberName)
 	if err != nil {
 		fmt.Printf("can't list active members: %v\n", err)
 	}
@@ -355,13 +323,11 @@ func (cg *cgStruct) memberElasticInfoAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) stepDownStaticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
 	myContext := context.Background()
 	_, cg.myConsumeContextCancel = context.WithCancel(myContext)
 
-	err := streamconsumergroup.StaticMemberStepDown(ctx, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName)
+	err := streamconsumergroup.StaticMemberStepDown(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberName)
 	if err != nil {
 		return err
 	}
@@ -371,10 +337,8 @@ func (cg *cgStruct) stepDownStaticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) stepDownElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-	defer cancel()
 
-	err := streamconsumergroup.ElasticMemberStepDown(ctx, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName)
+	err := streamconsumergroup.ElasticMemberStepDown(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberName)
 	if err != nil {
 		return err
 	}
@@ -386,19 +350,19 @@ func (cg *cgStruct) consumeStaticAction(_ *fisk.ParseContext) error {
 	myConsumeContext := context.Background()
 	myConsumeContext, cg.myConsumeContextCancel = context.WithCancel(myConsumeContext)
 	cg.static()
-	return cg.consume(myConsumeContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
+	return cg.consume(myConsumeContext, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
 }
 
 func (cg *cgStruct) consumeElasticAction(_ *fisk.ParseContext) error {
 	myConsumeContext := context.Background()
 	myConsumeContext, cg.myConsumeContextCancel = context.WithCancel(myConsumeContext)
 	cg.elastic()
-	return cg.consume(myConsumeContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
+	return cg.consume(myConsumeContext, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
 }
 
 // Example of consuming messages.
 // Can be used to demonstrate the consumer group functionality using this CLI tool.
-func (cg *cgStruct) consume(myContext context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), maxAcksPending int) error {
+func (cg *cgStruct) consume(myContext context.Context, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), maxAcksPending int) error {
 	cg.consuming = true
 	var err error
 	config := jetstream.ConsumerConfig{
@@ -408,9 +372,9 @@ func (cg *cgStruct) consume(myContext context.Context, nc *nats.Conn, streamName
 	}
 
 	if cg.consumerStatic {
-		cg.cgContext, err = streamconsumergroup.StaticConsume(myContext, nc, streamName, consumerGroupName, memberName, messageHandler, config)
+		cg.cgContext, err = streamconsumergroup.StaticConsume(myContext, cg.js, streamName, consumerGroupName, memberName, messageHandler, config)
 	} else {
-		cg.cgContext, err = streamconsumergroup.ElasticConsume(myContext, nc, streamName, consumerGroupName, memberName, messageHandler, config)
+		cg.cgContext, err = streamconsumergroup.ElasticConsume(myContext, cg.js, streamName, consumerGroupName, memberName, messageHandler, config)
 	}
 	return err
 }
@@ -428,8 +392,6 @@ func messageHandler(processingTime time.Duration) func(msg jetstream.Msg) {
 		fmt.Printf("[%s] subject=%s, seq=%d, pinnedID=%s. Processing for %v ... ", cg.memberName, msg.Subject(), seqNumber, pid, processingTime)
 		time.Sleep(processingTime)
 		ctx := context.Background()
-		ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-		defer cancel()
 		err = msg.DoubleAck(ctx)
 		if err != nil {
 			log.Printf("message could not be acked! (it will be or may already have been re-delivered): %+v\n", err)
@@ -568,13 +530,22 @@ func main() {
 	addCommonArgs(elasticConsumeCommand)
 	elasticConsumeCommand.Arg("member", "member name").Required().StringVar(&cg.memberName)
 
-	var err error
-
-	cg.nc, cg.natsContextSettings, err = natscontext.Connect(cg.natsContext)
+	nc, natsContextSettings, err := natscontext.Connect(cg.natsContext)
 	if err != nil {
 		log.Fatalf("can't connect using nats CLI context %s %v", cg.natsContext, err)
 	}
-	// TODO get the jetstream.JetStream here using jetstream.NewWithDomain(nc, cg.natsContextSettings.JSDomain) and pass it instead of nc to the functions
+
+	if natsContextSettings.JSDomain == "" {
+		cg.js, err = jetstream.New(nc)
+		if err != nil {
+			log.Fatalf("can't create jetstream context: %v", err)
+		}
+	} else {
+		cg.js, err = jetstream.NewWithDomain(nc, natsContextSettings.JSDomain)
+		if err != nil {
+			log.Fatalf("can't create jetstream context: %v", err)
+		}
+	}
 
 	// auto start consuming if all required flags are set
 	app.MustParseWithUsage(os.Args[1:])
@@ -788,9 +759,7 @@ func prompt() {
 			}
 
 			ctx := context.Background()
-			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-			err = streamconsumergroup.DeleteMemberMappings(ctx, cg.nc, cg.streamName, cg.consumerGroupName)
-			cancel()
+			err = streamconsumergroup.DeleteMemberMappings(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 			if err != nil {
 				fmt.Printf("can't delete member mappings: %v", err)
 			} else {
@@ -981,9 +950,7 @@ func prompt() {
 			}
 
 			myContext := context.Background()
-			myContext, cancel := context.WithTimeout(myContext, time.Second*5)
-			err = cg.consume(myContext, cg.nc, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
-			cancel()
+			err = cg.consume(myContext, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
 			if err != nil {
 				fmt.Printf("can't join the partitioned consumer group: %v\n", err)
 				cg.consuming = false

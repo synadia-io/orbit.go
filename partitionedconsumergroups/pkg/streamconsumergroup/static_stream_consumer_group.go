@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"log"
 	"reflect"
@@ -62,12 +61,7 @@ func (config *StaticConsumerGroupConfig) IsInMembership(name string) bool {
 }
 
 // GetStaticConsumerGroupConfig gets the static consumer group's config from the KV bucket
-func GetStaticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) (*StaticConsumerGroupConfig, error) {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, err
-	}
-
+func GetStaticConsumerGroupConfig(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string) (*StaticConsumerGroupConfig, error) {
 	kv, err := js.KeyValue(ctx, kvStaticBucketName)
 	if err != nil {
 		return nil, fmt.Errorf("the static consumer group KV bucket doesn't exist: %w", err)
@@ -77,7 +71,7 @@ func GetStaticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamName
 }
 
 // StaticConsume is the function that will start a go routine to consume messages from the stream (when active)
-func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), cconfig jetstream.ConsumerConfig) (ConsumerGroupConsumeContext, error) {
+func StaticConsume(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), cconfig jetstream.ConsumerConfig) (ConsumerGroupConsumeContext, error) {
 	var err error
 
 	if messageHandler == nil {
@@ -92,10 +86,7 @@ func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consum
 		MessageHandlerCB:   messageHandler,
 	}
 
-	instance.js, err = jetstream.New(nc)
-	if err != nil {
-		return nil, err
-	}
+	instance.js = js
 
 	_, err = instance.js.Stream(ctx, streamName)
 	if err != nil {
@@ -135,7 +126,6 @@ func StaticConsume(ctx context.Context, nc *nats.Conn, streamName string, consum
 	go instance.instanceRoutine(instanceRoutineContext)
 
 	return &instance, nil
-
 }
 
 // Stop stops the consumer group instance
@@ -199,7 +189,7 @@ func (instance *StaticConsumerGroupConsumerInstance) instanceRoutine(ctx context
 }
 
 // CreateStatic creates a static consumer group
-func CreateStatic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, maxNumMembers uint, filter string, members []string, memberMappings []MemberMapping) (*StaticConsumerGroupConfig, error) {
+func CreateStatic(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, maxNumMembers uint, filter string, members []string, memberMappings []MemberMapping) (*StaticConsumerGroupConfig, error) {
 	config := StaticConsumerGroupConfig{
 		MaxMembers:     maxNumMembers,
 		Filter:         filter,
@@ -210,11 +200,6 @@ func CreateStatic(ctx context.Context, nc *nats.Conn, streamName string, consume
 	err := validateStaticConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("invalid static consumer group config: %w", err)
-	}
-
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't get the JetStream instance: %w", err)
 	}
 
 	stream, err := js.Stream(ctx, streamName)
@@ -272,12 +257,7 @@ func CreateStatic(ctx context.Context, nc *nats.Conn, streamName string, consume
 }
 
 // DeleteStatic Deletes a static consumer group
-func DeleteStatic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) error {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return fmt.Errorf("couldn't get the JetStream instance: %w", err)
-	}
-
+func DeleteStatic(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string) error {
 	// First delete the config bucket's entry all the consumers for the consumer group
 	s, err := js.Stream(ctx, streamName)
 	if err != nil {
@@ -312,12 +292,7 @@ func DeleteStatic(ctx context.Context, nc *nats.Conn, streamName string, consume
 }
 
 // ListStaticConsumerGroups lists the static consumer groups for a given stream
-func ListStaticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName string) ([]string, error) {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, err
-	}
-
+func ListStaticConsumerGroups(ctx context.Context, js jetstream.JetStream, streamName string) ([]string, error) {
 	kv, err := js.KeyValue(ctx, kvStaticBucketName)
 	if err != nil {
 		return nil, fmt.Errorf("the static consumer group's KV bucket doesn't exist: %w", err)
@@ -343,12 +318,7 @@ func ListStaticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName str
 }
 
 // ListStaticActiveMembers lists the active members of a static consumer group
-func ListStaticActiveMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) ([]string, error) {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, err
-	}
-
+func ListStaticActiveMembers(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string) ([]string, error) {
 	kv, err := js.KeyValue(ctx, kvStaticBucketName)
 	if err != nil {
 		return nil, err
@@ -390,12 +360,7 @@ func ListStaticActiveMembers(ctx context.Context, nc *nats.Conn, streamName stri
 }
 
 // StaticMemberStepDown forces the current active (pinned) application instance for a member of a static consumer group to step down
-func StaticMemberStepDown(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string) error {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return err
-	}
-
+func StaticMemberStepDown(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string) error {
 	s, err := js.Stream(ctx, streamName)
 	if err != nil {
 		return err

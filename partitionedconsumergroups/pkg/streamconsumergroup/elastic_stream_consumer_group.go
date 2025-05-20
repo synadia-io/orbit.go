@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"log"
 	"math/rand/v2"
@@ -68,12 +67,7 @@ func (config *ElasticConsumerGroupConfig) IsInMembership(name string) bool {
 }
 
 // GetElasticConsumerGroupConfig gets the consumer group's config from the KV bucket
-func GetElasticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) (*ElasticConsumerGroupConfig, error) {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, err
-	}
-
+func GetElasticConsumerGroupConfig(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string) (*ElasticConsumerGroupConfig, error) {
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
 		return nil, fmt.Errorf("the elastic consumer group KV bucket doesn't exist: %w", err)
@@ -83,7 +77,7 @@ func GetElasticConsumerGroupConfig(ctx context.Context, nc *nats.Conn, streamNam
 }
 
 // ElasticConsume is the function that will start a go routine to consume messages from the stream (when active)
-func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig) (ConsumerGroupConsumeContext, error) {
+func ElasticConsume(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig) (ConsumerGroupConsumeContext, error) {
 	var err error
 
 	if messageHandler == nil {
@@ -98,10 +92,7 @@ func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consu
 		MessageHandlerCB:   messageHandler,
 	}
 
-	instance.js, err = jetstream.New(nc)
-	if err != nil {
-		return nil, err
-	}
+	instance.js = js
 
 	_, err = instance.js.Stream(ctx, composeCGSName(streamName, consumerGroupName))
 	if err != nil {
@@ -128,7 +119,7 @@ func ElasticConsume(ctx context.Context, nc *nats.Conn, streamName string, consu
 	}
 
 	if instance.Config.IsInMembership(memberName) {
-		instance.joinMemberConsumer(ctx)
+		instance.joinMemberConsumer()
 	}
 
 	instance.doneChan = make(chan error, 1)
@@ -214,7 +205,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) instanceRoutine(ctx contex
 			// This is what does the 'catch-all' if no-one deletes and re-creates the elastic consumers when the membership changes, because of the elastic consumer's idle time out eventually cleans up the old consumer.
 			// Which means that the consumer Create in joinMemberConsumer will then re-create it with the right filters for our membership's view, and then we can start actually consuming from it.
 			if instance.consumer == nil && instance.Config.IsInMembership(instance.MemberName) {
-				instance.joinMemberConsumer(ctx)
+				instance.joinMemberConsumer()
 			}
 		}
 	}
@@ -222,7 +213,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) instanceRoutine(ctx contex
 
 // CreateElastic creates an elastic consumer group
 // Creates the sourcing work queue stream that is going to be used by the members to actually consume messages
-func CreateElastic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, maxNumMembers uint, filter string, partitioningWildcards []int, maxBufferedMessages int64, maxBufferedBytes int64) (*ElasticConsumerGroupConfig, error) {
+func CreateElastic(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, maxNumMembers uint, filter string, partitioningWildcards []int, maxBufferedMessages int64, maxBufferedBytes int64) (*ElasticConsumerGroupConfig, error) {
 	config := ElasticConsumerGroupConfig{
 		MaxMembers:            maxNumMembers,
 		Filter:                filter,
@@ -237,11 +228,6 @@ func CreateElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 	}
 
 	filterDest := getPartitioningTransformDest(config)
-
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't get the JetStream instance:: %w", err)
-	}
 
 	stream, err := js.Stream(ctx, streamName)
 	if err != nil {
@@ -331,12 +317,7 @@ func CreateElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 }
 
 // DeleteElastic Deletes an elastic consumer group
-func DeleteElastic(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) error {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return fmt.Errorf("couldn't get the JetStream instance: %w", err)
-	}
-
+func DeleteElastic(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string) error {
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
 		return err
@@ -358,12 +339,8 @@ func DeleteElastic(ctx context.Context, nc *nats.Conn, streamName string, consum
 }
 
 // ListElasticConsumerGroups lists the elastic consumer groups for a given stream
-func ListElasticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName string) ([]string, error) {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, err
-	}
-
+func ListElasticConsumerGroups(ctx context.Context, js jetstream.JetStream, streamName string) ([]string, error) {
+	fmt.Printf("j=%v\n", js)
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
 		return nil, fmt.Errorf("error getting elastic consumer group KV bucket: %w", err)
@@ -389,14 +366,9 @@ func ListElasticConsumerGroups(ctx context.Context, nc *nats.Conn, streamName st
 }
 
 // AddMembers adds members to an elastic consumer group
-func AddMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberNamesToAdd []string) ([]string, error) {
+func AddMembers(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberNamesToAdd []string) ([]string, error) {
 	if streamName == "" || consumerGroupName == "" || len(memberNamesToAdd) == 0 {
 		return nil, errors.New("invalid stream name or elastic consumer group name or no member names")
-	}
-
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, err
 	}
 
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
@@ -448,14 +420,9 @@ func AddMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerG
 }
 
 // DeleteMembers drops members from an elastic consumer group
-func DeleteMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberNamesToDrop []string) ([]string, error) {
+func DeleteMembers(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberNamesToDrop []string) ([]string, error) {
 	if streamName == "" || consumerGroupName == "" || len(memberNamesToDrop) == 0 {
 		return nil, errors.New("invalid stream name or elastic consumer group name or no member names")
-	}
-
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, err
 	}
 
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
@@ -504,14 +471,9 @@ func DeleteMembers(ctx context.Context, nc *nats.Conn, streamName string, consum
 }
 
 // SetMemberMappings sets the custom member mappings for an elastic consumer group
-func SetMemberMappings(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberMappings []MemberMapping) error {
+func SetMemberMappings(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberMappings []MemberMapping) error {
 	if streamName == "" || consumerGroupName == "" || len(memberMappings) == 0 {
 		return errors.New("invalid stream name or elastic consumer group name or member mappings")
-	}
-
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return err
 	}
 
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
@@ -551,14 +513,9 @@ func SetMemberMappings(ctx context.Context, nc *nats.Conn, streamName string, co
 }
 
 // DeleteMemberMappings deletes the custom member mappings for an elastic consumer group
-func DeleteMemberMappings(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) error {
+func DeleteMemberMappings(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string) error {
 	if streamName == "" || consumerGroupName == "" {
 		return errors.New("invalid stream name or elastic consumer group name or member mappings")
-	}
-
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return err
 	}
 
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
@@ -589,12 +546,7 @@ func DeleteMemberMappings(ctx context.Context, nc *nats.Conn, streamName string,
 }
 
 // ListElasticActiveMembers lists the active members of an elastic consumer group
-func ListElasticActiveMembers(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string) ([]string, error) {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return nil, err
-	}
-
+func ListElasticActiveMembers(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string) ([]string, error) {
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
 		return nil, err
@@ -639,12 +591,7 @@ func ListElasticActiveMembers(ctx context.Context, nc *nats.Conn, streamName str
 }
 
 // ElasticIsInMembershipAndActive checks if a member is included in the elastic consumer group and is active
-func ElasticIsInMembershipAndActive(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string) (bool, bool, error) {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return false, false, err
-	}
-
+func ElasticIsInMembershipAndActive(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string) (bool, bool, error) {
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
 		return false, false, err
@@ -687,12 +634,7 @@ func ElasticIsInMembershipAndActive(ctx context.Context, nc *nats.Conn, streamNa
 }
 
 // ElasticMemberStepDown forces the current active (pinned) application instance for a member of an elastic consumer group to step down
-func ElasticMemberStepDown(ctx context.Context, nc *nats.Conn, streamName string, consumerGroupName string, memberName string) error {
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return err
-	}
-
+func ElasticMemberStepDown(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string) error {
 	s, err := js.Stream(ctx, composeCGSName(streamName, consumerGroupName))
 	if err != nil {
 		return err
@@ -728,8 +670,9 @@ func (instance *ElasticConsumerGroupConsumerInstance) consumerCallback(msg jetst
 }
 
 // joinMemberConsumer attempts to create (which is idempotent for a given consumer configuration) the member's consumer if the member is in the current list of members and if successful, starts consuming messages from it
-func (instance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer(ctx context.Context) {
+func (instance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer() {
 	var err error
+	ctx := context.Background()
 
 	filters := ElasticGetPartitionFilters(*instance.Config, instance.MemberName)
 
@@ -845,7 +788,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) processMembershipChange(ct
 		time.Sleep(time.Duration(rand.IntN(100)+400) * time.Millisecond)
 	}
 
-	instance.joinMemberConsumer(ctx)
+	instance.joinMemberConsumer()
 }
 
 func validateConfig(config ElasticConsumerGroupConfig) error {
