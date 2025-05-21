@@ -11,18 +11,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package streamconsumergroup
+package partitionedconsumergroups
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/nats-io/nats.go/jetstream"
 	"log"
 	"reflect"
 	"slices"
 	"strings"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
