@@ -12,12 +12,13 @@ You can use the library as a whole, or pick just what you need.
 
 # Utilities
 
-| Module               | Description                                  | Docs                                 | Version                                                   |
-|----------------------|----------------------------------------------|--------------------------------------|-----------------------------------------------------------|
-| Core NATS Extensions | Core NATS extensions                         | [README.md](natsext/README.md)       | [![Go Reference][natsext-image]][natsext-url]             |
-| JetStream Extensions | JetStream extensions                         | [README.md](jetstreamext/README.md)  | [![Go Reference][jetstreamext-image]][jetstreamext-url]   |
-| `natscontext`        | Allow connecting to NATS using NATS Contexts | [README.md](natscontext/README.md)   | [![Go Reference][natscontext-image]][natscontext-url]     |
-| NATS System Client   | NATS client for NATS monitoring APIs         | [README.md](natssysclient/README.md) | [![Go Reference][natssysclient-image]][natssysclient-url] |
+| Module               | Description                                  | Docs                                 | Version                                                                           |
+|----------------------|----------------------------------------------|--------------------------------------|-----------------------------------------------------------------------------------|
+| Core NATS Extensions | Core NATS extensions                         | [README.md](natsext/README.md)       | [![Go Reference][natsext-image]][natsext-url]                                     |
+| JetStream Extensions | JetStream extensions                         | [README.md](jetstreamext/README.md)  | [![Go Reference][jetstreamext-image]][jetstreamext-url]                           |
+| `natscontext`        | Allow connecting to NATS using NATS Contexts | [README.md](natscontext/README.md)   | [![Go Reference][natscontext-image]][natscontext-url]                             |
+| NATS System Client   | NATS client for NATS monitoring APIs         | [README.md](natssysclient/README.md) | [![Go Reference][natssysclient-image]][natssysclient-url]                         |
+| Partitioned consumer groups | Client side implementation of partitioned 'consumer groups' | [README.md](partitionedconsumergroups/README.md) | [![Go Reference][partitionedconsumergroups-image]][partitionedconsumergroups-url] |
 
 [natsext-url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/natsext
 [natsext-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/natsext.svg
@@ -27,3 +28,5 @@ You can use the library as a whole, or pick just what you need.
 [natscontext-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/natscontext.svg
 [natssysclient-url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/natssysclient
 [natssysclient-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/natssysclient.svg
+[partitionedconsumergroups-url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/partitionedconsumergroups
+[partitionedconsumergroups-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/partitionedconsumergroups.svg
