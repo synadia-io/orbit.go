@@ -5,7 +5,7 @@ go 1.23.7
 require (
 	github.com/nats-io/nats-server/v2 v2.11.3
 	github.com/nats-io/nats.go v1.42.0
-	github.com/synadia-io/orbit.go/partitionedconsumergroups v0.0.0-00010101000000-000000000000
+	github.com/synadia-io/orbit.go/pcgroups v0.0.0-00010101000000-000000000000
 )
 
 require (
@@ -20,4 +20,4 @@ require (
 	golang.org/x/time v0.11.0 // indirect
 )
 
-replace github.com/synadia-io/orbit.go/partitionedconsumergroups => ..
+replace github.com/synadia-io/orbit.go/pcgroups => ..

@@ -28,7 +28,7 @@ import (
 	"github.com/choria-io/fisk"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-io/orbit.go/natscontext"
-	"github.com/synadia-io/orbit.go/partitionedconsumergroups"
+	"github.com/synadia-io/orbit.go/pcgroups"
 )
 
 type cgStruct struct {
@@ -50,7 +50,7 @@ type cgStruct struct {
 	force                  bool
 	js                     jetstream.JetStream
 	prompt                 bool
-	cgContext              partitionedconsumergroups.ConsumerGroupConsumeContext
+	cgContext              pcgroups.ConsumerGroupConsumeContext
 }
 
 var (
@@ -77,7 +77,7 @@ func (cg *cgStruct) setProcessingTime(processingTimeInput string) (time.Duration
 func (cg *cgStruct) lsStaticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	groups, err := partitionedconsumergroups.ListStaticConsumerGroups(ctx, cg.js, cg.streamName)
+	groups, err := pcgroups.ListStaticConsumerGroups(ctx, cg.js, cg.streamName)
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func (cg *cgStruct) lsStaticAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) lsElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	groups, err := partitionedconsumergroups.ListElasticConsumerGroups(ctx, cg.js, cg.streamName)
+	groups, err := pcgroups.ListElasticConsumerGroups(ctx, cg.js, cg.streamName)
 	if err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func (cg *cgStruct) lsElasticAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) infoStaticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	config, err := partitionedconsumergroups.GetStaticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+	config, err := pcgroups.GetStaticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	} else {
@@ -113,7 +113,7 @@ func (cg *cgStruct) infoStaticAction(_ *fisk.ParseContext) error {
 		} else {
 			fmt.Printf("no members or mappings defined\n")
 		}
-		activeMembers, err := partitionedconsumergroups.ListStaticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+		activeMembers, err := pcgroups.ListStaticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 		if err != nil {
 			return err
 		}
@@ -125,7 +125,7 @@ func (cg *cgStruct) infoStaticAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) infoElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	config, err := partitionedconsumergroups.GetElasticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+	config, err := pcgroups.GetElasticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	} else {
@@ -137,7 +137,7 @@ func (cg *cgStruct) infoElasticAction(_ *fisk.ParseContext) error {
 		} else {
 			fmt.Printf("no members or mappings defined\n")
 		}
-		activeMembers, err := partitionedconsumergroups.ListElasticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+		activeMembers, err := pcgroups.ListElasticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 		if err != nil {
 			return err
 		}
@@ -149,7 +149,7 @@ func (cg *cgStruct) infoElasticAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) addElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	members, err := partitionedconsumergroups.AddMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberNames)
+	members, err := pcgroups.AddMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberNames)
 
 	if err != nil {
 		return err
@@ -162,7 +162,7 @@ func (cg *cgStruct) addElasticAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) dropElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	members, err := partitionedconsumergroups.DeleteMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberNames)
+	members, err := pcgroups.DeleteMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberNames)
 
 	if err != nil {
 		return err
@@ -175,7 +175,7 @@ func (cg *cgStruct) dropElasticAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) createStaticBalancedAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	_, err := partitionedconsumergroups.CreateStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.memberNames, []partitionedconsumergroups.MemberMapping{})
+	_, err := pcgroups.CreateStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.memberNames, []pcgroups.MemberMapping{})
 	if err != nil {
 		return err
 	}
@@ -187,7 +187,7 @@ func (cg *cgStruct) createStaticMappedAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 	memberMappings, _ := parseMemberMappings(cg.memberMappingArgs)
 
-	_, err := partitionedconsumergroups.CreateStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, []string{}, memberMappings)
+	_, err := pcgroups.CreateStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, []string{}, memberMappings)
 	if err != nil {
 		return err
 	}
@@ -198,7 +198,7 @@ func (cg *cgStruct) createStaticMappedAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) createElasticAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
 
-	_, err := partitionedconsumergroups.CreateElastic(myContext, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.pwcis, cg.maxBufferedMsgs, cg.maxBufferedBytes)
+	_, err := pcgroups.CreateElastic(myContext, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.pwcis, cg.maxBufferedMsgs, cg.maxBufferedBytes)
 	if err != nil {
 		return err
 	}
@@ -218,7 +218,7 @@ func (cg *cgStruct) deleteStaticAction(_ *fisk.ParseContext) error {
 	}
 
 	ctx := context.Background()
-	err := partitionedconsumergroups.DeleteStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+	err := pcgroups.DeleteStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	}
@@ -238,7 +238,7 @@ func (cg *cgStruct) deleteElasticAction(_ *fisk.ParseContext) error {
 
 	ctx := context.Background()
 
-	err := partitionedconsumergroups.DeleteElastic(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+	err := pcgroups.DeleteElastic(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	}
@@ -251,14 +251,14 @@ func (cg *cgStruct) createElasticMappingAction(_ *fisk.ParseContext) error {
 	myConsumeContext := context.Background()
 	_, cg.myConsumeContextCancel = context.WithCancel(myConsumeContext)
 
-	var config *partitionedconsumergroups.ElasticConsumerGroupConfig
-	config, err := partitionedconsumergroups.GetElasticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+	var config *pcgroups.ElasticConsumerGroupConfig
+	config, err := pcgroups.GetElasticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	}
 
 	config.MemberMappings, _ = parseMemberMappings(cg.memberMappingArgs)
-	err = partitionedconsumergroups.SetMemberMappings(ctx, cg.js, cg.streamName, cg.consumerGroupName, config.MemberMappings)
+	err = pcgroups.SetMemberMappings(ctx, cg.js, cg.streamName, cg.consumerGroupName, config.MemberMappings)
 	if err != nil {
 		return err
 	}
@@ -270,7 +270,7 @@ func (cg *cgStruct) createElasticMappingAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) deleteElasticMappingAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	err := partitionedconsumergroups.DeleteMemberMappings(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+	err := pcgroups.DeleteMemberMappings(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 
 	return err
 }
@@ -278,12 +278,12 @@ func (cg *cgStruct) deleteElasticMappingAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) memberStaticInfoAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	cgConfig, err := partitionedconsumergroups.GetStaticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+	cgConfig, err := pcgroups.GetStaticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	}
 
-	actives, err := partitionedconsumergroups.ListStaticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+	actives, err := pcgroups.ListStaticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
 	}
@@ -304,7 +304,7 @@ func (cg *cgStruct) memberStaticInfoAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) memberElasticInfoAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	member, active, err := partitionedconsumergroups.ElasticIsInMembershipAndActive(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberName)
+	member, active, err := pcgroups.ElasticIsInMembershipAndActive(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberName)
 	if err != nil {
 		fmt.Printf("can't list active members: %v\n", err)
 	}
@@ -328,7 +328,7 @@ func (cg *cgStruct) stepDownStaticAction(_ *fisk.ParseContext) error {
 	myContext := context.Background()
 	_, cg.myConsumeContextCancel = context.WithCancel(myContext)
 
-	err := partitionedconsumergroups.StaticMemberStepDown(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberName)
+	err := pcgroups.StaticMemberStepDown(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberName)
 	if err != nil {
 		return err
 	}
@@ -339,7 +339,7 @@ func (cg *cgStruct) stepDownStaticAction(_ *fisk.ParseContext) error {
 func (cg *cgStruct) stepDownElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
-	err := partitionedconsumergroups.ElasticMemberStepDown(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberName)
+	err := pcgroups.ElasticMemberStepDown(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberName)
 	if err != nil {
 		return err
 	}
@@ -373,9 +373,9 @@ func (cg *cgStruct) consume(myContext context.Context, streamName string, consum
 	}
 
 	if cg.consumerStatic {
-		cg.cgContext, err = partitionedconsumergroups.StaticConsume(myContext, cg.js, streamName, consumerGroupName, memberName, messageHandler, config)
+		cg.cgContext, err = pcgroups.StaticConsume(myContext, cg.js, streamName, consumerGroupName, memberName, messageHandler, config)
 	} else {
-		cg.cgContext, err = partitionedconsumergroups.ElasticConsume(myContext, cg.js, streamName, consumerGroupName, memberName, messageHandler, config)
+		cg.cgContext, err = pcgroups.ElasticConsume(myContext, cg.js, streamName, consumerGroupName, memberName, messageHandler, config)
 	}
 	return err
 }
@@ -760,7 +760,7 @@ func prompt() {
 			}
 
 			ctx := context.Background()
-			err = partitionedconsumergroups.DeleteMemberMappings(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+			err = pcgroups.DeleteMemberMappings(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 			if err != nil {
 				fmt.Printf("can't delete member mappings: %v", err)
 			} else {
@@ -992,8 +992,8 @@ func inputMemberMappings() []string {
 	return memberMappings
 }
 
-func parseMemberMappings(mappings []string) ([]partitionedconsumergroups.MemberMapping, error) {
-	var memberMappings []partitionedconsumergroups.MemberMapping
+func parseMemberMappings(mappings []string) ([]pcgroups.MemberMapping, error) {
+	var memberMappings []pcgroups.MemberMapping
 	for _, mapping := range mappings {
 		memberName, partitionsInput, found := strings.Cut(mapping, ":")
 		if !found {
@@ -1009,7 +1009,7 @@ func parseMemberMappings(mappings []string) ([]partitionedconsumergroups.MemberM
 				return nil, err
 			}
 		}
-		memberMappings = append(memberMappings, partitionedconsumergroups.MemberMapping{
+		memberMappings = append(memberMappings, pcgroups.MemberMapping{
 			Member:     memberName,
 			Partitions: partitionsNumbers,
 		})

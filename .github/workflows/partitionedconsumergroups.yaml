@@ -1,13 +1,12 @@
-name: partitionedconsumergroups
+name: pcgroups
 on:
   push:
     paths:
-      - 'partitionedconsumergroups/**'
+      - "pcgroups/**"
 
   pull_request:
     paths:
-      - 'partitionedconsumergroups/**'
-
+      - "pcgroups/**"
 
 jobs:
   lint:
@@ -19,10 +18,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version: "stable"
 
       - name: Install deps
-        working-directory: partitionedconsumergroups
+        working-directory: pcgroups
         shell: bash --noprofile --norc -x -eo pipefail {0}
         run: |
           go get -t ./...
@@ -30,7 +29,7 @@ jobs:
           go install github.com/client9/misspell/cmd/misspell@latest
 
       - name: Run linters
-        working-directory: partitionedconsumergroups
+        working-directory: pcgroups
         shell: bash --noprofile --norc -x -eo pipefail {0}
         run: |
           $(exit $(go fmt  ./... | wc -l))
@@ -49,10 +48,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version: "stable"
 
       - name: Run tests
-        working-directory: partitionedconsumergroups
+        working-directory: pcgroups
         shell: bash --noprofile --norc -x -eo pipefail {0}
         run: |
           go test -v -count=1 ./...

@@ -1,4 +1,4 @@
-module github.com/synadia-io/orbit.go/partitionedconsumergroups
+module github.com/synadia-io/orbit.go/pcgroups
 
 go 1.23.7
 

@@ -2,12 +2,12 @@
 
 [License-Url]: https://www.apache.org/licenses/LICENSE-2.0
 [License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
-[ReportCard-Url]: https://goreportcard.com/report/github.com/synadia-io/orbit.go/partitionedconsumergroups
-[ReportCard-Image]: https://goreportcard.com/badge/github.com/synadia-io/orbit.go/partitionedconsumergroups
-[Build-Status-Url]: https://github.com/synadia-io/orbit.go/actions/workflows/partitionedconsumergroups.yaml
-[Build-Status-Image]: https://github.com/synadia-io/orbit.go/actions/workflows/partitionedconsumergroups.yaml/badge.svg?branch=main
-[GoDoc-Url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/partitionedconsumergroups
-[GoDoc-Image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/partitionedconsumergroups.svg
+[ReportCard-Url]: https://goreportcard.com/report/github.com/synadia-io/orbit.go/pcgroups
+[ReportCard-Image]: https://goreportcard.com/badge/github.com/synadia-io/orbit.go/pcgroups
+[Build-Status-Url]: https://github.com/synadia-io/orbit.go/actions/workflows/pcgroups.yaml
+[Build-Status-Image]: https://github.com/synadia-io/orbit.go/actions/workflows/pcgroups.yaml/badge.svg?branch=main
+[GoDoc-Url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/pcgroups
+[GoDoc-Image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/pcgroups.svg
 
 [![License][License-Image]][License-Url]
 [![Go Reference][GoDoc-Image]][GoDoc-Url]
@@ -16,7 +16,7 @@
 
 Initial implementation of a client-side partitioned consumer group feature for NATS streams leveraging some of the new features introduced in `nats-server` version 2.11.
 
-Note that post 2.11 versions of `nats-server` may include new features related to the consumer group use case that could render this client-side library unneeded (or make much smaller) 
+Note that post 2.11 versions of `nats-server` may include new features related to the consumer group use case that could render this client-side library unneeded (or make much smaller)
 # Overview
 
 This library enables the parallelization through partitioning of the consumption of messages from a stream while ensuring a strict order of not just delivery but also successful consumption of the messages using all or parts of the message's subject as a partitioning key.
@@ -25,7 +25,7 @@ In JetStream terms, strictly ordered consumption is achieved when you set the co
 
 The library allows the creation of 'consumer groups' on Stream, where each 'member' of the consumer group can consume from the group in parallel (with max acks pending 1 if needed), with the guarantee that in no way more than one message for a particular key can be consumed at the same time. Client applications wanting to consume messages from the group simply do so using a 'member name' and providing a callback. Even if more than one instance of a member is deployed, only one of those instances will be delivered messages at a time.
 
-The library takes care of the partitioning and the mapping of the partitions between the members of the group, the idea being that it is mostly transparent to the consuming application's developers who only need to join a consumer group, providing a member name and a callback to process and acknowledge the message when successfully processed. 
+The library takes care of the partitioning and the mapping of the partitions between the members of the group, the idea being that it is mostly transparent to the consuming application's developers who only need to join a consumer group, providing a member name and a callback to process and acknowledge the message when successfully processed.
 
 NATS Partitioned consumer groups come in two flavors: *elastic* and *static*.
 
@@ -78,7 +78,7 @@ Create a stream 'foo' that captures messages on the subjects `foo.*`, then gener
 
 Create an elastic consumer group named "cg", partitioning over 10 partitions using the second token (first `*` wildcard in the filter "foo.*") in the subject as the partitioning key: `cg elastic create foo cg 10`.
 
-At this point the elastic consumer group is created, but no members have been added to it yet. But you can start instances of your consuming members already (e.g. `cg elastic consume foo cg m1` for an instance of a member "m1"), for example start instances of members "m1", "m2" and "m3". At this point none of those members are receiving messages. 
+At this point the elastic consumer group is created, but no members have been added to it yet. But you can start instances of your consuming members already (e.g. `cg elastic consume foo cg m1` for an instance of a member "m1"), for example start instances of members "m1", "m2" and "m3". At this point none of those members are receiving messages.
 
 Add "m1" and "m2" to the membership: `cg elastic add foo cg m1 m2`, see how they start receiving messages. Then drop "m1" from the membership `cg elastic drop foo cg m1`, add it again, and each time watch as the consumer starts and stops receiving messages, run another consumer "m3" and add/drop it from the membership, etc...
 
@@ -86,11 +86,11 @@ As soon as the elastic consumer group is created, you can start instances of con
 
 ### Example
 
-To start consuming from a static consumer group, you call `streamconsumergroup.StaticConsume`. To start consuming from an elastic consumer group you call `streamconsumergroup.ElasticConsume`. These calls will return an error and a `ConsumerGroupConsumeContext`. Assuming no error is returned,this will create a Go routine that handles consumption and monitoring for changes in the consumer group's config. 
+To start consuming from a static consumer group, you call `pcgroups.StaticConsume`. To start consuming from an elastic consumer group you call `pcgroups.ElasticConsume`. These calls will return an error and a `ConsumerGroupConsumeContext`. Assuming no error is returned,this will create a Go routine that handles consumption and monitoring for changes in the consumer group's config.
 
 e.g. for static
 ```golang
-consumerGroupContext, err = streamconsumergroup.StaticConsume(myContext, nc, streamName, consumerGroupName, memberName, messageHandler, config)
+consumerGroupContext, err = pcgroups.StaticConsume(myContext, nc, streamName, consumerGroupName, memberName, messageHandler, config)
 ```
 The arguments are:
 - `myContext` is a Golang `context.Context` which is going to be used only for the operations that are part of joining the consumer group. You must use `Stop()` on the `ConsumerGroupContext` being returned to stop the consumption.

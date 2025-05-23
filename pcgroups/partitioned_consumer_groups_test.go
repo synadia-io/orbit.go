@@ -1,4 +1,4 @@
-package partitionedconsumergroups
+package pcgroups
 
 import (
 	"fmt"

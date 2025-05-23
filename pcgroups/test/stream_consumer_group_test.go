@@ -21,7 +21,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/synadia-io/orbit.go/partitionedconsumergroups"
+	"github.com/synadia-io/orbit.go/pcgroups"
 )
 
 func TestStatic(t *testing.T) {
@@ -62,18 +62,18 @@ func TestStatic(t *testing.T) {
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	}
 
-	_, err = partitionedconsumergroups.CreateStatic(ctx, js, streamName, cgName, 2, "bar.*", []string{"m1", "m2"}, []partitionedconsumergroups.MemberMapping{})
+	_, err = pcgroups.CreateStatic(ctx, js, streamName, cgName, 2, "bar.*", []string{"m1", "m2"}, []pcgroups.MemberMapping{})
 	require_NoError(t, err)
 
 	sc1 := func() {
-		partitionedconsumergroups.StaticConsume(ctx, js, streamName, cgName, "m1", func(msg jetstream.Msg) {
+		pcgroups.StaticConsume(ctx, js, streamName, cgName, "m1", func(msg jetstream.Msg) {
 			c1++
 			msg.Ack()
 		}, config)
 	}
 
 	sc2 := func() {
-		partitionedconsumergroups.StaticConsume(ctx, js, streamName, cgName, "m2", func(msg jetstream.Msg) {
+		pcgroups.StaticConsume(ctx, js, streamName, cgName, "m2", func(msg jetstream.Msg) {
 			c2++
 			msg.Ack()
 		}, config)
@@ -93,7 +93,7 @@ func TestStatic(t *testing.T) {
 		}
 	}
 
-	err = partitionedconsumergroups.DeleteStatic(ctx, js, streamName, cgName)
+	err = pcgroups.DeleteStatic(ctx, js, streamName, cgName)
 	require_NoError(t, err)
 }
 
@@ -131,18 +131,18 @@ func TestElastic(t *testing.T) {
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	}
 
-	_, err = partitionedconsumergroups.CreateElastic(ctx, js, streamName, cgName, 2, "bar.*", []int{1}, -1, -1)
+	_, err = pcgroups.CreateElastic(ctx, js, streamName, cgName, 2, "bar.*", []int{1}, -1, -1)
 	require_NoError(t, err)
 
 	ec1 := func() {
-		partitionedconsumergroups.ElasticConsume(ctx, js, streamName, cgName, "m1", func(msg jetstream.Msg) {
+		pcgroups.ElasticConsume(ctx, js, streamName, cgName, "m1", func(msg jetstream.Msg) {
 			c1++
 			msg.Ack()
 		}, config)
 	}
 
 	ec2 := func() {
-		partitionedconsumergroups.ElasticConsume(ctx, js, streamName, cgName, "m2", func(msg jetstream.Msg) {
+		pcgroups.ElasticConsume(ctx, js, streamName, cgName, "m2", func(msg jetstream.Msg) {
 			c2++
 			msg.Ack()
 		}, config)
@@ -151,7 +151,7 @@ func TestElastic(t *testing.T) {
 	go ec1()
 	go ec2()
 
-	_, err = partitionedconsumergroups.AddMembers(ctx, js, streamName, cgName, []string{"m1"})
+	_, err = pcgroups.AddMembers(ctx, js, streamName, cgName, []string{"m1"})
 	require_NoError(t, err)
 
 	now := time.Now()
@@ -166,7 +166,7 @@ func TestElastic(t *testing.T) {
 	}
 	require_Equal(t, c1 == 10 && c2 == 0, true)
 
-	_, err = partitionedconsumergroups.AddMembers(ctx, js, streamName, cgName, []string{"m2"})
+	_, err = pcgroups.AddMembers(ctx, js, streamName, cgName, []string{"m2"})
 	require_NoError(t, err)
 
 	// wait a little bit for m2 to be effectively added (deletion and re-creation of the consumers)
@@ -189,7 +189,7 @@ func TestElastic(t *testing.T) {
 		}
 	}
 
-	_, err = partitionedconsumergroups.DeleteMembers(ctx, js, streamName, cgName, []string{"m1"})
+	_, err = pcgroups.DeleteMembers(ctx, js, streamName, cgName, []string{"m1"})
 	require_NoError(t, err)
 
 	// wait a little bit for m1 to be effectively deleted (deletion and re-creation of the consumers)
@@ -212,6 +212,6 @@ func TestElastic(t *testing.T) {
 		}
 	}
 
-	err = partitionedconsumergroups.DeleteElastic(ctx, js, streamName, cgName)
+	err = pcgroups.DeleteElastic(ctx, js, streamName, cgName)
 	require_NoError(t, err)
 }
