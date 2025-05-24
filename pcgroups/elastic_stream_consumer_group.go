@@ -11,14 +11,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package streamconsumergroup
+package pcgroups
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/nats-io/nats.go/jetstream"
 	"log"
 	"math/rand/v2"
 	"reflect"
@@ -26,6 +25,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
@@ -352,7 +353,6 @@ func DeleteElastic(ctx context.Context, js jetstream.JetStream, streamName strin
 
 // ListElasticConsumerGroups lists the elastic consumer groups for a given stream
 func ListElasticConsumerGroups(ctx context.Context, js jetstream.JetStream, streamName string) ([]string, error) {
-	fmt.Printf("j=%v\n", js)
 	kv, err := js.KeyValue(ctx, kvElasticBucketName)
 	if err != nil {
 		return nil, fmt.Errorf("error getting elastic consumer group KV bucket: %w", err)
