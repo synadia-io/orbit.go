@@ -1,4 +1,4 @@
-// Copyright 2023-2024 The NATS Authors
+// Copyright 2025 Synadia Communications Inc.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -38,16 +39,15 @@ type (
 	// - Retrieve historical values for a key
 	// - Retrieve status and configuration of a key value bucket
 	// - Purge all delete markers
-	// - Close the KeyValue store
 	KeyValue interface {
 		// Get returns the latest value for the key. If the key does not exist,
 		// ErrKeyNotFound will be returned.
-		Get(ctx context.Context, key string) (KeyValueEntry, error)
+		Get(ctx context.Context, key string) (*KeyValueEntry, error)
 
 		// GetRevision returns a specific revision value for the key. If the key
 		// does not exist or the provided revision does not exists,
 		// ErrKeyNotFound will be returned.
-		GetRevision(ctx context.Context, key string, revision uint64) (KeyValueEntry, error)
+		GetRevision(ctx context.Context, key string, revision uint64) (*KeyValueEntry, error)
 
 		// Put will place the new value for the key into the store. If the key
 		// does not exist, it will be created. If the key exists, the value will
@@ -63,7 +63,7 @@ type (
 		//
 		// A key has to consist of alphanumeric characters, dashes, underscores,
 		// equal signs, and dots.
-		PutString(ctx context.Context, key string, value string) (uint64, error)
+		PutString(ctx context.Context, key, value string) (uint64, error)
 
 		// Create will add the key/value pair if it does not exist. If the key
 		// already exists, ErrKeyExists will be returned.
@@ -93,7 +93,7 @@ type (
 		//
 		// [LastRevision] option can be specified to only perform purge if the
 		// latest revision the provided one.
-		Purge(ctx context.Context, key string, opts ...KVDeleteOpt) error
+		Purge(ctx context.Context, key string, opts ...KVPurgeOpt) error
 
 		// Watch for any updates to keys that match the keys argument which
 		// could include wildcards. By default, the watcher will send the latest
@@ -117,12 +117,12 @@ type (
 		// with the same options as Watch.
 		WatchAll(ctx context.Context, opts ...WatchOpt) (KeyWatcher, error)
 
-		// ListKeys returns a KeyLister for filtered keys in the bucket.
-		ListKeys(ctx context.Context, filters ...string) (KeyLister, error)
+		// ListKeys returns an iterator for filtered keys in the bucket.
+		ListKeys(ctx context.Context, filters ...string) (iter.Seq2[string, error], error)
 
 		// History will return all historical values for the key (up to
 		// KeyValueMaxHistory).
-		History(ctx context.Context, key string, opts ...WatchOpt) ([]KeyValueEntry, error)
+		History(ctx context.Context, key string) ([]KeyValueEntry, error)
 
 		// Bucket returns the KV store name.
 		Bucket() string
@@ -131,9 +131,9 @@ type (
 		// configured using DeleteMarkersOlderThan option to only remove delete
 		// markers older than a certain duration.
 		//
-		// [PurgeDeletes] is a destructive operation and will remove all entries
+		// PurgeDeletes is a destructive operation and will remove all entries
 		// with delete markers from the underlying stream.
-		PurgeDeletes(ctx context.Context, opts ...KVPurgeOpt) error
+		PurgeDeletes(ctx context.Context, opts ...KVPurgeDeletesOpt) error
 
 		// Status retrieves the status and configuration of a bucket.
 		Status(ctx context.Context) (KeyValueStatus, error)
@@ -196,63 +196,36 @@ type (
 		LimitMarkerTTL time.Duration
 	}
 
-	// KeyLister is used to retrieve a list of key value store keys. It returns
-	// a channel to read the keys from. The lister will always close the channel
-	// when done (either all keys have been read or an error occurred) and
-	// therefore can be used in range loops. Stop can be used to stop the lister
-	// when not all keys have been read.
-	KeyLister interface {
-		Keys() <-chan string
-		Stop() error
-	}
-
-	// KeyValueLister is used to retrieve a list of key value stores. It returns
-	// a channel to read the KV store statuses from. The lister will always
-	// close the channel when done (either all stores have been retrieved or an
-	// error occurred) and therefore can be used in range loops. Stop can be
-	// used to stop the lister when not all KeyValue stores have been read.
-	KeyValueLister interface {
-		Status() <-chan KeyValueStatus
-		Error() error
-	}
-
-	// KeyValueNamesLister is used to retrieve a list of key value store names.
-	// It returns a channel to read the KV bucket names from. The lister will
-	// always close the channel when done (either all stores have been retrieved
-	// or an error occurred) and therefore can be used in range loops. Stop can
-	// be used to stop the lister when not all bucket names have been read.
-	KeyValueNamesLister interface {
-		Name() <-chan string
-		Error() error
-	}
-
 	// KeyValueStatus is run-time status about a Key-Value bucket.
-	KeyValueStatus interface {
+	KeyValueStatus struct {
 		// Bucket returns the name of the KeyValue store.
-		Bucket() string
+		Bucket string
 
 		// Values is how many messages are in the bucket, including historical values.
-		Values() uint64
+		Values uint64
 
 		// History returns the configured history kept per key.
-		History() int64
+		History int64
 
 		// TTL returns the duration for which keys are kept in the bucket.
-		TTL() time.Duration
+		TTL time.Duration
 
 		// BackingStore indicates what technology is used for storage of the bucket.
 		// Currently only JetStream is supported.
-		BackingStore() string
+		BackingStore string
 
 		// Bytes returns the size of the bucket in bytes.
-		Bytes() uint64
+		Bytes uint64
 
 		// IsCompressed indicates if the data is compressed on disk.
-		IsCompressed() bool
+		IsCompressed bool
 
 		// LimitMarkerTTL is how long the bucket keeps markers when keys are
 		// removed by the TTL setting, 0 meaning markers are not supported.
-		LimitMarkerTTL() time.Duration
+		LimitMarkerTTL time.Duration
+
+		// StreamInfo is the underlying stream information.
+		StreamInfo *jetstream.StreamInfo
 	}
 
 	// KeyWatcher is what is returned when doing a watch. It can be used to
@@ -262,41 +235,39 @@ type (
 	// close the underlying channel. Watcher will not close the channel until
 	// Stop is called or connection is closed.
 	KeyWatcher interface {
-		Updates() <-chan KeyValueEntry
+		Updates() <-chan *KeyValueEntry
 		Stop() error
 	}
 
 	// KeyValueEntry is a retrieved entry for Get, List or Watch.
-	KeyValueEntry interface {
+	KeyValueEntry struct {
 		// Bucket is the bucket the data was loaded from.
-		Bucket() string
+		Bucket string
 
 		// Key is the name of the key that was retrieved.
-		Key() string
+		Key string
 
 		// Value is the retrieved value.
-		Value() []byte
+		Value []byte
 
 		// Revision is a unique sequence for this value.
-		Revision() uint64
+		Revision uint64
 
 		// Created is the time the data was put in the bucket.
-		Created() time.Time
+		Created time.Time
 
 		// Delta is distance from the latest value (how far the current sequence
 		// is from the latest).
-		Delta() uint64
+		Delta uint64
 
 		// Operation returns Put or Delete or Purge, depending on the manner in
 		// which the current revision was created.
-		Operation() KeyValueOp
+		Operation KeyValueOp
 	}
 )
 
 type (
-	WatchOpt interface {
-		configureWatcher(opts *watchOpts) error
-	}
+	WatchOpt func(opts *watchOpts) error
 
 	watchOpts struct {
 		// Do not send delete markers to the update channel.
@@ -311,15 +282,19 @@ type (
 		resumeFromRevision uint64
 	}
 
-	// KVDeleteOpt is used to configure delete and purge operations.
-	KVDeleteOpt interface {
-		configureDelete(opts *deleteOpts) error
-	}
+	// KVDeleteOpt is used to configure delete operation.
+	KVDeleteOpt func(opts *deleteOpts) error
+
+	// KVPurgeOpt is used to configure purge operation.
 
 	deleteOpts struct {
-		// Remove all previous revisions.
-		purge bool
+		// Delete only if the latest revision matches.
+		revision uint64
+	}
 
+	KVPurgeOpt func(opts *purgeOpts) error
+
+	purgeOpts struct {
 		// Delete only if the latest revision matches.
 		revision uint64
 
@@ -328,20 +303,16 @@ type (
 	}
 
 	// KVCreateOpt is used to configure Create.
-	KVCreateOpt interface {
-		configureCreate(opts *createOpts) error
-	}
+	KVCreateOpt func(opts *createOpts) error
 
 	createOpts struct {
 		ttl time.Duration // TTL for the key
 	}
 
-	// KVPurgeOpt is used to configure PurgeDeletes.
-	KVPurgeOpt interface {
-		configurePurge(opts *purgeOpts) error
-	}
+	// KVPurgeDeletesOpt is used to configure PurgeDeletes.
+	KVPurgeDeletesOpt func(opts *purgeDeletesOpts) error
 
-	purgeOpts struct {
+	purgeDeletesOpts struct {
 		dmthr time.Duration // Delete markers threshold
 	}
 )
@@ -652,104 +623,55 @@ func DeleteKeyValue(ctx context.Context, js jetstream.JetStream, bucket string) 
 	return nil
 }
 
-// KeyValueStoreNames is used to retrieve a list of key value store names
-func KeyValueStoreNames(ctx context.Context, js jetstream.JetStream) KeyValueNamesLister {
-	res := &kvLister{
-		kvNames: make(chan string),
-	}
+// KeyValueStoreNames is used to retrieve a list of key value store names as an iterator
+func KeyValueStoreNames(ctx context.Context, js jetstream.JetStream) iter.Seq2[string, error] {
 	listSubj := fmt.Sprintf(kvSubjectsTmpl, "*")
 	streams := js.StreamNames(ctx, jetstream.WithStreamListSubject(listSubj))
-	go func() {
-		defer close(res.kvNames)
+
+	return func(yield func(string, error) bool) {
 		for name := range streams.Name() {
 			if !strings.HasPrefix(name, kvBucketNamePre) {
 				continue
 			}
-			res.kvNames <- strings.TrimPrefix(name, kvBucketNamePre)
+			if !yield(strings.TrimPrefix(name, kvBucketNamePre), nil) {
+				return
+			}
 		}
-		if streams.Err() != nil {
-			res.err = streams.Err()
+		if err := streams.Err(); err != nil {
+			yield("", err)
 		}
-	}()
-	return res
+	}
 }
 
-// KeyValueStores is used to retrieve a list of key value store statuses
-func KeyValueStores(ctx context.Context, js jetstream.JetStream) KeyValueLister {
-	res := &kvLister{
-		kvs: make(chan KeyValueStatus),
-	}
+// KeyValueStores is used to retrieve a list of key value store statuses as an iterator
+func KeyValueStores(ctx context.Context, js jetstream.JetStream) iter.Seq2[KeyValueStatus, error] {
 	listSubj := fmt.Sprintf(kvSubjectsTmpl, "*")
 	streams := js.ListStreams(ctx, jetstream.WithStreamListSubject(listSubj))
-	go func() {
-		defer close(res.kvs)
+
+	return func(yield func(KeyValueStatus, error) bool) {
 		for info := range streams.Info() {
 			if !strings.HasPrefix(info.Config.Name, kvBucketNamePre) {
 				continue
 			}
-			res.kvs <- &KeyValueBucketStatus{info: info, bucket: strings.TrimPrefix(info.Config.Name, kvBucketNamePre)}
+			status := KeyValueStatus{
+				Bucket:         strings.TrimPrefix(info.Config.Name, kvBucketNamePre),
+				Values:         info.State.Msgs,
+				History:        info.Config.MaxMsgsPerSubject,
+				TTL:            info.Config.MaxAge,
+				BackingStore:   "JetStream",
+				Bytes:          info.State.Bytes,
+				IsCompressed:   info.Config.Compression != jetstream.NoCompression,
+				LimitMarkerTTL: info.Config.SubjectDeleteMarkerTTL,
+				StreamInfo:     info,
+			}
+			if !yield(status, nil) {
+				return
+			}
 		}
-		if streams.Err() != nil {
-			res.err = streams.Err()
+		if err := streams.Err(); err != nil {
+			yield(KeyValueStatus{}, err)
 		}
-	}()
-	return res
-}
-
-// KeyValueBucketStatus represents status of a Bucket, implements KeyValueStatus
-type KeyValueBucketStatus struct {
-	info   *jetstream.StreamInfo
-	bucket string
-}
-
-// Bucket the name of the bucket
-func (s *KeyValueBucketStatus) Bucket() string { return s.bucket }
-
-// Values is how many messages are in the bucket, including historical values
-func (s *KeyValueBucketStatus) Values() uint64 { return s.info.State.Msgs }
-
-// History returns the configured history kept per key
-func (s *KeyValueBucketStatus) History() int64 { return s.info.Config.MaxMsgsPerSubject }
-
-// TTL is how long the bucket keeps values for
-func (s *KeyValueBucketStatus) TTL() time.Duration { return s.info.Config.MaxAge }
-
-// BackingStore indicates what technology is used for storage of the bucket
-func (s *KeyValueBucketStatus) BackingStore() string { return "JetStream" }
-
-// StreamInfo is the stream info retrieved to create the status
-func (s *KeyValueBucketStatus) StreamInfo() *jetstream.StreamInfo { return s.info }
-
-// Bytes is the size of the stream
-func (s *KeyValueBucketStatus) Bytes() uint64 { return s.info.State.Bytes }
-
-// IsCompressed indicates if the data is compressed on disk
-func (s *KeyValueBucketStatus) IsCompressed() bool {
-	return s.info.Config.Compression != jetstream.NoCompression
-}
-
-// LimitMarkerTTL is how long the bucket keeps markers when keys are
-// removed by the TTL setting, 0 meaning markers are not supported.
-func (s *KeyValueBucketStatus) LimitMarkerTTL() time.Duration {
-	return s.info.Config.SubjectDeleteMarkerTTL
-}
-
-type kvLister struct {
-	kvs     chan KeyValueStatus
-	kvNames chan string
-	err     error
-}
-
-func (kl *kvLister) Status() <-chan KeyValueStatus {
-	return kl.kvs
-}
-
-func (kl *kvLister) Name() <-chan string {
-	return kl.kvNames
-}
-
-func (kl *kvLister) Error() error {
-	return kl.err
+	}
 }
 
 func legacyJetStream(js jetstream.JetStream) (nats.JetStreamContext, error) {
@@ -781,7 +703,7 @@ func searchKeyValid(key string) bool {
 	return validSearchKeyRe.MatchString(key)
 }
 
-func (kv *kvs) get(ctx context.Context, key string, revision uint64) (KeyValueEntry, error) {
+func (kv *kvs) get(ctx context.Context, key string, revision uint64) (*KeyValueEntry, error) {
 	if !keyValid(key) {
 		return nil, ErrInvalidKey
 	}
@@ -810,12 +732,12 @@ func (kv *kvs) get(ctx context.Context, key string, revision uint64) (KeyValueEn
 		return nil, err
 	}
 
-	entry := &kve{
-		bucket:   kv.name,
-		key:      key,
-		value:    m.Data,
-		revision: m.Sequence,
-		created:  m.Time,
+	entry := &KeyValueEntry{
+		Bucket:   kv.name,
+		Key:      key,
+		Value:    m.Data,
+		Revision: m.Sequence,
+		Created:  m.Time,
 	}
 
 	// Double check here that this is not a DEL Operation marker.
@@ -823,19 +745,19 @@ func (kv *kvs) get(ctx context.Context, key string, revision uint64) (KeyValueEn
 		if m.Header.Get(kvop) != "" {
 			switch m.Header.Get(kvop) {
 			case kvdel:
-				entry.op = KeyValueDelete
+				entry.Operation = KeyValueDelete
 			case kvpurge:
-				entry.op = KeyValuePurge
+				entry.Operation = KeyValuePurge
 			}
 		} else if m.Header.Get(jetstream.MarkerReasonHeader) != "" {
 			switch m.Header.Get(jetstream.MarkerReasonHeader) {
 			case "MaxAge", "Purge":
-				entry.op = KeyValuePurge
+				entry.Operation = KeyValuePurge
 			case "Remove":
-				entry.op = KeyValueDelete
+				entry.Operation = KeyValueDelete
 			}
 		}
-		if entry.op != KeyValuePut {
+		if entry.Operation != KeyValuePut {
 			return entry, ErrKeyDeleted
 		}
 	}
@@ -843,27 +765,8 @@ func (kv *kvs) get(ctx context.Context, key string, revision uint64) (KeyValueEn
 	return entry, nil
 }
 
-// kve is the implementation of KeyValueEntry
-type kve struct {
-	bucket   string
-	key      string
-	value    []byte
-	revision uint64
-	delta    uint64
-	created  time.Time
-	op       KeyValueOp
-}
-
-func (e *kve) Bucket() string        { return e.bucket }
-func (e *kve) Key() string           { return e.key }
-func (e *kve) Value() []byte         { return e.value }
-func (e *kve) Revision() uint64      { return e.revision }
-func (e *kve) Created() time.Time    { return e.created }
-func (e *kve) Delta() uint64         { return e.delta }
-func (e *kve) Operation() KeyValueOp { return e.op }
-
 // Get returns the latest value for the key.
-func (kv *kvs) Get(ctx context.Context, key string) (KeyValueEntry, error) {
+func (kv *kvs) Get(ctx context.Context, key string) (*KeyValueEntry, error) {
 	e, err := kv.get(ctx, key, kvLatestRevision)
 	if err != nil {
 		if errors.Is(err, ErrKeyDeleted) {
@@ -876,7 +779,7 @@ func (kv *kvs) Get(ctx context.Context, key string) (KeyValueEntry, error) {
 }
 
 // GetRevision returns a specific revision value for the key.
-func (kv *kvs) GetRevision(ctx context.Context, key string, revision uint64) (KeyValueEntry, error) {
+func (kv *kvs) GetRevision(ctx context.Context, key string, revision uint64) (*KeyValueEntry, error) {
 	e, err := kv.get(ctx, key, revision)
 	if err != nil {
 		if errors.Is(err, ErrKeyDeleted) {
@@ -894,22 +797,8 @@ func (kv *kvs) Put(ctx context.Context, key string, value []byte) (uint64, error
 		return 0, ErrInvalidKey
 	}
 
-	var b strings.Builder
-	if kv.useJSPfx {
-		prefix := kv.js.Options().APIPrefix
-		b.WriteString(kv.js.Options().APIPrefix)
-		if !strings.HasSuffix(prefix, ".") {
-			b.WriteString(".")
-		}
-	}
-	if kv.putPre != "" {
-		b.WriteString(kv.putPre)
-	} else {
-		b.WriteString(kv.pre)
-	}
-	b.WriteString(key)
-
-	pa, err := kv.js.Publish(ctx, b.String(), value)
+	subj := kv.buildKeySubject(key)
+	pa, err := kv.js.Publish(ctx, subj, value)
 	if err != nil {
 		return 0, err
 	}
@@ -926,7 +815,7 @@ func (kv *kvs) Create(ctx context.Context, key string, value []byte, opts ...KVC
 	var o createOpts
 	for _, opt := range opts {
 		if opt != nil {
-			if err := opt.configureCreate(&o); err != nil {
+			if err := opt(&o); err != nil {
 				return 0, err
 			}
 		}
@@ -938,14 +827,16 @@ func (kv *kvs) Create(ctx context.Context, key string, value []byte, opts ...KVC
 	}
 
 	if e, err := kv.get(ctx, key, kvLatestRevision); errors.Is(err, ErrKeyDeleted) {
-		return kv.updateRevision(ctx, key, value, e.Revision(), o.ttl)
+		return kv.updateRevision(ctx, key, value, e.Revision, o.ttl)
 	}
 
 	// Check if the expected last subject sequence is not zero which implies
 	// the key already exists.
-	if errors.Is(err, ErrKeyExists) {
-		jserr := ErrKeyExists.(*jsError)
-		return 0, fmt.Errorf("%w: %s", err, jserr.message)
+	var jsErr jetstream.JetStreamError
+	if errors.As(err, &jsErr) {
+		if aerr := jsErr.APIError(); aerr != nil && int(aerr.ErrorCode) == int(jetstream.JSErrCodeStreamWrongLastSequence) {
+			return 0, ErrKeyExists
+		}
 	}
 
 	return 0, err
@@ -961,18 +852,8 @@ func (kv *kvs) updateRevision(ctx context.Context, key string, value []byte, rev
 		return 0, ErrInvalidKey
 	}
 
-	var b strings.Builder
-	if kv.useJSPfx {
-		prefix := kv.js.Options().APIPrefix
-		b.WriteString(kv.js.Options().APIPrefix)
-		if !strings.HasSuffix(prefix, ".") {
-			b.WriteString(".")
-		}
-	}
-	b.WriteString(kv.pre)
-	b.WriteString(key)
+	subj := kv.buildKeySubject(key)
 
-	m := nats.Msg{Subject: b.String(), Header: nats.Header{}, Data: value}
 	opts := []jetstream.PublishOpt{
 		jetstream.WithExpectLastSequencePerSubject(revision),
 	}
@@ -980,7 +861,7 @@ func (kv *kvs) updateRevision(ctx context.Context, key string, value []byte, rev
 		opts = append(opts, jetstream.WithMsgTTL(ttl))
 	}
 
-	pa, err := kv.js.PublishMsg(ctx, &m, opts...)
+	pa, err := kv.js.Publish(ctx, subj, value, opts...)
 	if err != nil {
 		return 0, err
 	}
@@ -993,45 +874,22 @@ func (kv *kvs) Delete(ctx context.Context, key string, opts ...KVDeleteOpt) erro
 		return ErrInvalidKey
 	}
 
-	var b strings.Builder
-	if kv.useJSPfx {
-		prefix := kv.js.Options().APIPrefix
-		b.WriteString(kv.js.Options().APIPrefix)
-		if !strings.HasSuffix(prefix, ".") {
-			b.WriteString(".")
-		}
-	}
-	if kv.putPre != "" {
-		b.WriteString(kv.putPre)
-	} else {
-		b.WriteString(kv.pre)
-	}
-	b.WriteString(key)
+	subj := kv.buildKeySubject(key)
 
 	// DEL op marker. For watch functionality.
-	m := nats.NewMsg(b.String())
+	m := nats.NewMsg(subj)
 
 	var o deleteOpts
 	for _, opt := range opts {
 		if opt != nil {
-			if err := opt.configureDelete(&o); err != nil {
+			if err := opt(&o); err != nil {
 				return err
 			}
 		}
 	}
 
-	if o.purge {
-		m.Header.Set(kvop, kvpurge)
-		m.Header.Set(jetstream.MsgRollup, jetstream.MsgRollupSubject)
-	} else {
-		m.Header.Set(kvop, kvdel)
-	}
+	m.Header.Set(kvop, kvdel)
 	pubOpts := make([]jetstream.PublishOpt, 0)
-	if o.ttl > 0 && o.purge {
-		pubOpts = append(pubOpts, jetstream.WithMsgTTL(o.ttl))
-	} else if o.ttl > 0 {
-		return ErrTTLOnDeleteNotSupported
-	}
 
 	if o.revision != 0 {
 		m.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(o.revision, 10))
@@ -1042,22 +900,44 @@ func (kv *kvs) Delete(ctx context.Context, key string, opts ...KVDeleteOpt) erro
 }
 
 // Purge will place a delete marker and remove all previous revisions.
-func (kv *kvs) Purge(ctx context.Context, key string, opts ...KVDeleteOpt) error {
-	return kv.Delete(ctx, key, append(opts, purge())...)
-}
+func (kv *kvs) Purge(ctx context.Context, key string, opts ...KVPurgeOpt) error {
+	if !keyValid(key) {
+		return ErrInvalidKey
+	}
 
-// purge removes all previous revisions.
-func purge() KVDeleteOpt {
-	return deleteOptFn(func(opts *deleteOpts) error {
-		opts.purge = true
-		return nil
-	})
+	subj := kv.buildKeySubject(key)
+
+	// PURGE op marker. For watch functionality.
+	m := nats.NewMsg(subj)
+
+	var o purgeOpts
+	for _, opt := range opts {
+		if opt != nil {
+			if err := opt(&o); err != nil {
+				return err
+			}
+		}
+	}
+
+	m.Header.Set(kvop, kvpurge)
+	m.Header.Set(jetstream.MsgRollup, jetstream.MsgRollupSubject)
+	pubOpts := make([]jetstream.PublishOpt, 0)
+	if o.ttl > 0 {
+		pubOpts = append(pubOpts, jetstream.WithMsgTTL(o.ttl))
+	}
+
+	if o.revision != 0 {
+		m.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(o.revision, 10))
+	}
+
+	_, err := kv.js.PublishMsg(ctx, m, pubOpts...)
+	return err
 }
 
 // Implementation for Watch
 type watcher struct {
 	mu          sync.Mutex
-	updates     chan KeyValueEntry
+	updates     chan *KeyValueEntry
 	sub         *nats.Subscription
 	initDone    bool
 	initPending uint64
@@ -1065,7 +945,7 @@ type watcher struct {
 }
 
 // Updates returns the interior channel.
-func (w *watcher) Updates() <-chan KeyValueEntry {
+func (w *watcher) Updates() <-chan *KeyValueEntry {
 	if w == nil {
 		return nil
 	}
@@ -1089,7 +969,7 @@ func (kv *kvs) Watch(ctx context.Context, keys []string, opts ...WatchOpt) (KeyW
 	var o watchOpts
 	for _, opt := range opts {
 		if opt != nil {
-			if err := opt.configureWatcher(&o); err != nil {
+			if err := opt(&o); err != nil {
 				return nil, err
 			}
 		}
@@ -1112,7 +992,7 @@ func (kv *kvs) Watch(ctx context.Context, keys []string, opts ...WatchOpt) (KeyW
 	}
 
 	// We will block below on placing items on the chan. That is by design.
-	w := &watcher{updates: make(chan KeyValueEntry, 256)}
+	w := &watcher{updates: make(chan *KeyValueEntry, 256)}
 
 	update := func(m *nats.Msg) {
 		tokens, err := GetMetadataFields(m.Reply)
@@ -1146,14 +1026,14 @@ func (kv *kvs) Watch(ctx context.Context, keys []string, opts ...WatchOpt) (KeyW
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		if !o.ignoreDeletes || (op != KeyValueDelete && op != KeyValuePurge) {
-			entry := &kve{
-				bucket:   kv.name,
-				key:      subj,
-				value:    m.Data,
-				revision: ParseNum(tokens[AckStreamSeqTokenPos]),
-				created:  time.Unix(0, int64(ParseNum(tokens[AckTimestampSeqTokenPos]))),
-				delta:    delta,
-				op:       op,
+			entry := &KeyValueEntry{
+				Bucket:    kv.name,
+				Key:       subj,
+				Value:     m.Data,
+				Revision:  ParseNum(tokens[AckStreamSeqTokenPos]),
+				Created:   time.Unix(0, int64(ParseNum(tokens[AckTimestampSeqTokenPos]))),
+				Delta:     delta,
+				Operation: op,
 			}
 			w.updates <- entry
 		}
@@ -1227,23 +1107,14 @@ func (kv *kvs) WatchAll(ctx context.Context, opts ...WatchOpt) (KeyWatcher, erro
 	return kv.Watch(ctx, []string{AllKeys}, opts...)
 }
 
-type keyLister struct {
-	watcher KeyWatcher
-	keys    chan string
-}
-
-// Keys will return all keys.
-func (kv *kvs) ListKeys(ctx context.Context, filters ...string) (KeyLister, error) {
+// ListKeys will return all keys as an iter.Seq2[string, error] iterator.
+func (kv *kvs) ListKeys(ctx context.Context, filters ...string) (iter.Seq2[string, error], error) {
 	watcher, err := kv.Watch(ctx, filters, IgnoreDeletes(), MetaOnly())
 	if err != nil {
 		return nil, err
 	}
 
-	// Reuse the existing keyLister implementation
-	kl := &keyLister{watcher: watcher, keys: make(chan string, 256)}
-
-	go func() {
-		defer close(kl.keys)
+	return func(yield func(string, error) bool) {
 		defer watcher.Stop()
 
 		for {
@@ -1252,28 +1123,20 @@ func (kv *kvs) ListKeys(ctx context.Context, filters ...string) (KeyLister, erro
 				if entry == nil { // Indicates all initial values are received
 					return
 				}
-				kl.keys <- entry.Key()
+				if !yield(entry.Key, nil) {
+					return
+				}
 			case <-ctx.Done():
+				yield("", ctx.Err())
 				return
 			}
 		}
-	}()
-
-	return kl, nil
-}
-
-func (kl *keyLister) Keys() <-chan string {
-	return kl.keys
-}
-
-func (kl *keyLister) Stop() error {
-	return kl.watcher.Stop()
+	}, nil
 }
 
 // History will return all historical values for the key.
-func (kv *kvs) History(ctx context.Context, key string, opts ...WatchOpt) ([]KeyValueEntry, error) {
-	opts = append(opts, IncludeHistory())
-	watcher, err := kv.Watch(ctx, []string{key}, opts...)
+func (kv *kvs) History(ctx context.Context, key string) ([]KeyValueEntry, error) {
+	watcher, err := kv.Watch(ctx, []string{key}, IncludeHistory())
 	if err != nil {
 		return nil, err
 	}
@@ -1284,7 +1147,7 @@ func (kv *kvs) History(ctx context.Context, key string, opts ...WatchOpt) ([]Key
 		if entry == nil {
 			break
 		}
-		entries = append(entries, entry)
+		entries = append(entries, *entry)
 	}
 	if len(entries) == 0 {
 		return nil, ErrKeyNotFound
@@ -1300,11 +1163,11 @@ func (kv *kvs) Bucket() string {
 const kvDefaultPurgeDeletesMarkerThreshold = 30 * time.Minute
 
 // PurgeDeletes will remove all current delete markers.
-func (kv *kvs) PurgeDeletes(ctx context.Context, opts ...KVPurgeOpt) error {
-	var o purgeOpts
+func (kv *kvs) PurgeDeletes(ctx context.Context, opts ...KVPurgeDeletesOpt) error {
+	var o purgeDeletesOpts
 	for _, opt := range opts {
 		if opt != nil {
-			if err := opt.configurePurge(&o); err != nil {
+			if err := opt(&o); err != nil {
 				return err
 			}
 		}
@@ -1331,8 +1194,8 @@ func (kv *kvs) PurgeDeletes(ctx context.Context, opts ...KVPurgeOpt) error {
 		if entry == nil {
 			break
 		}
-		if op := entry.Operation(); op == KeyValueDelete || op == KeyValuePurge {
-			deleteMarkers = append(deleteMarkers, entry)
+		if op := entry.Operation; op == KeyValueDelete || op == KeyValuePurge {
+			deleteMarkers = append(deleteMarkers, *entry)
 		}
 	}
 	// Stop watcher here so as we purge we do not have the system continually updating numPending.
@@ -1342,9 +1205,9 @@ func (kv *kvs) PurgeDeletes(ctx context.Context, opts ...KVPurgeOpt) error {
 	// Do actual purges here.
 	for _, entry := range deleteMarkers {
 		b.WriteString(kv.pre)
-		b.WriteString(entry.Key())
+		b.WriteString(entry.Key)
 		purgeOpts := []jetstream.StreamPurgeOpt{jetstream.WithPurgeSubject(b.String())}
-		if olderThan > 0 && entry.Created().After(limit) {
+		if olderThan > 0 && entry.Created.After(limit) {
 			purgeOpts = append(purgeOpts, jetstream.WithPurgeKeep(1))
 		}
 		if err := kv.stream.Purge(ctx, purgeOpts...); err != nil {
@@ -1357,12 +1220,22 @@ func (kv *kvs) PurgeDeletes(ctx context.Context, opts ...KVPurgeOpt) error {
 
 // Status retrieves the status and configuration of a bucket
 func (kv *kvs) Status(ctx context.Context) (KeyValueStatus, error) {
-	nfo, err := kv.stream.Info(ctx)
+	info, err := kv.stream.Info(ctx)
 	if err != nil {
-		return nil, err
+		return KeyValueStatus{}, err
 	}
 
-	return &KeyValueBucketStatus{info: nfo, bucket: kv.name}, nil
+	return KeyValueStatus{
+		Bucket:         kv.name,
+		Values:         info.State.Msgs,
+		History:        info.Config.MaxMsgsPerSubject,
+		TTL:            info.Config.MaxAge,
+		BackingStore:   "JetStream",
+		Bytes:          info.State.Bytes,
+		IsCompressed:   info.Config.Compression != jetstream.NoCompression,
+		LimitMarkerTTL: info.Config.SubjectDeleteMarkerTTL,
+		StreamInfo:     info,
+	}, nil
 }
 
 func mapStreamToKVS(js jetstream.JetStream, pushJS nats.JetStreamContext, stream jetstream.Stream) *kvs {
@@ -1409,4 +1282,18 @@ func copyStreamSource(ss *jetstream.StreamSource) *jetstream.StreamSource {
 		nss.External = &ext
 	}
 	return &nss
+}
+
+func (kv *kvs) buildKeySubject(key string) string {
+	var b strings.Builder
+	if kv.useJSPfx {
+		b.WriteString(kv.js.Options().APIPrefix)
+	}
+	if kv.putPre != "" {
+		b.WriteString(kv.putPre)
+	} else {
+		b.WriteString(kv.pre)
+	}
+	b.WriteString(key)
+	return b.String()
 }

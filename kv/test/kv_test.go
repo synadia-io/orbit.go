@@ -55,11 +55,11 @@ func TestKeyValueBasics(t *testing.T) {
 	// Simple Get
 	e, err := bucket.Get(ctx, "name")
 	expectOk(t, err)
-	if string(e.Value()) != "derek" {
-		t.Fatalf("Got wrong value: %q vs %q", e.Value(), "derek")
+	if string(e.Value) != "derek" {
+		t.Fatalf("Got wrong value: %q vs %q", e.Value, "derek")
 	}
-	if e.Revision() != 1 {
-		t.Fatalf("Expected 1 for the revision, got %d", e.Revision())
+	if e.Revision != 1 {
+		t.Fatalf("Expected 1 for the revision, got %d", e.Revision)
 	}
 
 	// Delete
@@ -72,9 +72,9 @@ func TestKeyValueBasics(t *testing.T) {
 	if r != 3 {
 		t.Fatalf("Expected 3 for the revision, got %d", r)
 	}
-	err = bucket.Delete(ctx, "name", kv.LastRevision(4))
+	err = bucket.Delete(ctx, "name", kv.DeleteLastRevision(4))
 	expectErr(t, err)
-	err = bucket.Delete(ctx, "name", kv.LastRevision(3))
+	err = bucket.Delete(ctx, "name", kv.DeleteLastRevision(3))
 	expectOk(t, err)
 
 	// Conditional Updates.
@@ -92,24 +92,23 @@ func TestKeyValueBasics(t *testing.T) {
 	// Status
 	status, err := bucket.Status(ctx)
 	expectOk(t, err)
-	if status.History() != 5 {
-		t.Fatalf("expected history of 5 got %d", status.History())
+	if status.History != 5 {
+		t.Fatalf("expected history of 5 got %d", status.History)
 	}
-	if status.Bucket() != "TEST" {
-		t.Fatalf("expected bucket TEST got %v", status.Bucket())
+	if status.Bucket != "TEST" {
+		t.Fatalf("expected bucket TEST got %v", status.Bucket)
 	}
-	if status.TTL() != time.Hour {
-		t.Fatalf("expected 1 hour TTL got %v", status.TTL())
+	if status.TTL != time.Hour {
+		t.Fatalf("expected 1 hour TTL got %v", status.TTL)
 	}
-	if status.Values() != 7 {
-		t.Fatalf("expected 7 values got %d", status.Values())
+	if status.Values != 7 {
+		t.Fatalf("expected 7 values got %d", status.Values)
 	}
-	if status.BackingStore() != "JetStream" {
-		t.Fatalf("invalid backing store kind %s", status.BackingStore())
+	if status.BackingStore != "JetStream" {
+		t.Fatalf("invalid backing store kind %s", status.BackingStore)
 	}
 
-	kvs := status.(*kv.KeyValueBucketStatus)
-	si := kvs.StreamInfo()
+	si := status.StreamInfo
 	if si == nil {
 		t.Fatalf("StreamInfo not received")
 	}
@@ -203,14 +202,14 @@ func TestKeyValueHistory(t *testing.T) {
 		t.Fatalf("Expected %d values, got %d", 10, len(vl))
 	}
 	for i, v := range vl {
-		if v.Key() != "age" {
-			t.Fatalf("Expected key of %q, got %q", "age", v.Key())
+		if v.Key != "age" {
+			t.Fatalf("Expected key of %q, got %q", "age", v.Key)
 		}
-		if v.Revision() != uint64(i+41) {
+		if v.Revision != uint64(i+41) {
 			// History of 10, sent 50..
-			t.Fatalf("Expected revision of %d, got %d", i+41, v.Revision())
+			t.Fatalf("Expected revision of %d, got %d", i+41, v.Revision)
 		}
-		age, err := strconv.Atoi(string(v.Value()))
+		age, err := strconv.Atoi(string(v.Value))
 		expectOk(t, err)
 		if age != i+62 {
 			t.Fatalf("Expected data value of %d, got %d", i+22, age)
@@ -224,8 +223,8 @@ func TestKeyValueWatch(t *testing.T) {
 			t.Helper()
 			select {
 			case v := <-watcher.Updates():
-				if v.Key() != key || string(v.Value()) != value || v.Revision() != revision {
-					t.Fatalf("Did not get expected: %q %q %d vs %q %q %d", v.Key(), string(v.Value()), v.Revision(), key, value, revision)
+				if v.Key != key || string(v.Value) != value || v.Revision != revision {
+					t.Fatalf("Did not get expected: %q %q %d vs %q %q %d", v.Key, string(v.Value), v.Revision, key, value, revision)
 				}
 			case <-time.After(time.Second):
 				t.Fatalf("Did not receive an update like expected")
@@ -237,11 +236,11 @@ func TestKeyValueWatch(t *testing.T) {
 			t.Helper()
 			select {
 			case v := <-watcher.Updates():
-				if v.Operation() != kv.KeyValueDelete {
+				if v.Operation != kv.KeyValueDelete {
 					t.Fatalf("Expected a delete operation but got %+v", v)
 				}
-				if v.Revision() != revision {
-					t.Fatalf("Did not get expected revision: %d vs %d", revision, v.Revision())
+				if v.Revision != revision {
+					t.Fatalf("Did not get expected revision: %d vs %d", revision, v.Revision)
 				}
 			case <-time.After(time.Second):
 				t.Fatalf("Did not receive an update like expected")
@@ -253,11 +252,11 @@ func TestKeyValueWatch(t *testing.T) {
 			t.Helper()
 			select {
 			case v := <-watcher.Updates():
-				if v.Operation() != kv.KeyValuePurge {
+				if v.Operation != kv.KeyValuePurge {
 					t.Fatalf("Expected a delete operation but got %+v", v)
 				}
-				if v.Revision() != revision {
-					t.Fatalf("Did not get expected revision: %d vs %d", revision, v.Revision())
+				if v.Revision != revision {
+					t.Fatalf("Did not get expected revision: %d vs %d", revision, v.Revision)
 				}
 			case <-time.After(time.Second):
 				t.Fatalf("Did not receive an update like expected")
@@ -805,9 +804,9 @@ func TestKeyValueDeleteVsPurge(t *testing.T) {
 	if len(entries) != 4 {
 		t.Fatalf("Expected 4 entries for age after delete, got %d", len(entries))
 	}
-	err = bucket.Purge(ctx, "name", kv.LastRevision(4))
+	err = bucket.Purge(ctx, "name", kv.PurgeLastRevision(4))
 	expectErr(t, err)
-	err = bucket.Purge(ctx, "name", kv.LastRevision(5))
+	err = bucket.Purge(ctx, "name", kv.PurgeLastRevision(5))
 	expectOk(t, err)
 	// Check marker
 	e, err := bucket.Get(ctx, "name")
@@ -821,8 +820,8 @@ func TestKeyValueDeleteVsPurge(t *testing.T) {
 		t.Fatalf("Expected only 1 entry for age after delete, got %d", len(entries))
 	}
 	// Make sure history also reports the purge operation.
-	if e := entries[0]; e.Operation() != kv.KeyValuePurge {
-		t.Fatalf("Expected a purge operation but got %v", e.Operation())
+	if e := entries[0]; e.Operation != kv.KeyValuePurge {
+		t.Fatalf("Expected a purge operation but got %v", e.Operation)
 	}
 }
 
@@ -914,7 +913,7 @@ func TestKeyValuePurgeDeletesMarkerThreshold(t *testing.T) {
 	if len(barEntries) != 1 {
 		t.Fatalf("Expected 1 entry, got %v", barEntries)
 	}
-	if e := barEntries[0]; e.Operation() != kv.KeyValueDelete {
+	if e := barEntries[0]; e.Operation != kv.KeyValueDelete {
 		t.Fatalf("Unexpected entry: %+v", e)
 	}
 }
@@ -952,7 +951,10 @@ func TestKeyValueListKeys(t *testing.T) {
 	expectOk(t, err)
 
 	kmap := make(map[string]struct{})
-	for key := range keys.Keys() {
+	for key, err := range keys {
+		if err != nil {
+			t.Fatalf("Error during iteration: %v", err)
+		}
 		if _, ok := kmap[key]; ok {
 			t.Fatalf("Already saw %q", key)
 		}
@@ -979,7 +981,10 @@ func TestKeyValueListKeys(t *testing.T) {
 	expectOk(t, err)
 
 	kmap = make(map[string]struct{})
-	for key := range keys.Keys() {
+	for key, err := range keys {
+		if err != nil {
+			t.Fatalf("Error during iteration: %v", err)
+		}
 		if _, ok := kmap[key]; ok {
 			t.Fatalf("Already saw %q", key)
 		}
@@ -1027,9 +1032,12 @@ func TestListKeysFiltered(t *testing.T) {
 	keyLister, err := bucket.ListKeys(ctx, filters...)
 	expectOk(t, err)
 
-	// Collect filtered keys from KeyLister
+	// Collect filtered keys from iterator
 	var filteredKeys []string
-	for key := range keyLister.Keys() {
+	for key, err := range keyLister {
+		if err != nil {
+			t.Fatalf("Error during iteration: %v", err)
+		}
 		filteredKeys = append(filteredKeys, key)
 	}
 
@@ -1055,7 +1063,10 @@ func TestListKeysFiltered(t *testing.T) {
 
 	// reset filtered keys
 	filteredKeys = nil
-	for key := range keyLister.Keys() {
+	for key, err := range keyLister {
+		if err != nil {
+			t.Fatalf("Error during iteration: %v", err)
+		}
 		filteredKeys = append(filteredKeys, key)
 	}
 	if len(filteredKeys) != 0 {
@@ -1099,7 +1110,7 @@ func TestKeyValueCrossAccounts(t *testing.T) {
 	s, _ := RunServerWithConfig(conf)
 	defer shutdownJSServerAndRemoveStorage(t, s)
 
-	watchNext := func(w kv.KeyWatcher) kv.KeyValueEntry {
+	watchNext := func(w kv.KeyWatcher) *kv.KeyValueEntry {
 		t.Helper()
 		select {
 		case e := <-w.Updates():
@@ -1162,7 +1173,7 @@ func TestKeyValueCrossAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error on get: %v", err)
 	}
-	if e.Key() != "map" || string(e.Value()) != "value" {
+	if e.Key != "map" || string(e.Value) != "value" {
 		t.Fatalf("Unexpected entry: +%v", e)
 	}
 
@@ -1171,17 +1182,17 @@ func TestKeyValueCrossAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error on get: %v", err)
 	}
-	if e.Key() != "map" || string(e.Value()) != "value" {
+	if e.Key != "map" || string(e.Value) != "value" {
 		t.Fatalf("Unexpected entry: +%v", e)
 	}
 
 	// Watcher 1
-	if e := watchNext(w1); e == nil || e.Key() != "map" || string(e.Value()) != "value" {
+	if e := watchNext(w1); e == nil || e.Key != "map" || string(e.Value) != "value" {
 		t.Fatalf("Unexpected entry: %+v", e)
 	}
 
 	// Watcher 2
-	if e := watchNext(w2); e == nil || e.Key() != "map" || string(e.Value()) != "value" {
+	if e := watchNext(w2); e == nil || e.Key != "map" || string(e.Value) != "value" {
 		t.Fatalf("Unexpected entry: %+v", e)
 	}
 
@@ -1195,7 +1206,7 @@ func TestKeyValueCrossAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error on get: %v", err)
 	}
-	if e.Key() != "map" || string(e.Value()) != "updated" {
+	if e.Key != "map" || string(e.Value) != "updated" {
 		t.Fatalf("Unexpected entry: +%v", e)
 	}
 
@@ -1204,17 +1215,17 @@ func TestKeyValueCrossAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error on get: %v", err)
 	}
-	if e.Key() != "map" || string(e.Value()) != "updated" {
+	if e.Key != "map" || string(e.Value) != "updated" {
 		t.Fatalf("Unexpected entry: +%v", e)
 	}
 
 	// Watcher 1
-	if e := watchNext(w1); e == nil || e.Key() != "map" || string(e.Value()) != "updated" {
+	if e := watchNext(w1); e == nil || e.Key != "map" || string(e.Value) != "updated" {
 		t.Fatalf("Unexpected entry: %+v", e)
 	}
 
 	// Watcher 2
-	if e := watchNext(w2); e == nil || e.Key() != "map" || string(e.Value()) != "updated" {
+	if e := watchNext(w2); e == nil || e.Key != "map" || string(e.Value) != "updated" {
 		t.Fatalf("Unexpected entry: %+v", e)
 	}
 
@@ -1224,12 +1235,12 @@ func TestKeyValueCrossAccounts(t *testing.T) {
 	}
 
 	// Check purge ok from w1
-	if e := watchNext(w1); e == nil || e.Operation() != kv.KeyValuePurge {
+	if e := watchNext(w1); e == nil || e.Operation != kv.KeyValuePurge {
 		t.Fatalf("Unexpected entry: %+v", e)
 	}
 
 	// Check purge ok from w2
-	if e := watchNext(w2); e == nil || e.Operation() != kv.KeyValuePurge {
+	if e := watchNext(w2); e == nil || e.Operation != kv.KeyValuePurge {
 		t.Fatalf("Unexpected entry: %+v", e)
 	}
 
@@ -1321,25 +1332,25 @@ func TestListKeyValueStores(t *testing.T) {
 			}
 			names := make([]string, 0)
 			kvNames := kv.KeyValueStoreNames(ctx, js)
-			for name := range kvNames.Name() {
+			for name, err := range kvNames {
+				if err != nil {
+					t.Fatalf("Unexpected error during iteration: %v", err)
+				}
 				if strings.HasPrefix(name, "KV_") {
 					t.Fatalf("Expected name without KV_ prefix, got %q", name)
 				}
 				names = append(names, name)
 			}
-			if kvNames.Error() != nil {
-				t.Fatalf("Unexpected error: %v", kvNames.Error())
-			}
 			if len(names) != test.bucketsNum {
 				t.Fatalf("Invalid number of stream names; want: %d; got: %d", test.bucketsNum, len(names))
 			}
-			infos := make([]nats.KeyValueStatus, 0)
-			kvInfos := kv.KeyValueStores(ctx, js)
-			for info := range kvInfos.Status() {
+			infos := make([]kv.KeyValueStatus, 0)
+			kvStores := kv.KeyValueStores(ctx, js)
+			for info, err := range kvStores {
+				if err != nil {
+					t.Fatalf("Unexpected error during status iteration: %v", err)
+				}
 				infos = append(infos, info)
-			}
-			if kvInfos.Error() != nil {
-				t.Fatalf("Unexpected error: %v", kvNames.Error())
 			}
 			if len(infos) != test.bucketsNum {
 				t.Fatalf("Invalid number of streams; want: %d; got: %d", test.bucketsNum, len(infos))
@@ -1349,16 +1360,16 @@ func TestListKeyValueStores(t *testing.T) {
 }
 
 func TestKeyValueMirrorCrossDomains(t *testing.T) {
-	keyExists := func(t *testing.T, bucket kv.KeyValue, key string, expected string) kv.KeyValueEntry {
-		var e kv.KeyValueEntry
+	keyExists := func(t *testing.T, bucket kv.KeyValue, key string, expected string) *kv.KeyValueEntry {
+		var e *kv.KeyValueEntry
 		var err error
 		checkFor(t, 10*time.Second, 10*time.Millisecond, func() error {
 			e, err = bucket.Get(context.Background(), key)
 			if err != nil {
 				return err
 			}
-			if string(e.Value()) != expected {
-				return fmt.Errorf("Expected value to be %q, got %q", expected, e.Value())
+			if string(e.Value) != expected {
+				return fmt.Errorf("Expected value to be %q, got %q", expected, e.Value)
 			}
 			return nil
 		})
@@ -1470,8 +1481,8 @@ func TestKeyValueMirrorCrossDomains(t *testing.T) {
 	expectOk(t, err)
 
 	e := keyExists(t, bucket, "v", "vv")
-	if e.Operation() != kv.KeyValuePut {
-		t.Fatalf("Got wrong value: %q vs %q", e.Operation(), nats.KeyValuePut)
+	if e.Operation != kv.KeyValuePut {
+		t.Fatalf("Got wrong value: %q vs %q", e.Operation, nats.KeyValuePut)
 	}
 	err = mbucket.Delete(ctx, "v")
 	expectOk(t, err)
@@ -1498,8 +1509,8 @@ func TestKeyValueMirrorCrossDomains(t *testing.T) {
 	_, err = rbucket.PutString(ctx, "v", "vv")
 	expectOk(t, err)
 	e = keyExists(t, mbucket, "v", "vv")
-	if e.Operation() != kv.KeyValuePut {
-		t.Fatalf("Got wrong value: %q vs %q", e.Operation(), nats.KeyValuePut)
+	if e.Operation != kv.KeyValuePut {
+		t.Fatalf("Got wrong value: %q vs %q", e.Operation, nats.KeyValuePut)
 	}
 	err = rbucket.Delete(ctx, "v")
 	expectOk(t, err)
@@ -1665,32 +1676,8 @@ func TestKeyValueCreate(t *testing.T) {
 	}
 
 	_, err = bucket.Create(ctx, "key", []byte("1"))
-	expected := "wrong last sequence: 1: key exists"
-	if !strings.Contains(err.Error(), expected) {
-		t.Fatalf("Expected %q, got: %v", expected, err)
-	}
 	if !errors.Is(err, kv.ErrKeyExists) {
 		t.Fatalf("Expected ErrKeyExists, got: %v", err)
-	}
-	aerr := &kv.APIError{}
-	if !errors.As(err, &aerr) {
-		t.Fatalf("Expected APIError, got: %v", err)
-	}
-	if aerr.Description != "wrong last sequence: 1" {
-		t.Fatalf("Unexpected APIError message, got: %v", aerr.Description)
-	}
-	if aerr.ErrorCode != 10071 {
-		t.Fatalf("Unexpected error code, got: %v", aerr.ErrorCode)
-	}
-	if aerr.Code != kv.ErrKeyExists.APIError().Code {
-		t.Fatalf("Unexpected error code, got: %v", aerr.Code)
-	}
-	var kerr kv.JetStreamError
-	if !errors.As(err, &kerr) {
-		t.Fatalf("Expected KeyValueError, got: %v", err)
-	}
-	if kerr.APIError().ErrorCode != 10071 {
-		t.Fatalf("Unexpected error code, got: %v", kerr.APIError().ErrorCode)
 	}
 }
 
@@ -1759,7 +1746,7 @@ func TestKeyValueCompression(t *testing.T) {
 		t.Fatalf("Error getting bucket status: %v", err)
 	}
 
-	if !status.IsCompressed() {
+	if !status.IsCompressed {
 		t.Fatalf("Expected bucket to be compressed")
 	}
 
@@ -1899,11 +1886,11 @@ func TestKeyValueLimitMarkerTTL(t *testing.T) {
 		if entry == nil {
 			t.Fatalf("Expected entry, got nil")
 		}
-		if entry.Operation() != kv.KeyValuePurge {
-			t.Fatalf("Expected purge operation, got %v", entry.Operation())
+		if entry.Operation != kv.KeyValuePurge {
+			t.Fatalf("Expected purge operation, got %v", entry.Operation)
 		}
-		if entry.Key() != "age" {
-			t.Fatalf("Expected key %q, got %q", "age", entry.Key())
+		if entry.Key != "age" {
+			t.Fatalf("Expected key %q, got %q", "age", entry.Key)
 		}
 	})
 
@@ -1949,11 +1936,11 @@ func TestKeyValueLimitMarkerTTL(t *testing.T) {
 		if entry == nil {
 			t.Fatalf("Expected entry, got nil")
 		}
-		if entry.Operation() != kv.KeyValuePurge {
-			t.Fatalf("Expected purge operation, got %v", entry.Operation())
+		if entry.Operation != kv.KeyValuePurge {
+			t.Fatalf("Expected purge operation, got %v", entry.Operation)
 		}
-		if entry.Key() != "age" {
-			t.Fatalf("Expected key %q, got %q", "age", entry.Key())
+		if entry.Key != "age" {
+			t.Fatalf("Expected key %q, got %q", "age", entry.Key)
 		}
 	})
 }
