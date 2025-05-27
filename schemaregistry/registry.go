@@ -273,3 +273,49 @@ func (sr *SchemaRegistry) Add(ctx context.Context, req AddRequest) (*AddResponse
 
 	return &addResp, nil
 }
+
+func (sr *SchemaRegistry) Get(ctx context.Context, req GetRequest) (*GetResponse, error) {
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := sr.client.RequestWithContext(ctx, fmt.Sprintf("$SR.v1.GET.%s", req.Name), data)
+	if err != nil {
+		return nil, err
+	}
+
+	var getResp GetResponse
+	if err := json.Unmarshal(resp.Data, &getResp); err != nil {
+		return nil, err
+	}
+
+	err = headersToError(resp.Header)
+	if err != nil {
+		return nil, err
+	}
+
+	return &getResp, nil
+}
+
+func (sr *SchemaRegistry) Update(ctx context.Context, req UpdateRequest) (*UpdateResponse, error) {
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := sr.client.RequestWithContext(ctx, fmt.Sprintf("$SR.v1.UPDATE.%s", req.Name), data)
+	if err != nil {
+		return nil, err
+	}
+
+	var updateResp UpdateResponse
+	if err := json.Unmarshal(resp.Data, &updateResp); err != nil {
+		return nil, err
+	}
+
+	err = headersToError(resp.Header)
+	if err != nil {
+		return nil, err
+	}
+
+	return &updateResp, nil
+}
