@@ -319,3 +319,26 @@ func (sr *SchemaRegistry) Update(ctx context.Context, req UpdateRequest) (*Updat
 
 	return &updateResp, nil
 }
+
+func (sr *SchemaRegistry) List(ctx context.Context, req ListRequest) (*ListResponse, error) {
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := sr.client.RequestWithContext(ctx, "$SR.v1.LIST", data)
+	if err != nil {
+		return nil, err
+	}
+
+	var listResp ListResponse
+	if err := json.Unmarshal(resp.Data, &listResp); err != nil {
+		return nil, err
+	}
+
+	err = headersToError(resp.Header)
+	if err != nil {
+		return nil, err
+	}
+
+	return &listResp, nil
+}
