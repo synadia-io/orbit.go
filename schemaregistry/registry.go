@@ -93,13 +93,13 @@ type UpdateRequest struct {
 	Name string `json:"name"`
 
 	// The schema definition (required).
-	Definition *string `json:"definition"`
+	Definition string `json:"definition"`
 
 	// Description of the schema (optional).
-	Description *string `json:"description,omitempty"`
+	Description string `json:"description,omitempty"`
 
 	// Metadata is a map of key-value pairs (optional).
-	Metadata *map[string]string `json:"metadata,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // TODO(jrm): Have proper schemas for responses that include errors, which should also by typed.

@@ -2,7 +2,6 @@ package tests
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"schemaregistry"
 	"testing"
@@ -36,9 +35,15 @@ func TestAdd(t *testing.T) {
 	})
 	require_NoError(t, err)
 
-	fmt.Printf("Schema: %s\n", getResp.Schema.Definition)
-
 	require_Equal(t, getResp.Schema.Name, "test")
 	require_Equal(t, getResp.Schema.Revision, 1)
 
+	updateResp, err := schemaRegistry.Update(context.Background(), schemaregistry.UpdateRequest{
+		Name:        "test",
+		Description: "Updated description",
+		Definition:  string(schema),
+	})
+	require_NoError(t, err)
+
+	require_Equal(t, updateResp.Revision, 2)
 }
