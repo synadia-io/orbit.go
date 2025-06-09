@@ -148,7 +148,7 @@ type ListRequest struct {
 }
 
 type ListResponse struct {
-	Schemas []string `json:"schemas"`
+	Schemas []Schema `json:"schemas"`
 }
 
 type ValidateRequest struct {
