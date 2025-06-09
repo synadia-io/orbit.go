@@ -1,4 +1,4 @@
-module schemaregistry
+module github.com/synadia-io/orbit.go/schemaregistry
 
 go 1.24.1
 
