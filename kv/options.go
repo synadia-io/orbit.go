@@ -76,9 +76,6 @@ func ResumeFromRevision(revision uint64) WatchOpt {
 // regardless of their age.
 func DeleteMarkersOlderThan(dur time.Duration) KVPurgeDeletesOpt {
 	return func(opts *purgeDeletesOpts) error {
-		if dur <= 0 {
-			return fmt.Errorf("%w: delete markers older than must be greater than zero", ErrInvalidOption)
-		}
 		opts.dmthr = dur
 		return nil
 	}
@@ -120,6 +117,34 @@ func PurgeLastRevision(revision uint64) KVPurgeOpt {
 func KeyTTL(ttl time.Duration) KVCreateOpt {
 	return func(opts *createOpts) error {
 		opts.ttl = ttl
+		return nil
+	}
+}
+
+// WithKeyCodec sets the codec to use for encoding and decoding keys in the key
+// value store. This is used to serialize and deserialize keys when storing
+// and retrieving them from the store. The codec must implement the Codec
+// interface.
+func WithKeyCodec(codec Codec) GetKeyValueOpt {
+	return func(opts *getKeyValueOpts) error {
+		if codec == nil {
+			return fmt.Errorf("%w: codec can not be nil", ErrInvalidOption)
+		}
+		opts.KeyCodec = codec
+		return nil
+	}
+}
+
+// WithValueCodec sets the codec to use for encoding and decoding values in the key
+// value store. This is used to serialize and deserialize values when storing
+// and retrieving them from the store. The codec must implement the Codec
+// interface.
+func WithValueCodec(codec Codec) GetKeyValueOpt {
+	return func(opts *getKeyValueOpts) error {
+		if codec == nil {
+			return fmt.Errorf("%w: codec can not be nil", ErrInvalidOption)
+		}
+		opts.ValueCodec = codec
 		return nil
 	}
 }

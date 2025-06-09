@@ -68,10 +68,6 @@ var (
 	// ErrNoKeysFound is returned when no keys are found.
 	ErrNoKeysFound = &KVError{message: "no keys found"}
 
-	// ErrTTLOnDeleteNotSupported is returned when attempting to set a TTL
-	// on a delete operation.
-	ErrTTLOnDeleteNotSupported = &KVError{message: "TTL is not supported on delete"}
-
 	// ErrLimitMarkerTTLNotSupported is returned when the connected jetstream API
 	// does not support setting the LimitMarkerTTL.
 	ErrLimitMarkerTTLNotSupported = &KVError{message: "limit marker TTLs not supported by server"}

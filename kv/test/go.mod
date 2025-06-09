@@ -21,6 +21,6 @@ require (
 )
 
 replace (
-github.com/synadia-io/orbit.go/kv => ..
-github.com/nats-io/nats.go => ../../../nats.go
+	github.com/nats-io/nats.go => ../../../nats.go
+	github.com/synadia-io/orbit.go/kv => ..
 )
