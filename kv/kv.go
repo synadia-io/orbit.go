@@ -208,6 +208,9 @@ type (
 		metaOnly bool
 		// resumeFromRevision is the revision to resume from.
 		resumeFromRevision uint64
+
+		// internal flag to indicate if we should watch all keys
+		allKeys bool
 	}
 
 	// KVDeleteOpt is used to configure delete operation.
@@ -329,6 +332,15 @@ func GetKeyValue[K, V any](ctx context.Context, js jetstream.JetStream, bucket s
 		kvOpts.ValueCodec = NoOpCodec
 	}
 
+	var k K
+	if !kvOpts.KeyCodec.ValidType(k) {
+		return nil, fmt.Errorf("%w: key type %T", ErrCodecMismatch, k)
+	}
+	var v V
+	if !kvOpts.ValueCodec.ValidType(v) {
+		return nil, fmt.Errorf("%w: value type %T", ErrCodecMismatch, v)
+	}
+
 	streamName := fmt.Sprintf(kvBucketNameTmpl, bucket)
 	stream, err := js.Stream(ctx, streamName)
 	if err != nil {
@@ -360,11 +372,11 @@ func CreateKeyValue[K, V any](ctx context.Context, js jetstream.JetStream, cfg K
 
 	var k K
 	if !cfg.KeyCodec.ValidType(k) {
-		return nil, fmt.Errorf("key codec does not support type %T", k)
+		return nil, fmt.Errorf("%w: key type %T", ErrCodecMismatch, k)
 	}
 	var v V
 	if !cfg.ValueCodec.ValidType(v) {
-		return nil, fmt.Errorf("value codec does not support type %T", v)
+		return nil, fmt.Errorf("%w: value type %T", ErrCodecMismatch, v)
 	}
 
 	scfg, err := prepareStreamConfig(ctx, js, cfg)
@@ -417,11 +429,11 @@ func UpdateKeyValue[K, V any](ctx context.Context, js jetstream.JetStream, cfg K
 
 	var k K
 	if !cfg.KeyCodec.ValidType(k) {
-		return nil, fmt.Errorf("key codec does not support type %T", k)
+		return nil, fmt.Errorf("%w: key type %T", ErrCodecMismatch, k)
 	}
 	var v V
 	if !cfg.ValueCodec.ValidType(v) {
-		return nil, fmt.Errorf("value codec does not support type %T", v)
+		return nil, fmt.Errorf("%w: value type %T", ErrCodecMismatch, v)
 	}
 
 	scfg, err := prepareStreamConfig(ctx, js, cfg)
@@ -454,11 +466,11 @@ func CreateOrUpdateKeyValue[K, V any](ctx context.Context, js jetstream.JetStrea
 
 	var k K
 	if !cfg.KeyCodec.ValidType(k) {
-		return nil, fmt.Errorf("key codec does not support type %T", k)
+		return nil, fmt.Errorf("%w: key type %T", ErrCodecMismatch, k)
 	}
 	var v V
 	if !cfg.ValueCodec.ValidType(v) {
-		return nil, fmt.Errorf("value codec does not support type %T", v)
+		return nil, fmt.Errorf("%w: value type %T", ErrCodecMismatch, v)
 	}
 
 	scfg, err := prepareStreamConfig(ctx, js, cfg)
@@ -971,28 +983,34 @@ func (w *KeyWatcher[K, V]) Stop() error {
 }
 
 func (kv *KeyValue[K, V]) Watch(ctx context.Context, keys []K, opts ...WatchOpt) (*KeyWatcher[K, V], error) {
-	var keysStr []string
-	for _, key := range keys {
-		keyEnc, err := kv.keyCodec.Encode(key)
-		if err != nil {
-			return nil, err
-		}
-		keyStr := string(keyEnc)
-		if !searchKeyValid(keyStr) {
-			return nil, ErrInvalidKey
-		}
-
-		if !searchKeyValid(keyStr) {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidKey, "key cannot be empty and must be a valid NATS subject")
-		}
-		keysStr = append(keysStr, keyStr)
-	}
 	var o watchOpts
 	for _, opt := range opts {
 		if opt != nil {
 			if err := opt(&o); err != nil {
 				return nil, err
 			}
+		}
+	}
+
+	var keysStr []string
+
+	if o.allKeys {
+		keysStr = []string{AllKeys}
+	} else {
+		for _, key := range keys {
+			keyEnc, err := kv.keyCodec.Encode(key)
+			if err != nil {
+				return nil, err
+			}
+			keyStr := string(keyEnc)
+			if !searchKeyValid(keyStr) {
+				return nil, ErrInvalidKey
+			}
+
+			if !searchKeyValid(keyStr) {
+				return nil, fmt.Errorf("%w: %s", ErrInvalidKey, "key cannot be empty and must be a valid NATS subject")
+			}
+			keysStr = append(keysStr, keyStr)
 		}
 	}
 
@@ -1139,12 +1157,12 @@ func (kv *KeyValue[K, V]) Watch(ctx context.Context, keys []K, opts ...WatchOpt)
 
 // WatchAll will invoke the callback for all updates.
 func (kv *KeyValue[K, V]) WatchAll(ctx context.Context, opts ...WatchOpt) (*KeyWatcher[K, V], error) {
-	var allKeys K
-	if err := kv.keyCodec.Decode([]byte(AllKeys), &allKeys); err != nil {
-		return nil, err
-	}
+	opts = append(opts, func(opts *watchOpts) error {
+		opts.allKeys = true
+		return nil
+	})
 
-	return kv.Watch(ctx, []K{allKeys}, opts...)
+	return kv.Watch(ctx, nil, opts...)
 }
 
 // ListKeys will return all keys as an iter.Seq2[string, error] iterator.

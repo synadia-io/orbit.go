@@ -78,7 +78,7 @@ func (c *noOpCodec) Decode(data []byte, target any) error {
 		*t = string(data)
 		return nil
 	default:
-		return fmt.Errorf("ByteCodec only supports []byte and string types, requested %T", target)
+		return fmt.Errorf("NoOpCodec only supports []byte and string types, requested %T", target)
 	}
 }
 

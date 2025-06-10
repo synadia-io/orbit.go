@@ -74,6 +74,10 @@ var (
 
 	// ErrInvalidOption is returned when there is a collision between options.
 	ErrInvalidOption = &KVError{message: "invalid option"}
+
+	// ErrCodecMismatch is returned when the codec does not support the type
+	// being encoded or decoded.
+	ErrCodecMismatch = &KVError{message: "codec does not support this type"}
 )
 
 func (err *KVError) Error() string {
