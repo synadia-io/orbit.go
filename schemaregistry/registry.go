@@ -264,13 +264,13 @@ func (sr *SchemaRegistry) Add(ctx context.Context, req AddRequest) (*AddResponse
 		return nil, err
 	}
 
-	var addResp AddResponse
-	if err := json.Unmarshal(resp.Data, &addResp); err != nil {
+	err = headersToError(resp.Header)
+	if err != nil {
 		return nil, err
 	}
 
-	err = headersToError(resp.Header)
-	if err != nil {
+	var addResp AddResponse
+	if err := json.Unmarshal(resp.Data, &addResp); err != nil {
 		return nil, err
 	}
 
@@ -287,13 +287,13 @@ func (sr *SchemaRegistry) Get(ctx context.Context, req GetRequest) (*GetResponse
 		return nil, err
 	}
 
-	var getResp GetResponse
-	if err := json.Unmarshal(resp.Data, &getResp); err != nil {
+	err = headersToError(resp.Header)
+	if err != nil {
 		return nil, err
 	}
 
-	err = headersToError(resp.Header)
-	if err != nil {
+	var getResp GetResponse
+	if err := json.Unmarshal(resp.Data, &getResp); err != nil {
 		return nil, err
 	}
 
@@ -310,13 +310,13 @@ func (sr *SchemaRegistry) Update(ctx context.Context, req UpdateRequest) (*Updat
 		return nil, err
 	}
 
-	var updateResp UpdateResponse
-	if err := json.Unmarshal(resp.Data, &updateResp); err != nil {
+	err = headersToError(resp.Header)
+	if err != nil {
 		return nil, err
 	}
 
-	err = headersToError(resp.Header)
-	if err != nil {
+	var updateResp UpdateResponse
+	if err := json.Unmarshal(resp.Data, &updateResp); err != nil {
 		return nil, err
 	}
 
@@ -333,13 +333,13 @@ func (sr *SchemaRegistry) List(ctx context.Context, req ListRequest) (*ListRespo
 		return nil, err
 	}
 
-	var listResp ListResponse
-	if err := json.Unmarshal(resp.Data, &listResp); err != nil {
+	err = headersToError(resp.Header)
+	if err != nil {
 		return nil, err
 	}
 
-	err = headersToError(resp.Header)
-	if err != nil {
+	var listResp ListResponse
+	if err := json.Unmarshal(resp.Data, &listResp); err != nil {
 		return nil, err
 	}
 
