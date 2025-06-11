@@ -92,6 +92,9 @@ type UpdateRequest struct {
 	// Name of the schema (required).
 	Name string `json:"name"`
 
+	// Format of the schema (required)
+	Format SchemaFormat `json:"format"`
+
 	// The schema definition (required).
 	Definition string `json:"definition"`
 
