@@ -14,7 +14,7 @@
 [![Build Status][Build-Status-Image]][Build-Status-Url]
 [![Go Report Card][ReportCard-Image]][ReportCard-Url]
 
-JetStream Extensions is a set of utilities providing additional features to `jetstream` pacakge in nats.go client.
+JetStream Extensions is a set of utilities providing additional features to `jetstream` package in nats.go client.
 
 ## Installation
 
