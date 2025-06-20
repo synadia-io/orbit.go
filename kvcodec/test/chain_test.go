@@ -108,9 +108,9 @@ func TestChainCodecs(t *testing.T) {
 			"/config/worker/database": {},
 		}
 		expectedKeys := map[string]struct{}{
-			"config/app/database":    {},
-			"config/api/database":    {},
-			"config/worker/database": {},
+			"/config/app/database":    {},
+			"/config/api/database":    {},
+			"/config/worker/database": {},
 		}
 
 		watcher, err := watchCodecKV.Watch(ctx, pattern, jetstream.UpdatesOnly())

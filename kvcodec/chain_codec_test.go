@@ -77,11 +77,11 @@ func TestKeyChainCodecBasicOperations(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"/simple/key", "simple/key"},
-		{"/foo/bar/baz", "foo/bar/baz"},
-		{"/single", "single"},
-		{"/with/*/wildcard", "with/*/wildcard"},
-		{"/with/>", "with/>"},
+		{"/simple/key", "/simple/key"},
+		{"/foo/bar/baz", "/foo/bar/baz"},
+		{"/single", "/single"},
+		{"/with/*/wildcard", "/with/*/wildcard"},
+		{"/with/>", "/with/>"},
 		{"no/leading/slash", "no/leading/slash"},
 	}
 

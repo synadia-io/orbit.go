@@ -298,8 +298,8 @@ func TestPathCodec(t *testing.T) {
 	}
 
 	// verify using baseKV directly
-	// This should show the key as "config.app.database" without slashes
-	rawEntry, err := baseKV.Get(ctx, "config.app.database")
+	// This should show the key as "_root_.config.app.database" with _root_ prefix
+	rawEntry, err := baseKV.Get(ctx, "_root_.config.app.database")
 	if err != nil {
 		t.Fatalf("raw get error: %v", err)
 	}

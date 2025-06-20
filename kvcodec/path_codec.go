@@ -15,6 +15,12 @@ package kvcodec
 
 import "strings"
 
+// rootPrefix is used to encode path keys that start with a leading slash.
+// Since NATS subjects cannot start with a dot, we replace the leading slash
+// with this prefix to maintain round-trip compatibility while staying within
+// NATS KV key character constraints (^[-/_=\.a-zA-Z0-9]+$).
+const rootPrefix = "_root_"
+
 type pathCodec struct{}
 
 // PathCodec returns a codec that translates between path-style keys (using /)
@@ -25,16 +31,33 @@ func PathCodec() *pathCodec {
 
 // EncodeKey converts path-style key to NATS-style key.
 func (p *pathCodec) EncodeKey(key string) (string, error) {
-	// trim / from the beginning and end of the key
-	// as subjects do not allow leading or trailing .
-	key = strings.Trim(key, "/")
+	// Handle leading / by replacing with _root_
+	if strings.HasPrefix(key, "/") {
+		if key == "/" {
+			return rootPrefix, nil
+		}
+		key = rootPrefix + "." + key[1:]
+	}
 
-	// Replace / with .
+	// trim trailing / as subjects do not allow trailing .
+	key = strings.TrimSuffix(key, "/")
+
 	return strings.ReplaceAll(key, "/", "."), nil
 }
 
 // DecodeKey converts NATS-style key to path-style key.
 func (p *pathCodec) DecodeKey(key string) (string, error) {
+	// Handle _root_ prefix
+	if key == rootPrefix {
+		return "/", nil
+	}
+	prefixWithDot := rootPrefix + "."
+	if strings.HasPrefix(key, prefixWithDot) {
+		// Remove _root_ prefix and replace . with /
+		result := strings.ReplaceAll(key[len(prefixWithDot):], ".", "/")
+		return "/" + result, nil
+	}
+
 	return strings.ReplaceAll(key, ".", "/"), nil
 }
 

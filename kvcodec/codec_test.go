@@ -110,11 +110,13 @@ func TestPathCodec(t *testing.T) {
 			encoded string
 			decoded string
 		}{
-			{"simple path", "/foo/bar", "foo.bar", "foo/bar"},
+			{"simple path", "/foo/bar", "_root_.foo.bar", "/foo/bar"},
 			{"no leading slash", "foo/bar", "foo.bar", "foo/bar"},
-			{"deep path", "/foo/bar/baz/qux", "foo.bar.baz.qux", "foo/bar/baz/qux"},
-			{"single segment", "/foo", "foo", "foo"},
+			{"deep path", "/foo/bar/baz/qux", "_root_.foo.bar.baz.qux", "/foo/bar/baz/qux"},
+			{"single segment", "/foo", "_root_.foo", "/foo"},
 			{"trailing slash", "foo/bar/", "foo.bar", "foo/bar"},
+			{"root only", "/", "_root_", "/"},
+			{"leading slash with trailing", "/foo/bar/", "_root_.foo.bar", "/foo/bar"},
 		}
 
 		for _, tt := range tests {
@@ -222,10 +224,10 @@ func TestEncodeFilter(t *testing.T) {
 			pattern  string
 			expected string
 		}{
-			{"specific key", "/user/123", "user.123"},
-			{"single wildcard", "/user/*", "user.*"},
-			{"multi wildcard", "/user/>", "user.>"},
-			{"complex pattern", "/app/*/config/>", "app.*.config.>"},
+			{"specific key", "/user/123", "_root_.user.123"},
+			{"single wildcard", "/user/*", "_root_.user.*"},
+			{"multi wildcard", "/user/>", "_root_.user.>"},
+			{"complex pattern", "/app/*/config/>", "_root_.app.*.config.>"},
 			{"no leading slash", "user/*", "user.*"},
 		}
 
