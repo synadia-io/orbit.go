@@ -171,14 +171,14 @@ func requestMany(ctx context.Context, nc *nats.Conn, subject string, data []byte
 			if reqOpts.sentinel != nil && reqOpts.sentinel(msg) {
 				return
 			}
-			if reqOpts.count >= 0 {
-				reqOpts.count--
-				if reqOpts.count < 0 {
-					return
-				}
-			}
 			if !yield(msg, nil) {
 				return
+			}
+			if reqOpts.count > 0 {
+				reqOpts.count--
+				if reqOpts.count <= 0 {
+					return
+				}
 			}
 		}
 	}, nil
