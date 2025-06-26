@@ -134,3 +134,118 @@ func TestConnzPing(t *testing.T) {
 		}
 	}
 }
+
+func TestAllConnzPagination(t *testing.T) {
+	c := SetupCluster(t)
+	defer c.Shutdown()
+
+	var urls []string
+	for _, s := range c.servers {
+		urls = append(urls, s.ClientURL())
+	}
+
+	sysConn, err := nats.Connect(urls[2], nats.UserInfo("admin", "s3cr3t!"))
+	if err != nil {
+		t.Fatalf("Error establishing connection: %s", err)
+	}
+
+	var testConns []*nats.Conn
+	defer func() {
+		for _, conn := range testConns {
+			conn.Close()
+		}
+	}()
+
+	for i := range 15 {
+		nc, err := nats.Connect(c.servers[0].ClientURL())
+		if err != nil {
+			t.Fatalf("Error creating test connection %d: %s", i, err)
+		}
+		testConns = append(testConns, nc)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	sys, err := natssysclient.NewSysClient(sysConn)
+	if err != nil {
+		t.Fatalf("Error creating system client: %s", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	serverID := c.servers[0].ID()
+
+	t.Run("single server pagination", func(t *testing.T) {
+		opts := natssysclient.ConnzEventOptions{
+			ConnzOptions: natssysclient.ConnzOptions{
+				Limit: 5,
+			},
+		}
+
+		var totalConns int
+		var responses []*natssysclient.ConnzResp
+
+		for resp, err := range sys.AllConnz(ctx, serverID, opts) {
+			if err != nil {
+				t.Fatalf("Error during pagination: %s", err)
+			}
+			responses = append(responses, resp)
+			totalConns += len(resp.Connz.Conns)
+		}
+
+		// 15 connections on s1 with limit=5 should yield 3 pages
+		expectedResponses := 3
+		if len(responses) != expectedResponses {
+			t.Errorf("Expected at least 3 responses with limit=5 and 15+ connections, got %d", len(responses))
+		}
+
+		firstResp := responses[0]
+		if totalConns != firstResp.Connz.Total {
+			t.Errorf("Total connections mismatch: got %d, want %d", totalConns, firstResp.Connz.Total)
+		}
+	})
+
+	t.Run("ping all servers pagination", func(t *testing.T) {
+		opts := natssysclient.ConnzEventOptions{
+			ConnzOptions: natssysclient.ConnzOptions{
+				Limit: 3,
+			},
+		}
+
+		serverIterators, err := sys.AllConnzPing(ctx, opts)
+		if err != nil {
+			t.Fatalf("Error getting server iterators: %s", err)
+		}
+
+		if len(serverIterators) != len(c.servers) {
+			t.Errorf("Expected %d iterators, got %d", len(c.servers), len(serverIterators))
+		}
+
+		var totalResponses int
+		var totalConns int
+		responsesByServer := make(map[string]int)
+
+		for _, iter := range serverIterators {
+			for resp, err := range iter {
+				if err != nil {
+					t.Fatalf("Error during ping pagination: %s", err)
+				}
+				totalResponses++
+				totalConns += len(resp.Connz.Conns)
+				responsesByServer[resp.Server.ID]++
+			}
+		}
+
+		expectedResponses := 7 // 15 connections on s1 with limit=3 should yield at least 5 pages for s1 and 1 each for s2 and s3
+		if totalResponses != expectedResponses {
+			t.Errorf("Expected at least %d responses total, got %d", expectedResponses, totalResponses)
+		}
+
+		for serverID, count := range responsesByServer {
+			if serverID == c.servers[0].ID() && count != 5 {
+				t.Errorf("Server %s should have at least 3 paginated responses, got %d", serverID, count)
+			}
+		}
+	})
+}

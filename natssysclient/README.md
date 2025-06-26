@@ -72,3 +72,56 @@ When creating the System API Client, you can configure the following options:
 - `ServerCount`: Utilized when pinging the cluster, sets the number of servers to wait for a response from.
 
 The above options are not exclusive, you can set both to wait for a specific number of servers to respond within a specific time frame.
+
+### Pagination
+
+The client provides pagination helpers for endpoints that support it (Connz, Subsz, and Jsz) using Go's `iter` package. These helpers automatically handle pagination, allowing you to iterate over all results without manually managing offsets.
+
+Example for Connz:
+```go
+// Iterate over all connections from a specific server
+for resp, err := range sys.AllConnz(ctx, serverID, natssysclient.ConnzEventOptions{
+    ConnzOptions: natssysclient.ConnzOptions{
+        Limit: 100, // Page size
+    },
+}) {
+    if err != nil {
+        // handle error
+    }
+    // Process connections in this page
+    for _, conn := range resp.Connz.Conns {
+        fmt.Printf("Connection ID: %d\n", conn.Cid)
+    }
+}
+```
+
+**Note**: For Jsz, pagination only applies when `Accounts: true` is set. The total number of pages is determined by the `Accounts` field in the JetStreamStats.
+
+#### Concurrent Server Processing
+
+The ping methods return separate iterators for each server, enabling concurrent processing:
+
+```go
+serverIterators, err := sys.AllConnzPing(ctx, opts)
+if err != nil {
+    // handle error
+}
+
+// Process servers concurrently
+var wg sync.WaitGroup
+for i, iter := range serverIterators {
+    wg.Add(1)
+    go func(serverIndex int, serverIter iter.Seq2[*natssysclient.ConnzResp, error]) {
+        defer wg.Done()
+        for resp, err := range serverIter {
+            if err != nil {
+                log.Printf("Server %d error: %v", serverIndex, err)
+                return
+            }
+            // Process server response
+            fmt.Printf("Server %s: %d connections\n", resp.Server.ID, len(resp.Connz.Conns))
+        }
+    }(i, iter)
+}
+wg.Wait()
+```
