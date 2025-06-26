@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -155,4 +156,99 @@ func (s *System) JszPing(ctx context.Context, opts JszEventOptions) ([]JSZResp, 
 		srvJsz = append(srvJsz, jszResp)
 	}
 	return srvJsz, nil
+}
+
+// AllJsz returns an iterator over JSZ for a specific server,
+// automatically handling pagination when AccountDetails are requested.
+// Note: Pagination only applies when opts.Accounts is true.
+func (s *System) AllJsz(ctx context.Context, id string, opts JszEventOptions) iter.Seq2[*JSZResp, error] {
+	return func(yield func(*JSZResp, error) bool) {
+		// If Accounts is not requested, pagination doesn't apply
+		if !opts.Accounts {
+			resp, err := s.Jsz(ctx, id, opts)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			yield(resp, nil)
+			return
+		}
+
+		currentOpts := opts
+
+		for {
+			resp, err := s.Jsz(ctx, id, currentOpts)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+
+			if !yield(resp, nil) {
+				return
+			}
+
+			// Check if we've received all accounts
+			// The total is determined by the Accounts field in JetStreamStats
+			received := currentOpts.Offset + len(resp.JSInfo.AccountDetails)
+			if received >= resp.JSInfo.Accounts {
+				return
+			}
+
+			// Update offset for next page
+			currentOpts.Offset = received
+		}
+	}
+}
+
+// AllJszPing returns a slice of iterators, one for each server,
+// automatically handling pagination for each server independently when AccountDetails are requested.
+func (s *System) AllJszPing(ctx context.Context, opts JszEventOptions) ([]iter.Seq2[*JSZResp, error], error) {
+	// First get initial responses from all servers
+	initialResponses, err := s.JszPing(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create an iterator for each server
+	iterators := make([]iter.Seq2[*JSZResp, error], len(initialResponses))
+
+	for i, initial := range initialResponses {
+		// Capture variables for closure
+		serverID := initial.Server.ID
+		firstResp := initial
+		needsPagination := opts.Accounts && firstResp.JSInfo.Accounts > 0
+
+		iterators[i] = func(yield func(*JSZResp, error) bool) {
+			// Yield the initial response
+			resp := firstResp
+			if !yield(&resp, nil) {
+				return
+			}
+
+			// If Accounts is not requested, no pagination needed
+			if !needsPagination {
+				return
+			}
+
+			// Continue pagination for this server if needed
+			currentOpts := opts
+			currentOpts.Offset = opts.Offset + len(firstResp.JSInfo.AccountDetails)
+
+			for currentOpts.Offset < firstResp.JSInfo.Accounts {
+				nextResp, err := s.Jsz(ctx, serverID, currentOpts)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+
+				if !yield(nextResp, nil) {
+					return
+				}
+
+				currentOpts.Offset += len(nextResp.JSInfo.AccountDetails)
+			}
+		}
+	}
+
+	return iterators, nil
 }
