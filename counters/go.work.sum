@@ -12,6 +12,8 @@ github.com/nats-io/nats-server/v2 v2.11.4-0.20250721141514-425a7e52c079 h1:mh88G
 github.com/nats-io/nats-server/v2 v2.11.4-0.20250721141514-425a7e52c079/go.mod h1:DchDPVzAsAPqhqm7VLedX0L7hjnV/SYtlmsl9F8U53s=
 github.com/nats-io/nats.go v1.43.0 h1:uRFZ2FEoRvP64+UUhaTokyS18XBCR/xM2vQZKO4i8ug=
 github.com/nats-io/nats.go v1.43.0/go.mod h1:iRWIPokVIFbVijxuMQq4y9ttaBTMe0SFdlZfMDd+33g=
+github.com/nats-io/nats.go v1.43.1-0.20250722080352-3b61443e4534 h1:9cg99akIkCNc2RIjZ7BWrcpelEmwGMcBd49WnZvyLCo=
+github.com/nats-io/nats.go v1.43.1-0.20250722080352-3b61443e4534/go.mod h1:iRWIPokVIFbVijxuMQq4y9ttaBTMe0SFdlZfMDd+33g=
 github.com/nats-io/nkeys v0.4.9/go.mod h1:jcMqs+FLG+W5YO36OX6wFIFcmpdAns+w1Wm6D3I/evE=
 go.uber.org/automaxprocs v1.6.0 h1:O3y2/QNTOdbF+e/dpXNNW7Rx2hZ4sTIPyybbxyNqTUs=
 go.uber.org/automaxprocs v1.6.0/go.mod h1:ifeIMSnPZuznNm6jmdzmU3/bfk01Fe2fotchwEFJ8r8=

@@ -12,14 +12,15 @@ You can use the library as a whole, or pick just what you need.
 
 # Utilities
 
-| Module               | Description                                  | Docs                                 | Version                                                                           |
-|----------------------|----------------------------------------------|--------------------------------------|-----------------------------------------------------------------------------------|
-| Core NATS Extensions | Core NATS extensions                         | [README.md](natsext/README.md)       | [![Go Reference][natsext-image]][natsext-url]                                     |
-| JetStream Extensions | JetStream extensions                         | [README.md](jetstreamext/README.md)  | [![Go Reference][jetstreamext-image]][jetstreamext-url]                           |
-| `natscontext`        | Allow connecting to NATS using NATS Contexts | [README.md](natscontext/README.md)   | [![Go Reference][natscontext-image]][natscontext-url]                             |
-| NATS System Client   | NATS client for NATS monitoring APIs         | [README.md](natssysclient/README.md) | [![Go Reference][natssysclient-image]][natssysclient-url]                         |
-| Partitioned consumer groups | Client side implementation of partitioned 'consumer groups' | [README.md](pcgroups/README.md) | [![Go Reference][pcgroups-image]][pcgroups-url] |
-| KV Codecs | Transparent encoding/decoding for JetStream KeyValue stores | [README.md](kvcodec/README.md) | [![Go Reference][kvcodec-image]][kvcodec-url] |
+| Module                      | Description                                                  | Docs                                 | Version                                                   |
+|-----------------------------|--------------------------------------------------------------|--------------------------------------|-----------------------------------------------------------|
+| Core NATS Extensions        | Core NATS extensions                                         | [README.md](natsext/README.md)       | [![Go Reference][natsext-image]][natsext-url]             |
+| JetStream Extensions        | JetStream extensions                                         | [README.md](jetstreamext/README.md)  | [![Go Reference][jetstreamext-image]][jetstreamext-url]   |
+| `natscontext`               | Allow connecting to NATS using NATS Contexts                 | [README.md](natscontext/README.md)   | [![Go Reference][natscontext-image]][natscontext-url]     |
+| NATS System Client          | NATS client for NATS monitoring APIs                         | [README.md](natssysclient/README.md) | [![Go Reference][natssysclient-image]][natssysclient-url] |
+| Partitioned consumer groups | Client side implementation of partitioned 'consumer groups'  | [README.md](pcgroups/README.md)      | [![Go Reference][pcgroups-image]][pcgroups-url]           |
+| KV Codecs                   | Transparent encoding/decoding for JetStream KeyValue stores  | [README.md](kvcodec/README.md)       | [![Go Reference][kvcodec-image]][kvcodec-url]             |
+| Counters                    | Distributed counter functionality built on JetStream streams | [README.md](counters/README.md)      | [![Go Reference][counters-image]][counters-url]           |
 
 [natsext-url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/natsext
 [natsext-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/natsext.svg
@@ -33,3 +34,5 @@ You can use the library as a whole, or pick just what you need.
 [pcgroups-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/pcgroups.svg
 [kvcodec-url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/kvcodec
 [kvcodec-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/kvcodec.svg
+[counters-url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/counters
+[counters-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/counters.svg
