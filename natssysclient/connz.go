@@ -240,7 +240,7 @@ func (s *System) AllConnz(ctx context.Context, id string, opts ConnzEventOptions
 
 			// Check if we've received all connections
 			received := currentOpts.Offset + len(resp.Connz.Conns)
-			if received >= resp.Connz.Total {
+			if received >= resp.Connz.Total || len(resp.Connz.Conns) == 0 {
 				return
 			}
 

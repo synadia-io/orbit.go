@@ -134,7 +134,7 @@ func (s *System) AllServerSubsz(ctx context.Context, id string, opts SubszOption
 
 			// Check if we've received all subscriptions
 			received := currentOpts.Offset + len(resp.Subsz.Subs)
-			if received >= resp.Subsz.Total {
+			if received >= resp.Subsz.Total || len(resp.Subsz.Subs) == 0 {
 				return
 			}
 

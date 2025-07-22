@@ -190,7 +190,7 @@ func (s *System) AllJsz(ctx context.Context, id string, opts JszEventOptions) it
 			// Check if we've received all accounts
 			// The total is determined by the Accounts field in JetStreamStats
 			received := currentOpts.Offset + len(resp.JSInfo.AccountDetails)
-			if received >= resp.JSInfo.Accounts {
+			if received >= resp.JSInfo.Accounts || len(resp.JSInfo.AccountDetails) == 0 {
 				return
 			}
 
