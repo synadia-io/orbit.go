@@ -49,6 +49,9 @@ type Counter interface {
 	// Add increments the counter for the given subject and returns the new total value.
 	Add(ctx context.Context, subject string, value *big.Int) (*big.Int, error)
 
+	// AddInt increments the counter for the given subject and returns the new total value.
+	AddInt(ctx context.Context, subject string, value int) (*big.Int, error)
+
 	// Load returns the current value of the counter for the given subject.
 	Load(ctx context.Context, subject string) (*Value, error)
 
@@ -124,8 +127,13 @@ func (c *streamCounter) Add(ctx context.Context, subject string, value *big.Int)
 	return result, nil
 }
 
+func (c *streamCounter) AddInt(ctx context.Context, subject string, value int) (*big.Int, error) {
+	val := big.NewInt(int64(value))
+	return c.Add(ctx, subject, val)
+}
+
 func (c *streamCounter) Load(ctx context.Context, subject string) (*Value, error) {
-	msg, err := c.stream.GetLastMsgForSubject(ctx, subject)
+	msg, err := c.stream.GetLastMsgForSubject(ctx, subject, jetstream.WithGetLastForSubjectNoHeaders())
 	if err != nil {
 		if err == jetstream.ErrMsgNotFound {
 			return nil, fmt.Errorf("%w: %s", ErrNoCounterForSubject, subject)

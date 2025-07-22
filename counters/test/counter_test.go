@@ -63,7 +63,7 @@ func TestCounterBasicOperations(t *testing.T) {
 	}
 
 	// Test adding more to the same counter
-	value, err = counter.Add(context.Background(), "foo.bar", big.NewInt(5))
+	value, err = counter.AddInt(context.Background(), "foo.bar", 5)
 	if err != nil {
 		t.Fatalf("Failed to add to counter: %v", err)
 	}
@@ -606,12 +606,12 @@ func TestCounterWithSources(t *testing.T) {
 
 	// TODO(pp): Is this valid? Shouldn't this be count.es.hits and count.pl.hits?
 	expectedEUHitsSources := map[string]map[string]*big.Int{
-		"COUNT_ES": {"count.es.>": big.NewInt(100)},
-		"COUNT_PL": {"count.pl.>": big.NewInt(150)},
+		"COUNT_ES": {"count.es.hits": big.NewInt(100)},
+		"COUNT_PL": {"count.pl.hits": big.NewInt(150)},
 	}
 
 	expectedEUViewsSources := map[string]map[string]*big.Int{
-		"COUNT_ES": {"count.es.>": big.NewInt(200)},
+		"COUNT_ES": {"count.es.views": big.NewInt(200)},
 	}
 
 	var i int
@@ -674,7 +674,7 @@ func TestCounterWithSources(t *testing.T) {
 	}
 
 	expectedSources = map[string]map[string]*big.Int{
-		"COUNT_EU": {"count.eu.>": big.NewInt(250)},
+		"COUNT_EU": {"count.eu.hits": big.NewInt(250)},
 	}
 	if len(globalHits.Sources) != len(expectedSources) {
 		t.Fatalf("Expected %d sources for global hits, got %d", len(expectedSources), len(globalHits.Sources))

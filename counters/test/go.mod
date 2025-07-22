@@ -3,16 +3,12 @@ module test
 go 1.23.5
 
 require (
-	github.com/nats-io/nats-server/v2 v2.12.0-0.20250115000000-000000000000
-	github.com/nats-io/nats.go v1.43.1-0.20250115000000-000000000000
+	github.com/nats-io/nats-server/v2 v2.11.4-0.20250721141514-425a7e52c079
+	github.com/nats-io/nats.go v1.43.1-0.20250722080352-3b61443e4534
 	github.com/synadia-io/orbit.go/counters v0.0.0-00010101000000-000000000000
 )
 
 replace github.com/synadia-io/orbit.go/counters => ../
-
-replace github.com/nats-io/nats.go => github.com/nats-io/nats.go v1.43.1-0.20250715134023-41c7d362ea9a
-
-replace github.com/nats-io/nats-server/v2 => github.com/nats-io/nats-server/v2 v2.11.4-0.20250715145600-fbced92ac51a
 
 require (
 	github.com/google/go-tpm v0.9.5 // indirect
