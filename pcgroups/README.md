@@ -4,8 +4,8 @@
 [License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
 [ReportCard-Url]: https://goreportcard.com/report/github.com/synadia-io/orbit.go/pcgroups
 [ReportCard-Image]: https://goreportcard.com/badge/github.com/synadia-io/orbit.go/pcgroups
-[Build-Status-Url]: https://github.com/synadia-io/orbit.go/actions/workflows/pcgroups.yaml
-[Build-Status-Image]: https://github.com/synadia-io/orbit.go/actions/workflows/pcgroups.yaml/badge.svg?branch=main
+[Build-Status-Url]: https://github.com/synadia-io/orbit.go/actions/workflows/partitionedconsumergroups.yaml
+[Build-Status-Image]: https://github.com/synadia-io/orbit.go/actions/workflows/partitionedconsumergroups.yaml/badge.svg?branch=main
 [GoDoc-Url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/pcgroups
 [GoDoc-Image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/pcgroups.svg
 
