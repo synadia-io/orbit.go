@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"time"
 )
 
@@ -111,4 +112,80 @@ func (s *System) ServerSubszPing(ctx context.Context, opts SubszOptions) ([]Subs
 		srvSubsz = append(srvSubsz, subszResp)
 	}
 	return srvSubsz, nil
+}
+
+// AllServerSubsz returns an iterator over all subscriptions for a specific server,
+// automatically handling pagination.
+func (s *System) AllServerSubsz(ctx context.Context, id string, opts SubszOptions) iter.Seq2[*SubszResp, error] {
+	return func(yield func(*SubszResp, error) bool) {
+		// Start with the provided offset
+		currentOpts := opts
+
+		for {
+			resp, err := s.ServerSubsz(ctx, id, currentOpts)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+
+			if !yield(resp, nil) {
+				return
+			}
+
+			// Check if we've received all subscriptions
+			received := currentOpts.Offset + len(resp.Subsz.Subs)
+			if received >= resp.Subsz.Total || len(resp.Subsz.Subs) == 0 {
+				return
+			}
+
+			// Update offset for next page
+			currentOpts.Offset = received
+		}
+	}
+}
+
+// AllServerSubszPing returns a slice of iterators, one for each server,
+// automatically handling pagination for each server independently.
+func (s *System) AllServerSubszPing(ctx context.Context, opts SubszOptions) ([]iter.Seq2[*SubszResp, error], error) {
+	// First get initial responses from all servers
+	initialResponses, err := s.ServerSubszPing(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create an iterator for each server
+	iterators := make([]iter.Seq2[*SubszResp, error], len(initialResponses))
+
+	for i, initial := range initialResponses {
+		serverID := initial.Server.ID
+		firstResp := initial
+
+		iterators[i] = func(yield func(*SubszResp, error) bool) {
+			// Yield the initial response
+			resp := firstResp
+			if !yield(&resp, nil) {
+				return
+			}
+
+			// Continue pagination for this server if needed
+			currentOpts := opts
+			currentOpts.Offset = opts.Offset + len(firstResp.Subsz.Subs)
+
+			for currentOpts.Offset < firstResp.Subsz.Total {
+				nextResp, err := s.ServerSubsz(ctx, serverID, currentOpts)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+
+				if !yield(nextResp, nil) {
+					return
+				}
+
+				currentOpts.Offset += len(nextResp.Subsz.Subs)
+			}
+		}
+	}
+
+	return iterators, nil
 }

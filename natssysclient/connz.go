@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"time"
 
 	"github.com/nats-io/jwt/v2"
@@ -218,4 +219,80 @@ func (s *System) ConnzPing(ctx context.Context, opts ConnzEventOptions) ([]Connz
 		srvConnz = append(srvConnz, connzResp)
 	}
 	return srvConnz, nil
+}
+
+// AllConnz returns an iterator over all connections for a specific server,
+// automatically handling pagination.
+func (s *System) AllConnz(ctx context.Context, id string, opts ConnzEventOptions) iter.Seq2[*ConnzResp, error] {
+	return func(yield func(*ConnzResp, error) bool) {
+		currentOpts := opts
+
+		for {
+			resp, err := s.Connz(ctx, id, currentOpts)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+
+			if !yield(resp, nil) {
+				return
+			}
+
+			// Check if we've received all connections
+			received := currentOpts.Offset + len(resp.Connz.Conns)
+			if received >= resp.Connz.Total || len(resp.Connz.Conns) == 0 {
+				return
+			}
+
+			// Update offset for next page
+			currentOpts.Offset = received
+		}
+	}
+}
+
+// AllConnzPing returns a slice of iterators, one for each server,
+// automatically handling pagination for each server independently.
+func (s *System) AllConnzPing(ctx context.Context, opts ConnzEventOptions) ([]iter.Seq2[*ConnzResp, error], error) {
+	// First get initial responses from all servers
+	initialResponses, err := s.ConnzPing(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create an iterator for each server
+	iterators := make([]iter.Seq2[*ConnzResp, error], len(initialResponses))
+
+	for i, initial := range initialResponses {
+		// Capture variables for closure
+		serverID := initial.Server.ID
+		firstResp := initial
+
+		iterators[i] = func(yield func(*ConnzResp, error) bool) {
+			// Yield the initial response
+			resp := firstResp
+			if !yield(&resp, nil) {
+				return
+			}
+
+			// Continue pagination for this server if needed
+			currentOpts := opts
+			currentOpts.Offset = opts.Offset + len(firstResp.Connz.Conns)
+
+			for currentOpts.Offset < firstResp.Connz.Total {
+				nextResp, err := s.Connz(ctx, serverID, currentOpts)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+
+				if !yield(nextResp, nil) {
+					return
+				}
+
+				currentOpts.Offset += len(nextResp.Connz.Conns)
+			}
+		}
+	}
+
+	return iterators, nil
 }
