@@ -53,11 +53,11 @@ type Counter interface {
 	AddInt(ctx context.Context, subject string, value int) (*big.Int, error)
 
 	// Load returns the current value of the counter for the given subject.
-	Load(ctx context.Context, subject string) (*Value, error)
+	Load(ctx context.Context, subject string) (*big.Int, error)
 
 	// LoadMultiple returns an iterator over counter values for multiple subjects.
 	// Wildcards are supported.
-	LoadMultiple(ctx context.Context, subjects []string) iter.Seq2[*Value, error]
+	LoadMultiple(ctx context.Context, subjects []string) iter.Seq2[*big.Int, error]
 
 	// GetEntry returns the full entry with value and source history for the given subject.
 	GetEntry(ctx context.Context, subject string) (*Entry, error)
@@ -65,14 +65,6 @@ type Counter interface {
 	// GetEntries returns an iterator over counter entries matching the pattern.
 	// Wildcards are supported.
 	GetEntries(ctx context.Context, subjects []string) iter.Seq2[*Entry, error]
-}
-
-type Value struct {
-	// Val is the current value of the counter.
-	Val *big.Int
-
-	// Subject is the subject of the counter.
-	Subject string
 }
 
 // Entry represents a counter's current state with full source history.
@@ -85,6 +77,10 @@ type Entry struct {
 
 	// Sources maps source identifiers to their subject-value contributions.
 	Sources CounterSources
+
+	// Most recent increment value for this entry.
+	// Useful for recounting and auditing purposes.
+	Incr *big.Int
 }
 
 // CounterSources is a map of source streams to their subject-value contributions.
@@ -132,7 +128,7 @@ func (c *streamCounter) AddInt(ctx context.Context, subject string, value int) (
 	return c.Add(ctx, subject, val)
 }
 
-func (c *streamCounter) Load(ctx context.Context, subject string) (*Value, error) {
+func (c *streamCounter) Load(ctx context.Context, subject string) (*big.Int, error) {
 	msg, err := c.stream.GetLastMsgForSubject(ctx, subject, jetstream.WithGetLastForSubjectNoHeaders())
 	if err != nil {
 		if err == jetstream.ErrMsgNotFound {
@@ -145,14 +141,11 @@ func (c *streamCounter) Load(ctx context.Context, subject string) (*Value, error
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse counter value for subject %s: %w", subject, err)
 	}
-	return &Value{
-		Val:     val,
-		Subject: msg.Subject,
-	}, nil
+	return val, nil
 }
 
-func (c *streamCounter) LoadMultiple(ctx context.Context, subjects []string) iter.Seq2[*Value, error] {
-	return func(yield func(*Value, error) bool) {
+func (c *streamCounter) LoadMultiple(ctx context.Context, subjects []string) iter.Seq2[*big.Int, error] {
+	return func(yield func(*big.Int, error) bool) {
 		streamName := c.stream.CachedInfo().Config.Name
 		vals, err := jetstreamext.GetLastMsgsFor(ctx, c.js, streamName, subjects)
 		if err != nil {
@@ -169,7 +162,7 @@ func (c *streamCounter) LoadMultiple(ctx context.Context, subjects []string) ite
 				yield(nil, err)
 				return
 			}
-			if !yield(&Value{value, msg.Subject}, nil) {
+			if !yield(value, nil) {
 				return
 			}
 		}
@@ -197,10 +190,20 @@ func (c *streamCounter) GetEntry(ctx context.Context, subject string) (*Entry, e
 		return nil, fmt.Errorf("failed to parse sources: %w", err)
 	}
 
+	incr := msg.Header.Get(CounterIncrementHeader)
+	var incrVal *big.Int
+	if incr != "" {
+		incrVal = new(big.Int)
+		if _, ok := incrVal.SetString(incr, 10); !ok {
+			return nil, fmt.Errorf("invalid counter increment value: %s", incr)
+		}
+	}
+
 	return &Entry{
 		Subject: subject,
 		Value:   value,
 		Sources: sources,
+		Incr:    incrVal,
 	}, nil
 }
 
@@ -226,6 +229,15 @@ func (c *streamCounter) GetEntries(ctx context.Context, subjects []string) iter.
 			if err != nil {
 				yield(nil, fmt.Errorf("failed to parse sources: %w", err))
 				continue
+			}
+			incr := msg.Header.Get(CounterIncrementHeader)
+			var incrVal *big.Int
+			if incr != "" {
+				incrVal = new(big.Int)
+				if _, ok := incrVal.SetString(incr, 10); !ok {
+					yield(nil, fmt.Errorf("invalid counter increment value: %s", incr))
+					continue
+				}
 			}
 			entry := &Entry{
 				Subject: msg.Subject,

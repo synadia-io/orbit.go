@@ -58,8 +58,8 @@ func TestCounterBasicOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to load counter: %v", err)
 	}
-	if loadedValue.Val.Cmp(big.NewInt(10)) != 0 {
-		t.Fatalf("Expected loaded value 10, got %s", loadedValue.Val.String())
+	if loadedValue.Cmp(big.NewInt(10)) != 0 {
+		t.Fatalf("Expected loaded value 10, got %s", loadedValue.String())
 	}
 
 	// Test adding more to the same counter
@@ -86,8 +86,8 @@ func TestCounterBasicOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to load final counter value: %v", err)
 	}
-	if finalValue.Val.Cmp(big.NewInt(12)) != 0 {
-		t.Fatalf("Expected final loaded value 12, got %s", finalValue.Val.String())
+	if finalValue.Cmp(big.NewInt(12)) != 0 {
+		t.Fatalf("Expected final loaded value 12, got %s", finalValue.String())
 	}
 
 	// add 0
@@ -145,23 +145,15 @@ func TestCounterMultipleSubjects(t *testing.T) {
 		}
 	}
 
+	var total int64
 	for value, err := range counter.LoadMultiple(context.Background(), subjects) {
 		if err != nil {
-			t.Fatalf("error in LoadMultiple: %v", err)
+			t.Fatalf("Failed to load counter: %v", err)
 		}
-		var found bool
-		for i, s := range subjects {
-			if s == value.Subject {
-				if value.Val.Cmp(values[i]) != 0 {
-					t.Fatalf("subject %s: expected %s, got %s", value.Subject, values[i].String(), value.Val.String())
-				}
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("unexpected subject: %s", value.Subject)
-			continue
-		}
+		total += value.Int64()
+	}
+	if total != 150 {
+		t.Fatalf("Expected total 150, got %d", total)
 	}
 
 	// load with empty subjects
@@ -214,7 +206,7 @@ func TestCounterLoad(t *testing.T) {
 		t.Fatalf("Expected ErrNoCounterForSubject, got %v", err)
 	}
 	if value != nil {
-		t.Fatalf("Expected nil value for non-existent subject, got %s", value.Val.String())
+		t.Fatalf("Expected nil value for non-existent subject, got %s", value.String())
 	}
 
 	// Load a subject that has not been added yet
@@ -277,6 +269,10 @@ func TestCounterGetEntry(t *testing.T) {
 	}
 	if len(entry.Sources) != 0 {
 		t.Fatalf("Expected no sources, got %d", len(entry.Sources))
+	}
+
+	if entry.Incr.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("Expected increment 100, got %s", entry.Incr.String())
 	}
 
 	_, err = counter.GetEntry(context.Background(), "foo.nonexistent")
@@ -669,8 +665,8 @@ func TestCounterWithSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to load global views: %v", err)
 	}
-	if globalViews.Val.Cmp(big.NewInt(200)) != 0 {
-		t.Fatalf("Expected global views 200, got %s", globalViews.Val.String())
+	if globalViews.Cmp(big.NewInt(200)) != 0 {
+		t.Fatalf("Expected global views 200, got %s", globalViews.String())
 	}
 
 	expectedSources = map[string]map[string]*big.Int{
