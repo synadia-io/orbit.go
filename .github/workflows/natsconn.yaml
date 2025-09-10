@@ -1,0 +1,48 @@
+name: natsconn
+
+on:
+  push:
+    paths:
+      - 'natsconn/**'
+  pull_request:
+    paths:
+      - 'natsconn/**'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Install linters
+        shell: bash --noprofile --norc -x -eo pipefail {0}
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install github.com/client9/misspell/cmd/misspell@latest
+      - name: Lint
+        shell: bash --noprofile --norc -x -eo pipefail {0}
+        run: |
+          set -e
+          cd natsconn
+          go fmt ./...
+          if [[ $(git diff --name-only | wc -l) -gt 0 ]]; then
+            echo "Running go fmt overwrote at least one file. Please commit the result of go fmt ./..."
+            exit 1
+          fi
+          go vet ./...
+          staticcheck -f stylish ./...
+          misspell -error -locale US .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Test
+        shell: bash --noprofile --norc -x -eo pipefail {0}
+        working-directory: natsconn
+        run: go get -v ./...
