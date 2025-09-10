@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -71,72 +70,6 @@ func runServerWithNKey(t *testing.T) (*server.Server, nkeys.KeyPair, string) {
 
 	s := natsserver.RunServer(&opts)
 	return s, ukp, string(seed)
-}
-
-// createTestCredsFile creates a temporary credentials file for testing
-func createTestCredsFile(t *testing.T, dir string) (string, string, string) {
-	t.Helper()
-
-	// Generate account keypair
-	akp, err := nkeys.CreateAccount()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	aPub, err := akp.PublicKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Generate user keypair
-	ukp, err := nkeys.CreateUser()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	userSeed, err := ukp.Seed()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	userPub, err := ukp.PublicKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create user claims
-	userClaims := jwt.NewUserClaims(userPub)
-	userClaims.Name = "test-user"
-	userClaims.IssuerAccount = aPub
-
-	// Sign the user JWT with account key
-	userJWT, err := userClaims.Encode(akp)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create the credentials file format
-	credsContent := fmt.Sprintf(`-----BEGIN NATS USER JWT-----
-%s
-------END NATS USER JWT------
-
-************************* IMPORTANT *************************
-NKEY Seed printed below can be used to sign and prove identity.
-NKEYs are sensitive and should be treated as secrets.
-
------BEGIN USER NKEY SEED-----
-%s
-------END USER NKEY SEED------
-
-*************************************************************
-`, userJWT, userSeed)
-
-	credsFile := filepath.Join(dir, "test.creds")
-	if err := os.WriteFile(credsFile, []byte(credsContent), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	return credsFile, userPub, string(userSeed)
 }
 
 // runServerWithJWT starts a NATS server that accepts JWT authentication

@@ -173,6 +173,44 @@ NKEYs are sensitive and should be treated as secrets.
 	}
 }
 
+func TestNewNatsConnection_TLS(t *testing.T) {
+	s, certFile, keyFile, caFile := runServerWithTLS(t)
+	defer s.Shutdown()
+	if !s.ReadyForConnections(5 * time.Second) {
+		t.Fatal("Server failed to start")
+	}
+
+	// Get the TLS URL
+	tlsURL := s.ClientURL()
+	// Replace nats:// with tls://
+	if len(tlsURL) > 7 && tlsURL[:7] == "nats://" {
+		tlsURL = "tls://" + tlsURL[7:]
+	}
+
+	cfg := &NatsConnConf{
+		NatsServers:        []string{tlsURL},
+		NatsConnectionName: "test-tls",
+		NatsTLSCert:        certFile,
+		NatsTLSKey:         keyFile,
+		NatsTLSCA:          caFile,
+	}
+
+	nc, err := NewNatsConnection(cfg)
+	if err != nil {
+		t.Fatalf("Failed to connect with TLS: %v", err)
+	}
+	defer nc.Close()
+
+	if !nc.IsConnected() {
+		t.Fatal("Expected to be connected")
+	}
+
+	// Verify it's using TLS
+	if !nc.TLSRequired() {
+		t.Fatal("Expected TLS to be required")
+	}
+}
+
 func TestNewNatsConnection_TLSFirst(t *testing.T) {
 	s, certFile, keyFile, caFile := runServerWithTLSHandshakeFirst(t)
 	defer s.Shutdown()
