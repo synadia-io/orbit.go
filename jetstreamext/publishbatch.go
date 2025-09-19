@@ -16,7 +16,6 @@ package jetstreamext
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -58,6 +57,35 @@ type (
 		IsClosed() bool
 	}
 
+	// BatchFlowControl configures flow control for batch publishing.
+	BatchFlowControl struct {
+		// WaitFirst waits for an ack on the first message in the batch.
+		// Default: true
+		WaitFirst bool
+
+		// WaitDelta waits for an ack every N messages (0 = disabled).
+		// Default: 0
+		WaitDelta int
+
+		// AckTimeout is the timeout for waiting for acks when flow control is enabled.
+		// Default: timeout from JetStream context.
+		AckTimeout time.Duration
+	}
+
+	// BatchPublisherOpt is a functional option for configuring a BatchPublisher.
+	BatchPublisherOpt interface {
+		configureBatchPublisher(*batchPublishOpts) error
+	}
+
+	// PublishMsgBatchOpt is a functional option for configuring PublishMsgBatch.
+	PublishMsgBatchOpt interface {
+		configurePublishMsgBatch(*batchPublishOpts) error
+	}
+
+	batchPublishOpts struct {
+		flowControl BatchFlowControl
+	}
+
 	// BatchAck is the acknowledgment for a batch publish operation.
 	BatchAck struct {
 		// Stream is the stream name the message was published to.
@@ -85,6 +113,7 @@ type (
 		batchID  string
 		sequence int
 		closed   bool
+		opts     batchPublishOpts
 		mu       sync.Mutex
 	}
 
@@ -123,11 +152,27 @@ const (
 	BatchCommitHeader = "Nats-Batch-Commit"
 )
 
-// BatchPublisher creates a new batch publisher for publishing messages in batches.
-func NewBatchPublisher(js jetstream.JetStream) (BatchPublisher, error) {
+// NewBatchPublisher creates a new batch publisher for publishing messages in batches.
+func NewBatchPublisher(js jetstream.JetStream, opts ...BatchPublisherOpt) (BatchPublisher, error) {
+	jsOpts := js.Options()
+	pubOpts := batchPublishOpts{
+		// Set defaults
+		flowControl: BatchFlowControl{
+			WaitFirst:  true,
+			AckTimeout: jsOpts.DefaultTimeout,
+		},
+	}
+
+	for _, opt := range opts {
+		if err := opt.configureBatchPublisher(&pubOpts); err != nil {
+			return nil, err
+		}
+	}
+
 	return &batchPublisher{
 		js:      js,
 		batchID: nuid.Next(),
+		opts:    pubOpts,
 	}, nil
 }
 
@@ -157,11 +202,6 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 		}
 	}
 
-	// Validate ExpectLastSequence options can only be used on first message
-	if b.sequence > 0 && o.lastSeq != nil {
-		return ErrBatchExpectLastSequenceNotFirst
-	}
-
 	if o.ttl > 0 {
 		msg.Header.Set(jetstream.MsgTTLHeader, o.ttl.String())
 	}
@@ -183,7 +223,39 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	msg.Header.Set(BatchIDHeader, b.batchID)
 	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(uint64(b.sequence), 10))
 
-	return b.js.Conn().PublishMsg(msg)
+	// Determine if we need flow control for this message
+	needsAck := false
+	if b.opts.flowControl.WaitFirst && b.sequence == 1 {
+		needsAck = true // wait on first message
+	} else if b.opts.flowControl.WaitDelta > 0 && b.sequence%b.opts.flowControl.WaitDelta == 0 {
+		needsAck = true // periodic flow control
+	}
+
+	// If we don't need an ack, use core nats publish
+	if !needsAck {
+		return b.js.Conn().PublishMsg(msg)
+	}
+
+	inbox := b.js.Conn().NewRespInbox()
+	msg.Reply = inbox
+
+	resp, err := b.js.Conn().RequestMsg(msg, b.opts.flowControl.AckTimeout)
+	if err != nil {
+		return fmt.Errorf("batch message %d ack failed: %w", b.sequence, err)
+	}
+
+	// for flow control we expect no response data, just an ack
+	if len(resp.Data) > 0 {
+		var apiResp apiResponse
+		if err := json.Unmarshal(resp.Data, &apiResp); err != nil {
+			return err
+		}
+		if apiResp.Error != nil {
+			return apiResp.Error
+		}
+	}
+
+	return nil
 }
 
 // Commit publishes the final message and commits the batch.
@@ -209,11 +281,6 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 		if err := opt(&o); err != nil {
 			return nil, err
 		}
-	}
-
-	// Validate ExpectLastSequence options can only be used on first message
-	if b.sequence > 0 && o.lastSeq != nil {
-		return nil, ErrBatchExpectLastSequenceNotFirst
 	}
 
 	if msg.Header == nil {
@@ -242,7 +309,16 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(uint64(b.sequence), 10))
 	msg.Header.Set(BatchCommitHeader, "1")
 
-	resp, err := publish(ctx, b.js, msg)
+	ctx, cancel = wrapContextWithoutDeadline(ctx, b.js)
+	if cancel != nil {
+		defer cancel()
+	}
+
+	var resp *nats.Msg
+	var err error
+
+	resp, err = b.js.Conn().RequestMsgWithContext(ctx, msg)
+
 	if err != nil {
 		return nil, err
 	}
@@ -299,15 +375,34 @@ func (b *batchPublisher) IsClosed() bool {
 }
 
 // PublishMsgBatch publishes a batch of messages to a Stream and waits for an ack for the commit.
-func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*nats.Msg) (*BatchAck, error) {
+func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*nats.Msg, opts ...PublishMsgBatchOpt) (*BatchAck, error) {
 	var batchAck *BatchAck
 	var err error
 	msgs := len(messages)
+
+	if msgs == 0 {
+		return nil, fmt.Errorf("no messages to publish")
+	}
 
 	ctx, cancel := wrapContextWithoutDeadline(ctx, js)
 	if cancel != nil {
 		defer cancel()
 	}
+
+	jsOpts := js.Options()
+	pubOpts := batchPublishOpts{
+		flowControl: BatchFlowControl{
+			WaitFirst:  true,
+			AckTimeout: jsOpts.DefaultTimeout,
+		},
+	}
+
+	for _, opt := range opts {
+		if err := opt.configurePublishMsgBatch(&pubOpts); err != nil {
+			return nil, err
+		}
+	}
+
 	batchID := nuid.Next()
 
 	for i := range messages {
@@ -315,19 +410,52 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 		messages[i].Header.Set(BatchIDHeader, batchID)
 		messages[i].Header.Set(BatchSeqHeader, strconv.Itoa(i+1))
 
+		// add all but last message to the batch
 		if i < msgs-1 {
-			err = js.Conn().PublishMsg(messages[i])
-			if err != nil {
-				return nil, fmt.Errorf("publishing message in the batch: %w", err)
+			// Determine if we need flow control for this message
+			needsAck := false
+			seq := i + 1
+			if pubOpts.flowControl.WaitFirst && seq == 1 {
+				needsAck = true
+			} else if pubOpts.flowControl.WaitDelta > 0 && seq%pubOpts.flowControl.WaitDelta == 0 {
+				needsAck = true
 			}
+
+			if !needsAck {
+				err = js.Conn().PublishMsg(messages[i])
+				if err != nil {
+					return nil, fmt.Errorf("publishing message in the batch: %w", err)
+				}
+				continue
+			}
+			inbox := js.Conn().NewRespInbox()
+			messages[i].Reply = inbox
+
+			resp, err := js.Conn().RequestMsg(messages[i], pubOpts.flowControl.AckTimeout)
+			if err != nil {
+				return nil, fmt.Errorf("batch message %d ack failed: %w", seq, err)
+			}
+
+			if len(resp.Data) > 0 {
+				var apiResp apiResponse
+				if err := json.Unmarshal(resp.Data, &apiResp); err == nil && apiResp.Error != nil {
+					return nil, apiResp.Error
+				}
+			}
+
 			continue
 		}
 
 		// Commit the batch on the last message.
 		messages[i].Header.Set(BatchCommitHeader, "1")
-		resp, err := publish(ctx, js, messages[i])
+
+		var resp *nats.Msg
+		var err error
+
+		resp, err = js.Conn().RequestMsgWithContext(ctx, messages[i])
+
 		if err != nil {
-			return nil, fmt.Errorf("committing the batch: %w", err)
+			return nil, err
 		}
 
 		var batchResp batchAckResponse
@@ -364,80 +492,4 @@ func wrapContextWithoutDeadline(ctx context.Context, js jetstream.JetStream) (co
 	}
 	opts := js.Options()
 	return context.WithTimeout(ctx, opts.DefaultTimeout)
-}
-
-func publish(ctx context.Context, js jetstream.JetStream, m *nats.Msg) (*nats.Msg, error) {
-	ctx, cancel := wrapContextWithoutDeadline(ctx, js)
-	if cancel != nil {
-		defer cancel()
-	}
-
-	var resp *nats.Msg
-	var err error
-
-	resp, err = js.Conn().RequestMsgWithContext(ctx, m)
-
-	if err != nil {
-		if errors.Is(err, nats.ErrNoResponders) {
-			return nil, jetstream.ErrNoStreamResponse
-		}
-		return nil, err
-	}
-
-	return resp, nil
-}
-
-// WithBatchMsgTTL sets per msg TTL for batch messages.
-// Requires [StreamConfig.AllowMsgTTL] to be enabled.
-func WithBatchMsgTTL(dur time.Duration) BatchMsgOpt {
-	return func(opts *batchMsgOpts) error {
-		opts.ttl = dur
-		return nil
-	}
-}
-
-// WithBatchExpectStream sets the expected stream the message should be published to.
-// If the message is published to a different stream server will reject the
-// message and publish will fail.
-func WithBatchExpectStream(stream string) BatchMsgOpt {
-	return func(opts *batchMsgOpts) error {
-		opts.stream = stream
-		return nil
-	}
-}
-
-// WithBatchExpectLastSequence sets the expected sequence number the last message
-// on a stream should have. If the last message has a different sequence number
-// server will reject the message and publish will fail.
-func WithBatchExpectLastSequence(seq uint64) BatchMsgOpt {
-	return func(opts *batchMsgOpts) error {
-		opts.lastSeq = &seq
-		return nil
-	}
-}
-
-// WithBatchExpectLastSequencePerSubject sets the expected sequence number the last
-// message on a subject the message is published to. If the last message on a
-// subject has a different sequence number server will reject the message and
-// publish will fail.
-func WithBatchExpectLastSequencePerSubject(seq uint64) BatchMsgOpt {
-	return func(opts *batchMsgOpts) error {
-		opts.lastSubjectSeq = &seq
-		return nil
-	}
-}
-
-// WithBatchExpectLastSequenceForSubject sets the sequence and subject for which the
-// last sequence number should be checked. If the last message on a subject
-// has a different sequence number server will reject the message and publish
-// will fail.
-func WithBatchExpectLastSequenceForSubject(seq uint64, subject string) BatchMsgOpt {
-	return func(opts *batchMsgOpts) error {
-		if subject == "" {
-			return fmt.Errorf("%w: subject cannot be empty", ErrInvalidOption)
-		}
-		opts.lastSubjectSeq = &seq
-		opts.lastSubject = subject
-		return nil
-	}
 }

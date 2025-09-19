@@ -24,74 +24,8 @@ import (
 	"github.com/synadia-io/orbit.go/jetstreamext"
 )
 
-func TestBatchPublishLastSequence(t *testing.T) {
-	s := RunBasicJetStreamServer()
-	defer shutdownJSServerAndRemoveStorage(t, s)
-
-	nc, js := jsClient(t, s)
-	defer nc.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Create a stream with batch publishing enabled
-	cfg := jetstream.StreamConfig{
-		Name:               "TEST",
-		Subjects:           []string{"test.>"},
-		AllowAtomicPublish: true,
-	}
-	stream, err := js.CreateStream(ctx, cfg)
-	if err != nil {
-		t.Fatalf("Unexpected error creating stream: %v", err)
-	}
-
-	// publish a message to have a last sequence
-	_, err = js.Publish(ctx, "test.foo", []byte("hello"))
-	if err != nil {
-		t.Fatalf("Unexpected error publishing message: %v", err)
-	}
-
-	batch, err := jetstreamext.NewBatchPublisher(js)
-	if err != nil {
-		t.Fatalf("Unexpected error creating batch publisher: %v", err)
-	}
-
-	// Add first message with ExpectLastSequence = 1
-	if err := batch.Add("test.1", []byte("message 1"), jetstreamext.WithBatchExpectLastSequence(1)); err != nil {
-		t.Fatalf("Unexpected error adding first message with ExpectLastSequence: %v", err)
-	}
-
-	// Add second message without ExpectLastSequence
-	if err := batch.Add("test.2", []byte("message 2")); err != nil {
-		t.Fatalf("Unexpected error adding second message: %v", err)
-	}
-
-	// Commit third message
-	ack, err := batch.Commit(ctx, "test.3", []byte("message 3"))
-	if err != nil {
-		t.Fatalf("Unexpected error committing batch: %v", err)
-	}
-
-	if ack == nil {
-		t.Fatal("Expected non-nil BatchAck")
-	}
-
-	// Verify ack contains expected stream
-	if ack.Stream != "TEST" {
-		t.Fatalf("Expected stream name to be TEST, got %s", ack.Stream)
-	}
-
-	info, err := stream.Info(ctx)
-	if err != nil {
-		t.Fatalf("Unexpected error getting stream info: %v", err)
-	}
-	if info.State.Msgs != 4 {
-		t.Fatalf("Expected 4 messages in the stream, got %d", info.State.Msgs)
-	}
-}
-
 func TestBatchPublisher(t *testing.T) {
 	t.Run("basic", func(t *testing.T) {
-
 		s := RunBasicJetStreamServer()
 		defer shutdownJSServerAndRemoveStorage(t, s)
 
@@ -283,33 +217,48 @@ func TestBatchPublisher(t *testing.T) {
 			t.Fatalf("Unexpected error adding first message with ExpectLastSequence: %v", err)
 		}
 
-		// Second message with ExpectLastSequence should fail
-		if err := batch.Add("test.2", []byte("message 2"), jetstreamext.WithBatchExpectLastSequence(1)); err == nil {
-			t.Fatal("Expected error when using ExpectLastSequence on non-first message")
-		} else if !errors.Is(err, jetstreamext.ErrBatchExpectLastSequenceNotFirst) {
-			t.Fatalf("Expected ErrBatchExpectLastSequenceNotFirst, got %v", err)
-		}
-
-		// Second message without ExpectLastSequence should work
-		if err := batch.Add("test.2", []byte("message 2")); err != nil {
-			t.Fatalf("Unexpected error adding second message: %v", err)
-		}
-
-		// Commit with ExpectLastSequence should fail (not first message)
-		if _, err := batch.Commit(ctx, "test.3", []byte("message 3"), jetstreamext.WithBatchExpectLastSequence(2)); err == nil {
-			t.Fatal("Expected error when using ExpectLastSequence on commit (non-first message)")
-		} else if !errors.Is(err, jetstreamext.ErrBatchExpectLastSequenceNotFirst) {
-			t.Fatalf("Expected ErrBatchExpectLastSequenceNotFirst, got %v", err)
-		}
-
-		// Commit without ExpectLastSequence should work
-		ack, err := batch.Commit(ctx, "test.3", []byte("message 3"))
+		ack, err := batch.Commit(ctx, "test.2", []byte("message 2"))
 		if err != nil {
 			t.Fatalf("Unexpected error committing batch: %v", err)
 		}
 
 		if ack == nil {
 			t.Fatal("Expected non-nil BatchAck")
+		}
+	})
+
+	t.Run("invalid last sequence", func(t *testing.T) {
+		s := RunBasicJetStreamServer()
+		defer shutdownJSServerAndRemoveStorage(t, s)
+		nc, js := jsClient(t, s)
+		defer nc.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// Create a stream with batch publishing enabled
+		cfg := jetstream.StreamConfig{
+			Name:               "TEST",
+			Subjects:           []string{"test.>"},
+			AllowAtomicPublish: true,
+		}
+		_, err := js.CreateStream(ctx, cfg)
+		if err != nil {
+			t.Fatalf("Unexpected error creating stream: %v", err)
+		}
+		batch, err := jetstreamext.NewBatchPublisher(js)
+		if err != nil {
+			t.Fatalf("Unexpected error creating batch publisher: %v", err)
+		}
+		// First message with invalid ExpectLastSequence should fail
+		_, err = batch.Commit(ctx, "test.1", []byte("message 1"), jetstreamext.WithBatchExpectLastSequence(5))
+		if err == nil {
+			t.Fatal("Expected error committing with invalid ExpectLastSequence")
+		}
+		var apiErr *jetstream.APIError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("Expected APIError, got %v", err)
+		}
+		if apiErr.ErrorCode != jetstream.JSErrCodeStreamWrongLastSequence {
+			t.Fatalf("Expected error %d, got %d", jetstream.JSErrCodeStreamWrongLastSequence, apiErr.ErrorCode)
 		}
 	})
 
@@ -345,49 +294,24 @@ func TestBatchPublisher(t *testing.T) {
 			}
 		}
 		// Now create one more batch
+		// With flow control, the error might come on Add (if WaitFirst=true) or Commit
 		batch, err := jetstreamext.NewBatchPublisher(js)
 		if err != nil {
 			t.Fatalf("Unexpected error creating batch publisher: %v", err)
 		}
 		err = batch.Add("test.1", []byte("message 1"))
-		// adding to batch will not fail, only committing
 		if err != nil {
-			t.Fatal("Expected error adding message to batch when too many outstanding batches")
+			// With flow control enabled (WaitFirst=true by default), the first Add may fail
+			if errors.Is(err, jetstreamext.ErrBatchPublishIncomplete) {
+				// This is expected - too many outstanding batches
+				return
+			}
+			t.Fatalf("Unexpected error adding message to batch: %v", err)
 		}
+		// If Add didn't fail, Commit should fail
 		_, err = batch.Commit(ctx, "test.2", []byte("message 2"))
 		if !errors.Is(err, jetstreamext.ErrBatchPublishIncomplete) {
-			t.Fatal("Expected error committing batch when too many outstanding batches")
-		}
-	})
-
-	t.Run("batch publish not enabled", func(t *testing.T) {
-		s := RunBasicJetStreamServer()
-		defer shutdownJSServerAndRemoveStorage(t, s)
-
-		nc, js := jsClient(t, s)
-		defer nc.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		// Create a stream without batch publishing enabled
-		cfg := jetstream.StreamConfig{
-			Name:     "TEST",
-			Subjects: []string{"test.>"},
-		}
-		_, err := js.CreateStream(ctx, cfg)
-		if err != nil {
-			t.Fatalf("Unexpected error creating stream: %v", err)
-		}
-		batch, err := jetstreamext.NewBatchPublisher(js)
-		if err != nil {
-			t.Fatalf("Unexpected error creating batch publisher: %v", err)
-		}
-		if err := batch.Add("test.1", []byte("message 1")); err != nil {
-			t.Fatalf("Unexpected error adding message: %v", err)
-		}
-		_, err = batch.Commit(ctx, "test.2", []byte("message 2"))
-		if !errors.Is(err, jetstreamext.ErrBatchPublishNotEnabled) {
-			t.Fatal("Expected ErrBatchPublishNotEnabled committing batch to stream without batch publishing enabled")
+			t.Fatalf("Expected ErrBatchPublishIncomplete when too many outstanding batches, got %v", err)
 		}
 	})
 
@@ -496,10 +420,44 @@ func TestBatchPublisher(t *testing.T) {
 		}
 	})
 
+	t.Run("batch publish not enabled", func(t *testing.T) {
+		s := RunBasicJetStreamServer()
+		defer shutdownJSServerAndRemoveStorage(t, s)
+
+		nc, js := jsClient(t, s)
+		defer nc.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Create a stream WITHOUT batch publishing enabled
+		cfg := jetstream.StreamConfig{
+			Name:     "TEST",
+			Subjects: []string{"test.>"},
+		}
+		_, err := js.CreateStream(ctx, cfg)
+		if err != nil {
+			t.Fatalf("Unexpected error creating stream: %v", err)
+		}
+
+		// Create batch publisher with flow control enabled
+		batch, err := jetstreamext.NewBatchPublisher(js, jetstreamext.BatchFlowControl{
+			WaitFirst:  true,
+			AckTimeout: 5 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Unexpected error creating batch publisher: %v", err)
+		}
+		// First message should fail with batch publish not enabled
+		err = batch.Add("test.1", []byte("message 1"))
+		if !errors.Is(err, jetstreamext.ErrBatchPublishNotEnabled) {
+			t.Fatalf("Expected ErrBatchPublishNotEnabled, got %v", err)
+		}
+	})
+
 }
 
 func TestBatchPublisher_Discard(t *testing.T) {
-
 	s := RunBasicJetStreamServer()
 	defer shutdownJSServerAndRemoveStorage(t, s)
 	nc, js := jsClient(t, s)

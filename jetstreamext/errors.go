@@ -39,9 +39,6 @@ var (
 	// ErrInvalidBatchAck is returned when JetStream ack from batch publish is
 	// invalid.
 	ErrInvalidBatchAck jetstream.JetStreamError = &jsError{message: "invalid jetstream batch publish response"}
-
-	// ErrBatchExpectLastSequenceNotFirst is returned when ExpectLastSequence options are used on non-first message in batch.
-	ErrBatchExpectLastSequenceNotFirst = &jsError{message: "ExpectLastSequence options can only be used on first message in batch"}
 )
 
 type jsError struct {
