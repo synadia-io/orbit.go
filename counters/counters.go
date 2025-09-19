@@ -52,19 +52,15 @@ type Counter interface {
 	// AddInt increments the counter for the given subject and returns the new total value.
 	AddInt(ctx context.Context, subject string, value int) (*big.Int, error)
 
+	// Get returns the full entry with value and source history for the given subject.
+	Get(ctx context.Context, subject string) (*Entry, error)
+
 	// Load returns the current value of the counter for the given subject.
 	Load(ctx context.Context, subject string) (*big.Int, error)
 
-	// LoadMultiple returns an iterator over counter values for multiple subjects.
+	// GetMultiple returns an iterator over counter entries matching the pattern.
 	// Wildcards are supported.
-	LoadMultiple(ctx context.Context, subjects []string) iter.Seq2[*big.Int, error]
-
-	// GetEntry returns the full entry with value and source history for the given subject.
-	GetEntry(ctx context.Context, subject string) (*Entry, error)
-
-	// GetEntries returns an iterator over counter entries matching the pattern.
-	// Wildcards are supported.
-	GetEntries(ctx context.Context, subjects []string) iter.Seq2[*Entry, error]
+	GetMultiple(ctx context.Context, subjects []string) iter.Seq2[*Entry, error]
 }
 
 // Entry represents a counter's current state with full source history.
@@ -129,7 +125,7 @@ func (c *streamCounter) AddInt(ctx context.Context, subject string, value int) (
 }
 
 func (c *streamCounter) Load(ctx context.Context, subject string) (*big.Int, error) {
-	msg, err := c.stream.GetLastMsgForSubject(ctx, subject, jetstream.WithGetLastForSubjectNoHeaders())
+	msg, err := c.stream.GetLastMsgForSubject(ctx, subject)
 	if err != nil {
 		if err == jetstream.ErrMsgNotFound {
 			return nil, fmt.Errorf("%w: %s", ErrNoCounterForSubject, subject)
@@ -144,32 +140,7 @@ func (c *streamCounter) Load(ctx context.Context, subject string) (*big.Int, err
 	return val, nil
 }
 
-func (c *streamCounter) LoadMultiple(ctx context.Context, subjects []string) iter.Seq2[*big.Int, error] {
-	return func(yield func(*big.Int, error) bool) {
-		streamName := c.stream.CachedInfo().Config.Name
-		vals, err := jetstreamext.GetLastMsgsFor(ctx, c.js, streamName, subjects)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-		for msg, err := range vals {
-			if err != nil {
-				yield(nil, err)
-				continue
-			}
-			value, err := parseCounterValue(msg.Data)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if !yield(value, nil) {
-				return
-			}
-		}
-	}
-}
-
-func (c *streamCounter) GetEntry(ctx context.Context, subject string) (*Entry, error) {
+func (c *streamCounter) Get(ctx context.Context, subject string) (*Entry, error) {
 	msg, err := c.stream.GetLastMsgForSubject(ctx, subject)
 	if err != nil {
 		if err == jetstream.ErrMsgNotFound {
@@ -207,7 +178,23 @@ func (c *streamCounter) GetEntry(ctx context.Context, subject string) (*Entry, e
 	}, nil
 }
 
-func (c *streamCounter) GetEntries(ctx context.Context, subjects []string) iter.Seq2[*Entry, error] {
+func (c *streamCounter) LoadValue(ctx context.Context, subject string) (*big.Int, error) {
+	msg, err := c.stream.GetLastMsgForSubject(ctx, subject)
+	if err != nil {
+		if err == jetstream.ErrMsgNotFound {
+			return nil, fmt.Errorf("%w: %s", ErrNoCounterForSubject, subject)
+		}
+		return nil, fmt.Errorf("failed to get last message for subject %s: %w", subject, err)
+	}
+
+	val, err := parseCounterValue(msg.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse counter value for subject %s: %w", subject, err)
+	}
+	return val, nil
+}
+
+func (c *streamCounter) GetMultiple(ctx context.Context, subjects []string) iter.Seq2[*Entry, error] {
 	return func(yield func(*Entry, error) bool) {
 		streamName := c.stream.CachedInfo().Config.Name
 		vals, err := jetstreamext.GetLastMsgsFor(ctx, c.js, streamName, subjects)

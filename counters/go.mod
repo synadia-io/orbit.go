@@ -3,7 +3,7 @@ module github.com/synadia-io/orbit.go/counters
 go 1.23.5
 
 require (
-	github.com/nats-io/nats.go v1.43.1-0.20250722080352-3b61443e4534
+	github.com/nats-io/nats.go v1.45.1-0.20250919085131-80c79abf5191
 	github.com/synadia-io/orbit.go/jetstreamext v0.1.0
 )
 

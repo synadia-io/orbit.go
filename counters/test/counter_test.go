@@ -106,71 +106,6 @@ func TestCounterBasicOperations(t *testing.T) {
 	}
 }
 
-func TestCounterMultipleSubjects(t *testing.T) {
-	srv := RunBasicJetStreamServer()
-	defer shutdownJSServerAndRemoveStorage(t, srv)
-	nc, err := nats.Connect(srv.ClientURL())
-	if err != nil {
-		t.Fatalf("Failed to connect: %v", err)
-	}
-	defer nc.Close()
-
-	js, err := jetstream.New(nc)
-	if err != nil {
-		t.Fatalf("Failed to create JetStream: %v", err)
-	}
-
-	_, err = js.CreateStream(context.Background(), jetstream.StreamConfig{
-		Name:            "TEST_COUNTER",
-		Subjects:        []string{"foo.*"},
-		AllowMsgCounter: true,
-		AllowDirect:     true,
-	})
-	if err != nil {
-		t.Fatalf("Failed to create counter stream: %v", err)
-	}
-
-	counter, err := counters.GetCounter(context.Background(), js, "TEST_COUNTER")
-	if err != nil {
-		t.Fatalf("Failed to get counter: %v", err)
-	}
-
-	subjects := []string{"foo.one", "foo.two", "foo.three"}
-	values := []*big.Int{big.NewInt(50), big.NewInt(75), big.NewInt(25)}
-
-	for i, subject := range subjects {
-		_, err := counter.Add(context.Background(), subject, values[i])
-		if err != nil {
-			t.Fatalf("Failed to add to %s: %v", subject, err)
-		}
-	}
-
-	var total int64
-	for value, err := range counter.LoadMultiple(context.Background(), subjects) {
-		if err != nil {
-			t.Fatalf("Failed to load counter: %v", err)
-		}
-		total += value.Int64()
-	}
-	if total != 150 {
-		t.Fatalf("Expected total 150, got %d", total)
-	}
-
-	// load with empty subjects
-	for entry, err := range counter.LoadMultiple(context.Background(), []string{""}) {
-		if err == nil {
-			t.Fatalf("Expected error for empty subject, got entry: %v", entry)
-		}
-	}
-
-	// load with no subjects
-	for entry, err := range counter.LoadMultiple(context.Background(), []string{}) {
-		if err == nil {
-			t.Fatalf("Expected error for empty subjects, got entry: %v", entry)
-		}
-	}
-}
-
 func TestCounterLoad(t *testing.T) {
 	srv := RunBasicJetStreamServer()
 	defer shutdownJSServerAndRemoveStorage(t, srv)
@@ -256,7 +191,7 @@ func TestCounterGetEntry(t *testing.T) {
 		t.Fatalf("Failed to add to counter: %v", err)
 	}
 
-	entry, err := counter.GetEntry(context.Background(), "foo.bar")
+	entry, err := counter.Get(context.Background(), "foo.bar")
 	if err != nil {
 		t.Fatalf("Failed to get entry: %v", err)
 	}
@@ -275,19 +210,19 @@ func TestCounterGetEntry(t *testing.T) {
 		t.Fatalf("Expected increment 100, got %s", entry.Incr.String())
 	}
 
-	_, err = counter.GetEntry(context.Background(), "foo.nonexistent")
+	_, err = counter.Get(context.Background(), "foo.nonexistent")
 	if !errors.Is(err, counters.ErrNoCounterForSubject) {
 		t.Fatalf("Expected ErrNoCounterForSubject, got %v", err)
 	}
 
 	// get entry with empty subject
-	_, err = counter.GetEntry(context.Background(), "")
+	_, err = counter.Get(context.Background(), "")
 	if err == nil {
 		t.Fatal("Expected error for empty subject, got nil")
 	}
 }
 
-func TestCounterGetEntries(t *testing.T) {
+func TestCounterGetMultiple(t *testing.T) {
 	srv := RunBasicJetStreamServer()
 	defer shutdownJSServerAndRemoveStorage(t, srv)
 	nc, err := nats.Connect(srv.ClientURL())
@@ -330,7 +265,7 @@ func TestCounterGetEntries(t *testing.T) {
 	// Test GetEntries with wildcard
 	count := 0
 	foundSubjects := make(map[string]*big.Int)
-	for entry, err := range counter.GetEntries(context.Background(), []string{"foo.*"}) {
+	for entry, err := range counter.GetMultiple(context.Background(), []string{"foo.*"}) {
 		if err != nil {
 			t.Fatalf("error in GetEntries: %v", err)
 		}
@@ -353,7 +288,7 @@ func TestCounterGetEntries(t *testing.T) {
 
 	// Test GetEntries with specific pattern
 	count = 0
-	for entry, err := range counter.GetEntries(context.Background(), []string{"foo.one"}) {
+	for entry, err := range counter.GetMultiple(context.Background(), []string{"foo.one"}) {
 		if err != nil {
 			t.Fatalf("error in GetEntries: %v", err)
 		}
@@ -371,13 +306,13 @@ func TestCounterGetEntries(t *testing.T) {
 	}
 
 	// get entries with empty subject
-	for entry, err := range counter.GetEntries(context.Background(), []string{""}) {
+	for entry, err := range counter.GetMultiple(context.Background(), []string{""}) {
 		if err == nil {
 			t.Fatalf("Expected error for empty subject, got entry: %v", entry)
 		}
 	}
 	// no subjects
-	for entry, err := range counter.GetEntries(context.Background(), []string{}) {
+	for entry, err := range counter.GetMultiple(context.Background(), []string{}) {
 		if err == nil {
 			t.Fatalf("Expected error for empty subjects, got entry: %v", entry)
 		}
@@ -592,7 +527,7 @@ func TestCounterWithSources(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Check eu aggregation
-	euHits, err := euCounter.GetEntry(context.Background(), "count.eu.hits")
+	euHits, err := euCounter.Get(context.Background(), "count.eu.hits")
 	if err != nil {
 		t.Fatalf("Failed to get entry: %v", err)
 	}
@@ -613,7 +548,7 @@ func TestCounterWithSources(t *testing.T) {
 	var i int
 	var expectedCount int64
 	var expectedSources map[string]map[string]*big.Int
-	entries := euCounter.GetEntries(context.Background(), []string{"count.eu.>"})
+	entries := euCounter.GetMultiple(context.Background(), []string{"count.eu.>"})
 	for entry, err := range entries {
 		i++
 		if err != nil {
@@ -653,7 +588,7 @@ func TestCounterWithSources(t *testing.T) {
 	}
 
 	// Check global level aggregation (should have transformed subjects again)
-	globalHits, err := globalCounter.GetEntry(context.Background(), "count.hits")
+	globalHits, err := globalCounter.Get(context.Background(), "count.hits")
 	if err != nil {
 		t.Fatalf("Failed to load global hits: %v", err)
 	}

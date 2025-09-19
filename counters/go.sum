@@ -1,7 +1,7 @@
 github.com/klauspost/compress v1.18.0 h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zttxdo=
 github.com/klauspost/compress v1.18.0/go.mod h1:2Pp+KzxcywXVXMr50+X0Q/Lsb43OQHYWRCY2AiWywWQ=
-github.com/nats-io/nats.go v1.43.1-0.20250722080352-3b61443e4534 h1:9cg99akIkCNc2RIjZ7BWrcpelEmwGMcBd49WnZvyLCo=
-github.com/nats-io/nats.go v1.43.1-0.20250722080352-3b61443e4534/go.mod h1:iRWIPokVIFbVijxuMQq4y9ttaBTMe0SFdlZfMDd+33g=
+github.com/nats-io/nats.go v1.45.1-0.20250919085131-80c79abf5191 h1:n5bIwoRvsFDdG4M2m9eb9zJMda8yB28wnanmi1Y0TGQ=
+github.com/nats-io/nats.go v1.45.1-0.20250919085131-80c79abf5191/go.mod h1:iRWIPokVIFbVijxuMQq4y9ttaBTMe0SFdlZfMDd+33g=
 github.com/nats-io/nkeys v0.4.11 h1:q44qGV008kYd9W1b1nEBkNzvnWxtRSQ7A8BoqRrcfa0=
 github.com/nats-io/nkeys v0.4.11/go.mod h1:szDimtgmfOi9n25JpfIdGw12tZFYXqhGxjhVxsatHVE=
 github.com/nats-io/nuid v1.0.1 h1:5iA8DT8V7q8WK2EScv2padNa/rTESc1KdnPw4TC2paw=
