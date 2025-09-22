@@ -140,6 +140,7 @@ if err != nil {
 ### Atomic batch publishing
 
 `PublishMsgBatch` and `BatchPublisher` provide atomic batch publishing to JetStream streams with configurable flow control.
+A batch publish is an atomic operation - either all messages in the batch are persisted, or none are, depending on the result of the commit.
 
 In order to use this feature, stream has to be configured with `AllowAtomicPublish` enabled.
 
@@ -150,6 +151,7 @@ In order to use this feature, stream has to be configured with `AllowAtomicPubli
 `BatchPublisher` allows you to create a publisher that publishes messages in streaming-like fashion, where each message is published individually, but the commit is done for the entire batch.
 It can be configured with options for flow control and supports publish consistency checks.
 A commit is done when the `Commit` method is called, which returns a `BatchAck` containing the results of the publish.
+
 
 ```go
 // Create a stream with batch publishing enabled
