@@ -59,13 +59,13 @@ type (
 
 	// BatchFlowControl configures flow control for batch publishing.
 	BatchFlowControl struct {
-		// WaitFirst waits for an ack on the first message in the batch.
+		// AckFirst waits for an ack on the first message in the batch.
 		// Default: true
-		WaitFirst bool
+		AckFirst bool
 
-		// WaitDelta waits for an ack every N messages (0 = disabled).
+		// AckEvery waits for an ack every N messages (0 = disabled).
 		// Default: 0
-		WaitDelta int
+		AckEvery int
 
 		// AckTimeout is the timeout for waiting for acks when flow control is enabled.
 		// Default: timeout from JetStream context.
@@ -158,7 +158,7 @@ func NewBatchPublisher(js jetstream.JetStream, opts ...BatchPublisherOpt) (Batch
 	pubOpts := batchPublishOpts{
 		// Set defaults
 		flowControl: BatchFlowControl{
-			WaitFirst:  true,
+			AckFirst:   true,
 			AckTimeout: jsOpts.DefaultTimeout,
 		},
 	}
@@ -225,9 +225,9 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 
 	// Determine if we need flow control for this message
 	needsAck := false
-	if b.opts.flowControl.WaitFirst && b.sequence == 1 {
+	if b.opts.flowControl.AckFirst && b.sequence == 1 {
 		needsAck = true // wait on first message
-	} else if b.opts.flowControl.WaitDelta > 0 && b.sequence%b.opts.flowControl.WaitDelta == 0 {
+	} else if b.opts.flowControl.AckEvery > 0 && b.sequence%b.opts.flowControl.AckEvery == 0 {
 		needsAck = true // periodic flow control
 	}
 
@@ -392,7 +392,7 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 	jsOpts := js.Options()
 	pubOpts := batchPublishOpts{
 		flowControl: BatchFlowControl{
-			WaitFirst:  true,
+			AckFirst:   true,
 			AckTimeout: jsOpts.DefaultTimeout,
 		},
 	}
@@ -415,9 +415,9 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 			// Determine if we need flow control for this message
 			needsAck := false
 			seq := i + 1
-			if pubOpts.flowControl.WaitFirst && seq == 1 {
+			if pubOpts.flowControl.AckFirst && seq == 1 {
 				needsAck = true
-			} else if pubOpts.flowControl.WaitDelta > 0 && seq%pubOpts.flowControl.WaitDelta == 0 {
+			} else if pubOpts.flowControl.AckEvery > 0 && seq%pubOpts.flowControl.AckEvery == 0 {
 				needsAck = true
 			}
 

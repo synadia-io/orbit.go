@@ -152,7 +152,6 @@ In order to use this feature, stream has to be configured with `AllowAtomicPubli
 It can be configured with options for flow control and supports publish consistency checks.
 A commit is done when the `Commit` method is called, which returns a `BatchAck` containing the results of the publish.
 
-
 ```go
 // Create a stream with batch publishing enabled
 
@@ -194,7 +193,7 @@ This can be configured with options, for example to wait for an ack for every 10
 
 ```go
 batch, err := jetstreamext.NewBatchPublisher(js, jetstreamext.BatchFlowControl{
-    WaitDelta:  10,
+    AckEvery:  10,
     AckTimeout: 5 * time.Second,
 })
 if err != nil {

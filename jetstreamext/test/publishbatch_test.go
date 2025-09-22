@@ -442,7 +442,7 @@ func TestBatchPublisher(t *testing.T) {
 
 		// Create batch publisher with flow control enabled
 		batch, err := jetstreamext.NewBatchPublisher(js, jetstreamext.BatchFlowControl{
-			WaitFirst:  true,
+			AckFirst:   true,
 			AckTimeout: 5 * time.Second,
 		})
 		if err != nil {
