@@ -14,12 +14,6 @@
 [![Build Status][Build-Status-Image]][Build-Status-Url]
 [![Go Report Card][ReportCard-Image]][ReportCard-Url]
 
-> **Note:** This module uses features scheduled for NATS Server 2.12.0. Until
-> that version is released, building from nats-server main branch or using
-> nightly build is required to use this module. You can find the latest nightly
-> builds at [NATS Server Nightly
-> Releases](https://nats.io/download/nats-server/).
-
 This module provides distributed counter functionality built on NATS JetStream streams, enabling high-performance counter operations with arbitrary precision and source tracking capabilities.
 
 ## Overview
