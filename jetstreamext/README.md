@@ -150,6 +150,7 @@ In order to use this feature, stream has to be configured with `AllowAtomicPubli
 
 `BatchPublisher` allows you to create a publisher that publishes messages in streaming-like fashion, where each message is published individually, but the commit is done for the entire batch.
 It can be configured with options for flow control and supports publish consistency checks.
+Adding messages to the batch is an IO operation, and messages are published immediately and persisted upon commit.
 A commit is done when the `Commit` method is called, which returns a `BatchAck` containing the results of the publish.
 
 ```go

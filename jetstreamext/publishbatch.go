@@ -32,6 +32,8 @@ type (
 	// with the final message which includes a commit header.
 	BatchPublisher interface {
 		// Add publishes a message to the batch with the given subject and data.
+		// It is an IO operation and the message will be published immediately
+		// and persisted upon commit.
 		Add(subject string, data []byte, opts ...BatchMsgOpt) error
 
 		// AddMsg publishes a message to the batch.
@@ -177,6 +179,8 @@ func NewBatchPublisher(js jetstream.JetStream, opts ...BatchPublisherOpt) (Batch
 }
 
 // Add publishes a message to the batch with the given subject and data.
+// It is an IO operation and the message will be published immediately
+// and persisted upon commit.
 func (b *batchPublisher) Add(subject string, data []byte, opts ...BatchMsgOpt) error {
 	return b.AddMsg(&nats.Msg{Subject: subject, Data: data}, opts...)
 }
