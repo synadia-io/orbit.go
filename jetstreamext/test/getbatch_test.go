@@ -385,3 +385,22 @@ func shutdownJSServerAndRemoveStorage(t *testing.T, s *server.Server) {
 	}
 	s.WaitForShutdown()
 }
+
+func client(t *testing.T, s *server.Server, opts ...nats.Option) *nats.Conn {
+	t.Helper()
+	nc, err := nats.Connect(s.ClientURL(), opts...)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	return nc
+}
+
+func jsClient(t *testing.T, s *server.Server, opts ...nats.Option) (*nats.Conn, jetstream.JetStream) {
+	t.Helper()
+	nc := client(t, s, opts...)
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatalf("Unexpected error getting JetStream context: %v", err)
+	}
+	return nc, js
+}

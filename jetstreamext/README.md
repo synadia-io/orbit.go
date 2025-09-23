@@ -136,3 +136,88 @@ if err != nil {
 }
 // process msgs
 ```
+
+### Atomic batch publishing
+
+`PublishMsgBatch` and `BatchPublisher` provide atomic batch publishing to JetStream streams with configurable flow control.
+A batch publish is an atomic operation - either all messages in the batch are persisted, or none are, depending on the result of the commit.
+
+In order to use this feature, stream has to be configured with `AllowAtomicPublish` enabled.
+
+> Note: This module requires nats-server v2.12.0 o later.
+
+#### BatchPublisher
+
+`BatchPublisher` allows you to create a publisher that publishes messages in streaming-like fashion, where each message is published individually, but the commit is done for the entire batch.
+It can be configured with options for flow control and supports publish consistency checks.
+Adding messages to the batch is an IO operation, and messages are published immediately and persisted upon commit.
+A commit is done when the `Commit` method is called, which returns a `BatchAck` containing the results of the publish.
+
+```go
+// Create a stream with batch publishing enabled
+
+// stream has to be created with AllowAtomicPublish enabled
+cfg := jetstream.StreamConfig{
+    Name:               "FOO",
+    Subjects:           []string{"foo.>"},
+    AllowAtomicPublish: true,
+}
+stream, err := js.CreateStream(ctx, cfg)
+if err != nil {
+    // handle error
+}
+
+// Create a batch publisher
+batch, err := jetstreamext.NewBatchPublisher(js)
+if err != nil {
+    // handle error
+}
+
+// Add message to the batch
+err := batch.AddMsg("foo.A", &nats.Msg{
+    Subject: "test.A",
+    Data:    []byte("hello"),
+})
+if err != nil {
+    // handle error
+}
+
+// Commit the batch
+ack, err := batch.Commit(ctx, "test.A", []byte("commit msg"))
+if err != nil {
+    // handle error
+}
+```
+
+By default, `BatchPublisher` waits for an ack from the server for the first message in the batch and for the commit.
+This can be configured with options, for example to wait for an ack for every 10 messages.
+
+```go
+batch, err := jetstreamext.NewBatchPublisher(js, jetstreamext.BatchFlowControl{
+    AckEvery:  10,
+    AckTimeout: 5 * time.Second,
+})
+if err != nil {
+    // handle error
+}
+```
+
+#### PublishMsgBatch
+
+`PublishMsgBatch` allows you to atomically publish a slice of messages to a stream and wait for an ack for the commit.
+It can be configured with options for flow control. For consistency checks, relevant headers can be set on individual messages.
+
+```go
+msgs := make([]*nats.Msg, 0, count)
+for range count {
+    messages = append(messages, &nats.Msg{
+        Subject: "foo",
+        Data:    []byte("message"),
+    })
+}
+
+ack, err := jetstreamext.PublishMsgBatch(ctx, js, messages)
+if err != nil {
+    // handle error
+}
+```
