@@ -3,8 +3,8 @@ module tests
 go 1.24.0
 
 require (
-	github.com/nats-io/nats-server/v2 v2.12.0-RC.4
-	github.com/nats-io/nats.go v1.45.1-0.20250917112917-e6112039bf64
+	github.com/nats-io/nats-server/v2 v2.12.0
+	github.com/nats-io/nats.go v1.46.0
 	github.com/synadia-io/orbit.go/jetstreamext v0.1.0
 )
 
