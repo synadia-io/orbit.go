@@ -88,37 +88,9 @@ log.Printf("Orders: %s", value.Val)
 log.Printf("Subject: %s", value.Subject)
 ```
 
-#### LoadMultiple - Get Multiple Values
+#### Get - Get Counter entry with Source Tracking
 
-Efficiently loads multiple counter values with wildcard support:
-
-```go
-// Load specific counters
-for value, err := range counter.LoadMultiple(ctx, []string{
-    "events.orders",
-    "events.clicks",
-    "events.purchases",
-}) {
-    if err != nil {
-        log.Printf("Error: %v", err)
-        continue
-    }
-    log.Printf("%s: %s", value.Subject, value.Val)
-}
-
-// Load with wildcards
-for value, err := range counter.LoadMultiple(ctx, []string{"events.>"}) {
-    if err != nil {
-        log.Printf("Error: %v", err)
-        continue
-    }
-    log.Printf("%s: %s", value.Subject, value.Val)
-}
-```
-
-#### Source Tracking with GetEntry/GetEntries
-
-When using JetStream stream aggregation, counters maintain source history:
+Retrieves the counter entry along with its source tracking information:
 
 ```go
 // Get single entry with source tracking
@@ -133,6 +105,13 @@ for sourceID, subjects := range entry.Sources {
     }
 }
 
+```
+
+#### GetMultiple - Get Multiple Entries
+
+Loads multiple counter entries with wildcard support:
+
+```go
 // Get multiple entries with wildcards
 for entry, err := range counter.GetEntries(ctx, []string{"aggregated.>"}) {
     if err != nil {
