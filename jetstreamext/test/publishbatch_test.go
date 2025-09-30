@@ -88,6 +88,14 @@ func TestBatchPublisher(t *testing.T) {
 			t.Fatal("Expected non-nil BatchAck")
 		}
 
+		if ack.BatchSize != 3 {
+			t.Fatalf("Expected BatchAck.BatchSize to be 3, got %d", ack.BatchSize)
+		}
+
+		if ack.BatchID == "" {
+			t.Fatal("Expected non-empty BatchAck.BatchID")
+		}
+
 		// Verify batch is closed
 		if !batch.IsClosed() {
 			t.Fatal("Expected batch to be closed after commit")
