@@ -104,10 +104,10 @@ type (
 		Value string `json:"val,omitempty"`
 
 		// BatchID is the unique identifier for the batch.
-		BatchID string `json:"batch_id,omitempty"`
+		BatchID string `json:"batch,omitempty"`
 
 		// BatchSize is the number of messages in the batch.
-		BatchSize int `json:"batch_size,omitempty"`
+		BatchSize int `json:"count,omitempty"`
 	}
 
 	batchPublisher struct {
