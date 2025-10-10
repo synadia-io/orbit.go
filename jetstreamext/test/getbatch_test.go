@@ -371,7 +371,7 @@ func RunBasicJetStreamServer() *server.Server {
 	return RunServerWithOptions(&opts)
 }
 
-func shutdownJSServerAndRemoveStorage(t *testing.T, s *server.Server) {
+func shutdownJSServerAndRemoveStorage(t testing.TB, s *server.Server) {
 	t.Helper()
 	var sd string
 	if config := s.JetStreamConfig(); config != nil {
@@ -386,7 +386,7 @@ func shutdownJSServerAndRemoveStorage(t *testing.T, s *server.Server) {
 	s.WaitForShutdown()
 }
 
-func client(t *testing.T, s *server.Server, opts ...nats.Option) *nats.Conn {
+func client(t testing.TB, s *server.Server, opts ...nats.Option) *nats.Conn {
 	t.Helper()
 	nc, err := nats.Connect(s.ClientURL(), opts...)
 	if err != nil {
@@ -395,7 +395,7 @@ func client(t *testing.T, s *server.Server, opts ...nats.Option) *nats.Conn {
 	return nc
 }
 
-func jsClient(t *testing.T, s *server.Server, opts ...nats.Option) (*nats.Conn, jetstream.JetStream) {
+func jsClient(t testing.TB, s *server.Server, opts ...nats.Option) (*nats.Conn, jetstream.JetStream) {
 	t.Helper()
 	nc := client(t, s, opts...)
 	js, err := jetstream.New(nc)
