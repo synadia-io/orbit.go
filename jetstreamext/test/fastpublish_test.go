@@ -209,7 +209,7 @@ func TestFastPublisher(t *testing.T) {
 		}
 	})
 
-	t.Run("discard", func(t *testing.T) {
+	t.Run("close", func(t *testing.T) {
 		s := RunBasicJetStreamServer()
 		defer shutdownJSServerAndRemoveStorage(t, s)
 
@@ -245,8 +245,16 @@ func TestFastPublisher(t *testing.T) {
 		}
 
 		// Discard the batch
-		if err := batch.Discard(); err != nil {
+		ack, err := batch.Close()
+		if err != nil {
 			t.Fatalf("Unexpected error discarding batch: %v", err)
+		}
+
+		if err != nil {
+			t.Fatalf("Unexpected error committing batch: %v", err)
+		}
+		if ack.BatchSize != 2 {
+			t.Fatalf("Expected BatchAck.BatchSize to be 2, got %d", ack.BatchSize)
 		}
 
 		// Verify batch is closed

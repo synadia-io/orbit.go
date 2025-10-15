@@ -41,12 +41,9 @@ type (
 		// Returns a BatchAck containing the acknowledgment from the server.
 		CommitMsg(ctx context.Context, msg *nats.Msg, opts ...BatchMsgOpt) (*BatchAck, error)
 
-		// Discard cancels the batch without committing.
-		// The server will abandon the batch after a timeout.
-		// All messages persisted so far will remain in the stream.
-		// After calling Discard, the batch is closed and no further
-		// messages can be added.
-		Discard() error
+		// Close closes the batch, signalling the server that no more messages will be added.
+		// It sends an EOB commit to the server, without adding a message.
+		Close() (*BatchAck, error)
 
 		// Size returns the number of messages added to the batch so far.
 		Size() int
@@ -106,6 +103,7 @@ type (
 		firstAckCh  chan *batchFlowAckResponse
 		errHandler  FastPublishErrHandler
 		pendingAcks map[int]struct{}
+		lastSubject string
 		mu          sync.Mutex
 	}
 
@@ -211,6 +209,7 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	}
 
 	fp.sequence++
+	fp.lastSubject = msg.Subject
 	msg.Header.Set(FastBatchIDHeader, fp.batchID)
 	msg.Header.Set(FastBatchFlowHeader, strconv.Itoa(fp.flow))
 	msg.Header.Set(BatchSeqHeader, strconv.Itoa(fp.sequence))
@@ -336,11 +335,21 @@ func (fp *fastPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 		msg.Header.Set(jetstream.ExpectedLastSeqHeader, strconv.FormatUint(*o.lastSeq, 10))
 	}
 
+	fp.mu.Unlock()
+	return fp.commit(ctx, msg, false)
+}
+
+func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*BatchAck, error) {
+	fp.mu.Lock()
 	fp.sequence++
 	msg.Header.Set(FastBatchIDHeader, fp.batchID)
 	msg.Header.Set(FastBatchFlowHeader, strconv.Itoa(fp.flow))
 	msg.Header.Set(BatchSeqHeader, strconv.Itoa(fp.sequence))
-	msg.Header.Set(BatchCommitHeader, "1")
+	if eob {
+		msg.Header.Set(BatchCommitHeader, "eob")
+	} else {
+		msg.Header.Set(BatchCommitHeader, "1")
+	}
 	msg.Reply = fp.ackInbox
 
 	if fp.ackSub == nil {
@@ -412,19 +421,19 @@ func (fp *fastPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 	return batchAck, commitErr
 }
 
-func (fp *fastPublisher) Discard() error {
+func (fp *fastPublisher) Close() (*BatchAck, error) {
 	fp.mu.Lock()
-	defer fp.mu.Unlock()
 
+	if fp.sequence == 0 {
+		fp.mu.Unlock()
+		return nil, errors.New("no messages in batch")
+	}
 	if fp.closed {
-		return ErrBatchClosed
+		fp.mu.Unlock()
+		return nil, ErrBatchClosed
 	}
-	fp.closed = true
-	if fp.ackSub != nil {
-		fp.ackSub.Unsubscribe()
-		fp.ackSub = nil
-	}
-	return nil
+	fp.mu.Unlock()
+	return fp.commit(context.Background(), nats.NewMsg(fp.lastSubject), true)
 }
 
 func (fp *fastPublisher) Size() int {
