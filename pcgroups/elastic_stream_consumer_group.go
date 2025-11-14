@@ -59,6 +59,7 @@ type ElasticConsumerGroupConfig struct {
 	MaxBufferedBytes      int64           `json:"max_buffered_bytes,omitempty"` // The max number of bytes buffered in the consumer group's stream
 	Members               []string        `json:"members,omitempty"`            // The list of members in the consumer group
 	MemberMappings        []MemberMapping `json:"member_mappings,omitempty"`    // Or the member mappings, which is a list of member names and the partitions that are assigned to them
+	revision              uint64          // internal revision number of the config
 }
 
 // IsInMembership returns true if the member name is in the current membership of the elastic consumer group
@@ -423,7 +424,7 @@ func AddMembers(ctx context.Context, js jetstream.JetStream, streamName string, 
 	}
 
 	// update the config record
-	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshaled)
+	_, err = kv.Update(ctx, composeKey(streamName, consumerGroupName), marshaled, consumerGroupConfig.revision)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't put the elastic consumer group's config in the bucket: %w", err)
 	}
@@ -474,7 +475,7 @@ func DeleteMembers(ctx context.Context, js jetstream.JetStream, streamName strin
 	}
 
 	// update the config record
-	_, err = kv.Put(ctx, composeKey(streamName, consumerGroupName), marshaled)
+	_, err = kv.Update(ctx, composeKey(streamName, consumerGroupName), marshaled, consumerGroupConfig.revision)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't put the elastic consumer group's config in the bucket: %w", err)
 	}
@@ -929,6 +930,7 @@ func getElasticConsumerGroupConfig(ctx context.Context, kv jetstream.KeyValue, s
 		return nil, fmt.Errorf("invalid elastic consumer group config: %w", err)
 	}
 
+	consumerGroupConfig.revision = message.Revision()
 	return &consumerGroupConfig, nil
 }
 
