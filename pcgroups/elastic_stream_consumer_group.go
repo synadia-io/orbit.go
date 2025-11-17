@@ -703,30 +703,42 @@ func (instance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer() {
 	config.PinnedTTL = config.AckWait
 
 	// before starting to actually consume messages from the stream consumer, we need to verify that the consumer is created with the correct filters, so Create() must be successful
-	instance.consumer, err = instance.js.CreateConsumer(ctx, composeCGSName(instance.StreamName, instance.ConsumerGroupName), config)
+	instance.consumer, err = instance.tryCreateConsumer(ctx, config)
 	if err != nil {
-		if errors.Is(err, jetstream.ErrConsumerExists) {
-			// try to delete the consumer if we can't create it to our desired config, we or someone else will try to re-create it within 5 seconds
-			err := instance.js.DeleteConsumer(ctx, composeCGSName(instance.StreamName, instance.ConsumerGroupName), instance.MemberName)
-			if err != nil {
-				log.Printf("Warning: error trying to delete our member's consumer after trying to create it to our desired config: %v\n", err)
-				// will try again later
-				return
-			} else {
-				instance.consumer, err = instance.js.CreateConsumer(ctx, composeCGSName(instance.StreamName, instance.ConsumerGroupName), config)
-				if err != nil {
-					// will try again later
-					return
-				}
-			}
+		var aerr *jetstream.APIError
+		// catch server.JSConsumerWQConsumerNotUniqueErr
+		if errors.As(err, &aerr) && aerr.ErrorCode == 10100 {
+			// just return in any case
+			// not logging here because some errors can happen during normal operation
+			// e.g. JS API error: filtered consumer not unique on workqueue stream can happen because all the members cannot be perfectly synchronized processing membership changes
+		} else {
+			log.Printf("Warning: error trying to create consumer for member %q: %v\n", instance.MemberName, err)
 		}
-		// just return in any case
-		// not logging here because some errors can happen during normal operation
-		// e.g. JS API error: filtered consumer not unique on workqueue stream can happen because all the members cannot be perfectly synchronized processing membership changes
 		return
 	}
 
 	instance.startConsuming()
+}
+
+// tryCreateConsumer will create or replace the jetstream consumer for this instance
+func (instance *ElasticConsumerGroupConsumerInstance) tryCreateConsumer(ctx context.Context, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+	consumer, err := instance.js.CreateConsumer(ctx, composeCGSName(instance.StreamName, instance.ConsumerGroupName), config)
+	if errors.Is(err, jetstream.ErrConsumerExists) {
+		// try to delete the consumer if we can't create it to our desired config, we or someone else will try to re-create it within 5 seconds
+		err := instance.js.DeleteConsumer(ctx, composeCGSName(instance.StreamName, instance.ConsumerGroupName), instance.MemberName)
+		if err != nil {
+			return nil, fmt.Errorf("error trying to delete consumer for member %q: %w", instance.MemberName, err)
+		}
+
+		consumer, err = instance.js.CreateConsumer(ctx, composeCGSName(instance.StreamName, instance.ConsumerGroupName), config)
+		if err != nil {
+			// will try again later
+			return nil, fmt.Errorf("error trying to create consumer for member %q: %w", instance.MemberName, err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("error trying to create consumer for member %q: %w", instance.MemberName, err)
+	}
+	return consumer, nil
 }
 
 // Start to actively consume (pull) messages from the consumer
