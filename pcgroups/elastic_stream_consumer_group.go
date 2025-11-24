@@ -699,7 +699,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer() {
 	config.Name = instance.MemberName
 	config.FilterSubjects = filters
 
-	config.PriorityGroups = []string{instance.MemberName}
+	config.PriorityGroups = []string{priorityGroupName}
 	config.PriorityPolicy = jetstream.PriorityPolicyPinned
 	config.PinnedTTL = config.AckWait
 
@@ -746,7 +746,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) tryCreateConsumer(ctx cont
 func (instance *ElasticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
-	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(instance.MemberName))
+	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(priorityGroupName))
 	if err != nil {
 		log.Printf("Error starting to consume on my consumer: %v\n", err)
 		return
@@ -774,7 +774,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) processMembershipChange(ct
 		ci, err := instance.consumer.Info(ctx)
 		if err == nil { // ignoring error as the consumer may not exist yet
 			if slices.ContainsFunc(ci.PriorityGroups, func(pg jetstream.PriorityGroupState) bool {
-				return pg.Group == instance.MemberName && pg.PinnedClientID == instance.currentPinnedID
+				return pg.Group == priorityGroupName && pg.PinnedClientID == instance.currentPinnedID
 			}) {
 				isPinned = true
 			}
