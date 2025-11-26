@@ -32,6 +32,8 @@ const (
 	consumerIdleTimeout = 2 * pullTimeout
 )
 
+const priorityGroupName = "PCG"
+
 type MemberMapping struct {
 	Member     string `json:"member"`
 	Partitions []int  `json:"partitions"`

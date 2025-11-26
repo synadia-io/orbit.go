@@ -413,7 +413,7 @@ func (instance *StaticConsumerGroupConsumerInstance) joinMemberConsumerStatic(ct
 	config.Durable = composeStaticConsumerName(instance.ConsumerGroupName, instance.MemberName)
 	config.FilterSubjects = filters
 
-	config.PriorityGroups = []string{instance.MemberName}
+	config.PriorityGroups = []string{priorityGroupName}
 	config.PriorityPolicy = jetstream.PriorityPolicyPinned
 	config.PinnedTTL = config.AckWait
 
@@ -431,7 +431,7 @@ func (instance *StaticConsumerGroupConsumerInstance) joinMemberConsumerStatic(ct
 func (instance *StaticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
-	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(instance.MemberName))
+	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(priorityGroupName))
 	if err != nil {
 		log.Printf("Error starting to consume on my consumer: %v\n", err)
 		return
