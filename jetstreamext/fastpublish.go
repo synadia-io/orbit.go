@@ -13,7 +13,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/nats-io/nuid"
 )
 
 type (
@@ -90,21 +89,20 @@ type (
 	}
 
 	fastPublisher struct {
-		js          jetstream.JetStream
-		batchID     string
-		flow        int
-		ackInbox    string
-		ackSub      *nats.Subscription
-		sequence    int
-		closed      bool
-		opts        fastPublisherOpts
-		stallCh     chan struct{}
-		commitCh    chan *batchAckResponse
-		firstAckCh  chan *batchFlowAckResponse
-		errHandler  FastPublishErrHandler
-		pendingAcks map[int]struct{}
-		lastSubject string
-		mu          sync.Mutex
+		js             jetstream.JetStream
+		flow           int
+		ackInboxPrefix string
+		ackSub         *nats.Subscription
+		sequence       int
+		closed         bool
+		opts           fastPublisherOpts
+		stallCh        chan struct{}
+		commitCh       chan *batchAckResponse
+		firstAckCh     chan *batchFlowAckResponse
+		errHandler     FastPublishErrHandler
+		pendingAcks    map[int]struct{}
+		lastSubject    string
+		mu             sync.Mutex
 	}
 
 	FastPublishErrHandler func(error)
@@ -119,18 +117,16 @@ type (
 )
 
 const (
-	// FastBatchIDHeader is the header used to identify the batch ID in messages.
-	FastBatchIDHeader = "Nats-Fast-Batch-Id"
-
-	// FastBatchFlowHeader is the header used to identify the flow control settings in messages.
-	FastBatchFlowHeader = "Nats-Flow"
-
-	// FastBatchGapHeader is the header used to indicate if the server should abandon the batch upon detecting a gap.
-	FastBatchGapHeader = "Nats-Batch-Gap"
-
 	// TODO: decide on defaults
 	defaultFastFlow           = 100
 	defaultMaxOutstandingAcks = 10
+)
+
+const (
+	FastBatchStart = iota
+	FastBatchAddMsg
+	FastBatchCommitMsg
+	FastBatchCommitEOB
 )
 
 func NewFastPublisher(js jetstream.JetStream, opts ...FastPublisherOpt) (FastPublisher, error) {
@@ -151,14 +147,13 @@ func NewFastPublisher(js jetstream.JetStream, opts ...FastPublisherOpt) (FastPub
 	}
 
 	return &fastPublisher{
-		js:          js,
-		batchID:     nuid.Next(),
-		ackInbox:    js.Conn().NewInbox(),
-		flow:        pubOpts.flow,
-		opts:        pubOpts,
-		errHandler:  pubOpts.errHandler,
-		commitCh:    make(chan *batchAckResponse, 1),
-		pendingAcks: make(map[int]struct{}),
+		js:             js,
+		ackInboxPrefix: js.Conn().NewInbox(),
+		flow:           pubOpts.flow,
+		opts:           pubOpts,
+		errHandler:     pubOpts.errHandler,
+		commitCh:       make(chan *batchAckResponse, 1),
+		pendingAcks:    make(map[int]struct{}),
 	}, nil
 }
 
@@ -210,17 +205,19 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 
 	fp.sequence++
 	fp.lastSubject = msg.Subject
-	msg.Header.Set(FastBatchIDHeader, fp.batchID)
-	msg.Header.Set(FastBatchFlowHeader, strconv.Itoa(fp.flow))
-	msg.Header.Set(BatchSeqHeader, strconv.Itoa(fp.sequence))
+	gap := "fail"
 	if fp.opts.continueOnGap {
-		msg.Header.Set(FastBatchGapHeader, "ok")
+		gap = "ok"
 	}
-	msg.Reply = fp.ackInbox
+	operation := FastBatchAddMsg
+	if fp.sequence == 1 {
+		operation = FastBatchStart
+	}
+	msg.Reply = fmt.Sprintf("%s.%d.%s.%d.%d.$FI", fp.ackInboxPrefix, fp.flow, gap, fp.sequence, operation)
 
 	// Create subscription and handle first message specially
 	if fp.sequence == 1 {
-		ackSub, err := fp.js.Conn().Subscribe(fp.ackInbox, fp.ackMsgHandler)
+		ackSub, err := fp.js.Conn().Subscribe(fmt.Sprintf("%s.>", fp.ackInboxPrefix), fp.ackMsgHandler)
 		if err != nil {
 			fp.mu.Unlock()
 			return err
@@ -342,18 +339,18 @@ func (fp *fastPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*BatchAck, error) {
 	fp.mu.Lock()
 	fp.sequence++
-	msg.Header.Set(FastBatchIDHeader, fp.batchID)
-	msg.Header.Set(FastBatchFlowHeader, strconv.Itoa(fp.flow))
-	msg.Header.Set(BatchSeqHeader, strconv.Itoa(fp.sequence))
-	if eob {
-		msg.Header.Set(BatchCommitHeader, "eob")
-	} else {
-		msg.Header.Set(BatchCommitHeader, "1")
+	gap := "fail"
+	if fp.opts.continueOnGap {
+		gap = "ok"
 	}
-	msg.Reply = fp.ackInbox
+	operation := FastBatchCommitMsg
+	if eob {
+		operation = FastBatchCommitEOB
+	}
+	msg.Reply = fmt.Sprintf("%s.%d.%s.%d.%d.$FI", fp.ackInboxPrefix, fp.flow, gap, fp.sequence, operation)
 
 	if fp.ackSub == nil {
-		ackSub, err := fp.js.Conn().Subscribe(fp.ackInbox, fp.ackMsgHandler)
+		ackSub, err := fp.js.Conn().Subscribe(fp.ackInboxPrefix, fp.ackMsgHandler)
 		if err != nil {
 			fp.mu.Unlock()
 			return nil, err
@@ -392,8 +389,7 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 			commitErr = commitResp.Error
 			break
 		}
-		if commitResp.BatchAck == nil || commitResp.Stream == "" ||
-			commitResp.BatchID != fp.batchID {
+		if commitResp.BatchAck == nil || commitResp.Stream == "" {
 			commitErr = ErrInvalidBatchAck
 			break
 		}
