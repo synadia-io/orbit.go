@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -41,7 +42,7 @@ type ElasticConsumerGroupConsumerInstance struct {
 	MessageHandlerCB       func(msg jetstream.Msg)
 	consumerUserConfig     jetstream.ConsumerConfig // The user provided config
 	consumer               jetstream.Consumer
-	currentPinnedID        string
+	currentPinnedID        atomic.Value
 	consumerConsumeContext jetstream.ConsumeContext
 	js                     jetstream.JetStream
 	kv                     jetstream.KeyValue
@@ -653,7 +654,7 @@ func ElasticMemberStepDown(ctx context.Context, js jetstream.JetStream, streamNa
 		return err
 	}
 
-	err = s.UnpinConsumer(ctx, memberName, memberName)
+	err = s.UnpinConsumer(ctx, memberName, priorityGroupName)
 	return err
 }
 
@@ -670,11 +671,16 @@ func (instance *ElasticConsumerGroupConsumerInstance) consumerCallback(msg jetst
 		log.Println("Warning: received a message without a pinned-id header")
 		// TODO should we give up here and say there's a problem? (maybe running over a pre 2.11 version of the server?)
 	} else {
-		if instance.currentPinnedID == "" {
-			instance.currentPinnedID = pid
-		} else if instance.currentPinnedID != pid {
+		currentPinnedIDVal := instance.currentPinnedID.Load()
+		currentPinnedID := ""
+
+		if currentPinnedIDVal != nil {
+			currentPinnedID = currentPinnedIDVal.(string)
+		}
+
+		if currentPinnedID == "" || currentPinnedID != pid {
 			// received a message with a different pinned-id header, assuming there was a change of pinned member
-			instance.currentPinnedID = pid
+			instance.currentPinnedID.Store(pid)
 		}
 	}
 
@@ -774,7 +780,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) processMembershipChange(ct
 		ci, err := instance.consumer.Info(ctx)
 		if err == nil { // ignoring error as the consumer may not exist yet
 			if slices.ContainsFunc(ci.PriorityGroups, func(pg jetstream.PriorityGroupState) bool {
-				return pg.Group == priorityGroupName && pg.PinnedClientID == instance.currentPinnedID
+				return pg.Group == priorityGroupName && pg.PinnedClientID == instance.currentPinnedID.Load()
 			}) {
 				isPinned = true
 			}

@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -38,7 +39,7 @@ type StaticConsumerGroupConsumerInstance struct {
 	MessageHandlerCB       func(msg jetstream.Msg)
 	consumerUserConfig     jetstream.ConsumerConfig // The user provided config
 	consumer               jetstream.Consumer
-	currentPinnedID        string
+	currentPinnedID        atomic.Value
 	consumerConsumeContext jetstream.ConsumeContext
 	js                     jetstream.JetStream
 	kv                     jetstream.KeyValue
@@ -371,7 +372,7 @@ func StaticMemberStepDown(ctx context.Context, js jetstream.JetStream, streamNam
 		return err
 	}
 
-	err = s.UnpinConsumer(ctx, composeStaticConsumerName(consumerGroupName, memberName), memberName)
+	err = s.UnpinConsumer(ctx, composeStaticConsumerName(consumerGroupName, memberName), priorityGroupName)
 	if err != nil {
 		log.Printf("Error trying to unpin the member's consumer: %v\n", err)
 		return err
@@ -387,11 +388,16 @@ func (instance *StaticConsumerGroupConsumerInstance) consumerCallback(msg jetstr
 		log.Println("Warning: received a message without a pinned-id header")
 		// TODO should we give up here and say there's a problem? (maybe running over a pre 2.11 version of the server?)
 	} else {
-		if instance.currentPinnedID == "" {
-			instance.currentPinnedID = pid
-		} else if instance.currentPinnedID != pid {
+		currentPinnedIDVal := instance.currentPinnedID.Load()
+		currentPinnedID := ""
+
+		if currentPinnedIDVal != nil {
+			currentPinnedID = currentPinnedIDVal.(string)
+		}
+
+		if currentPinnedID == "" || currentPinnedID != pid {
 			// received a message with a different pinned-id header, assuming there was a change of pinned member
-			instance.currentPinnedID = pid
+			instance.currentPinnedID.Store(pid)
 		}
 	}
 
