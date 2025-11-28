@@ -388,15 +388,16 @@ func (instance *StaticConsumerGroupConsumerInstance) consumerCallback(msg jetstr
 		log.Println("Warning: received a message without a pinned-id header")
 		// TODO should we give up here and say there's a problem? (maybe running over a pre 2.11 version of the server?)
 	} else {
-		for swapped := false; !swapped; {
-			currentPinnedID := instance.currentPinnedID.Load()
+		currentPinnedIDVal := instance.currentPinnedID.Load()
+		currentPinnedID := ""
 
-			if currentPinnedID == "" || currentPinnedID != pid {
-				// received a message with a different pinned-id header, assuming there was a change of pinned member
-				swapped = instance.currentPinnedID.CompareAndSwap(currentPinnedID, pid)
-			} else {
-				break
-			}
+		if currentPinnedIDVal != nil {
+			currentPinnedID = currentPinnedIDVal.(string)
+		}
+
+		if currentPinnedID == "" || currentPinnedID != pid {
+			// received a message with a different pinned-id header, assuming there was a change of pinned member
+			instance.currentPinnedID.Store(pid)
 		}
 	}
 
