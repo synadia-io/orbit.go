@@ -23,14 +23,14 @@ func requireValidationError(t testing.TB, testConfig ElasticConsumerGroupConfig)
 func TestBaseFunctions(t *testing.T) {
 
 	partitions := uint(4)
+	partitioningFilters := []PartitioningFilter{{Filter: "foo.*.*.>", PartitioningWildcards: []int{1, 2}}}
 
 	testingC1 := ElasticConsumerGroupConfig{
-		MaxMembers:            partitions,
-		Members:               []string{"m1", "m2", "m3"},
-		Filter:                "foo.*.*.>",
-		PartitioningWildcards: []int{1, 2},
+		MaxMembers:          partitions,
+		Members:             []string{"m1", "m2", "m3"},
+		PartitioningFilters: partitioningFilters,
 	}
-	dest := getPartitioningTransformDest(testingC1)
+	dest := getPartitioningTransformDest(partitioningFilters[0], partitions)
 
 	if dest != fmt.Sprintf("{{Partition(%d,1,2)}}.foo.{{Wildcard(1)}}.{{Wildcard(2)}}.>", partitions) {
 		t.Fatalf("Expected dest to be {{Partition(%d,1,2)}}.foo.{{Wildcard(1)}}.{{Wildcard(2)}}.>, got %s", partitions, dest)
@@ -38,44 +38,43 @@ func TestBaseFunctions(t *testing.T) {
 
 	testingC1.MaxMembers = 6
 
-	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m1"), []string{"0.>", "1.>"}) {
-		t.Fatalf("Expected member 1 to have filters \"0.>\", \"1.>\" got %s", ElasticGetPartitionFilters(testingC1, "m1"))
+	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m1"), []string{"0.foo.*.*.>", "1.foo.*.*.>"}) {
+		t.Fatalf("Expected member 1 to have filters \"0.foo.*.*.>\", \"1.foo.*.*.>\" got %s", ElasticGetPartitionFilters(testingC1, "m1"))
 	}
-	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m2"), []string{"2.>", "3.>"}) {
-		t.Fatalf("Expected member 1 to have filters \"2.>\", \"3.>\" got %s", ElasticGetPartitionFilters(testingC1, "m2"))
+	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m2"), []string{"2.foo.*.*.>", "3.foo.*.*.>"}) {
+		t.Fatalf("Expected member 1 to have filters \"2.foo.*.*.>\", \"3.foo.*.*.>\" got %s", ElasticGetPartitionFilters(testingC1, "m2"))
 	}
-	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m3"), []string{"4.>", "5.>"}) {
-		t.Fatalf("Expected member 1 to have filters \"4.>\", \"5.>\" got %s", ElasticGetPartitionFilters(testingC1, "m3"))
+	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m3"), []string{"4.foo.*.*.>", "5.foo.*.*.>"}) {
+		t.Fatalf("Expected member 1 to have filters \"4.foo.*.*.>\", \"5.foo.*.*.>\" got %s", ElasticGetPartitionFilters(testingC1, "m3"))
 	}
 
 	testingC1.MaxMembers = 7
 
-	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m1"), []string{"0.>", "1.>", "6.>"}) {
-		t.Fatalf("Expected member 1 to have filters \"0.>\", \"1.>\", \"6.>\" got %s", ElasticGetPartitionFilters(testingC1, "m1"))
+	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m1"), []string{"0.foo.*.*.>", "1.foo.*.*.>", "6.foo.*.*.>"}) {
+		t.Fatalf("Expected member 1 to have filters \"0.foo.*.*.>\", \"1.foo.*.*.>\", \"6.>\" got %s", ElasticGetPartitionFilters(testingC1, "m1"))
 	}
-	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m2"), []string{"2.>", "3.>"}) {
-		t.Fatalf("Expected member 1 to have filters \"2.>\", \"3.>\" got %s", ElasticGetPartitionFilters(testingC1, "m2"))
+	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m2"), []string{"2.foo.*.*.>", "3.foo.*.*.>"}) {
+		t.Fatalf("Expected member 1 to have filters \"2.foo.*.*.>\", \"3.foo.*.*.>\" got %s", ElasticGetPartitionFilters(testingC1, "m2"))
 	}
-	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m3"), []string{"4.>", "5.>"}) {
-		t.Fatalf("Expected member 1 to have filters \"4.>\", \"5.>\" got %s", ElasticGetPartitionFilters(testingC1, "m3"))
+	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m3"), []string{"4.foo.*.*.>", "5.foo.*.*.>"}) {
+		t.Fatalf("Expected member 1 to have filters \"4.foo.*.*.>\", \"5.foo.*.*.>\" got %s", ElasticGetPartitionFilters(testingC1, "m3"))
 	}
 
 	testingC1.MaxMembers = 8
 
-	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m1"), []string{"0.>", "1.>", "6.>"}) {
-		t.Fatalf("Expected member 1 to have filters \"0.>\", \"1.>\", \"6.>\" got %s", ElasticGetPartitionFilters(testingC1, "m1"))
+	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m1"), []string{"0.foo.*.*.>", "1.foo.*.*.>", "6.foo.*.*.>"}) {
+		t.Fatalf("Expected member 1 to have filters \"0.foo.*.*.>\", \"1.foo.*.*.>\", \"6.foo.*.*.>\" got %s", ElasticGetPartitionFilters(testingC1, "m1"))
 	}
-	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m2"), []string{"2.>", "3.>", "7.>"}) {
-		t.Fatalf("Expected member 1 to have filters \"2.>\", \"3.>\", \"7.>\" got %s", ElasticGetPartitionFilters(testingC1, "m2"))
+	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m2"), []string{"2.foo.*.*.>", "3.foo.*.*.>", "7.foo.*.*.>"}) {
+		t.Fatalf("Expected member 1 to have filters \"2.foo.*.*.>\", \"3.foo.*.*.>\", \"7.foo.*.*.>\" got %s", ElasticGetPartitionFilters(testingC1, "m2"))
 	}
-	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m3"), []string{"4.>", "5.>"}) {
-		t.Fatalf("Expected member 1 to have filters \"4.>\", \"5.>\" got %s", ElasticGetPartitionFilters(testingC1, "m3"))
+	if !reflect.DeepEqual(ElasticGetPartitionFilters(testingC1, "m3"), []string{"4.foo.*.*.>", "5.foo.*.*.>"}) {
+		t.Fatalf("Expected member 1 to have filters \"4.foo.*.*.>\", \"5.foo.*.*.>\" got %s", ElasticGetPartitionFilters(testingC1, "m3"))
 	}
 
 	testConfig := ElasticConsumerGroupConfig{
-		MaxMembers:            2,
-		Filter:                "foo.*",
-		PartitioningWildcards: []int{1},
+		MaxMembers:          2,
+		PartitioningFilters: []PartitioningFilter{{Filter: "foo.*", PartitioningWildcards: []int{1}}},
 	}
 
 	testConfig.Members = []string{"m1", "m2"}

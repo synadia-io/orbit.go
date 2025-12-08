@@ -58,8 +58,8 @@ func newConsumerGroupMsg(msg jetstream.Msg) *ConsumerGroupMsg {
 	return &ConsumerGroupMsg{msg: msg}
 }
 
-// GeneratePartitionFilters generates the partition filters for a particular member of a consumer group, according to the provided max number of members and the membership
-func GeneratePartitionFilters(members []string, maxMembers uint, memberMappings []MemberMapping, memberName string) []string {
+// GeneratePartitionFilters generates the partition filters for a particular member of a consumer group, according to the provided max number of members, filter and the membership
+func GeneratePartitionFilters(members []string, maxMembers uint, memberMappings []MemberMapping, memberName string, filter string) []string {
 	if len(members) != 0 {
 		members := deduplicateStringSlice(members)
 		slices.Sort(members)
@@ -82,12 +82,12 @@ func GeneratePartitionFilters(members []string, maxMembers uint, memberMappings 
 
 				if i < (numMembers * numPer) {
 					if members[memberIndex%numMembers] == memberName {
-						myFilters = append(myFilters, fmt.Sprintf("%d.>", i))
+						myFilters = append(myFilters, fmt.Sprintf("%d.%s", i, filter))
 					}
 				} else {
 					// remainder if the number of partitions is not a multiple of the number of members
 					if members[(i-(numMembers*numPer))%numMembers] == memberName {
-						myFilters = append(myFilters, fmt.Sprintf("%d.>", i))
+						myFilters = append(myFilters, fmt.Sprintf("%d.%s", i, filter))
 					}
 				}
 			}

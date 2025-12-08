@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/choria-io/fisk"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/synadia-io/orbit.go/natscontext"
 	"github.com/synadia-io/orbit.go/pcgroups"
@@ -37,12 +38,11 @@ type cgStruct struct {
 	memberName             string
 	memberNames            []string
 	memberMappingArgs      []string
+	filters                []string
 	processingDuration     time.Duration
-	filter                 string
 	maxMembers             uint
 	maxBufferedMsgs        int64
 	maxBufferedBytes       int64
-	pwcis                  []int // partitioning wildcard indexes
 	consuming              bool
 	myConsumeContextCancel context.CancelFunc
 	natsContext            string
@@ -105,13 +105,13 @@ func (cg *cgStruct) infoStaticAction(_ *fisk.ParseContext) error {
 	if err != nil {
 		return err
 	} else {
-		fmt.Printf("config: max members=%d, filter=%s\n", config.MaxMembers, config.Filter)
+		fmt.Printf("config: max members=%d, filters=%v\n", config.MaxMembers, config.Filters)
 		if len(config.Members) != 0 {
 			fmt.Printf("members: %+v\n", config.Members)
 		} else if len(config.MemberMappings) != 0 {
 			fmt.Printf("Member mappings: %+v\n", config.MemberMappings)
 		} else {
-			fmt.Printf("no members or mappings defined\n")
+			fmt.Println("no members or mappings defined")
 		}
 		activeMembers, err := pcgroups.ListStaticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 		if err != nil {
@@ -129,13 +129,15 @@ func (cg *cgStruct) infoElasticAction(_ *fisk.ParseContext) error {
 	if err != nil {
 		return err
 	} else {
-		fmt.Printf("config: max members=%d, filter=%s, partitioning wildcards %+v\n", config.MaxMembers, config.Filter, config.PartitioningWildcards)
+		for _, pf := range config.PartitioningFilters {
+			fmt.Printf("config: max members=%d, filter=%s, partitioning wildcards %+v\n", config.MaxMembers, pf.Filter, pf.PartitioningWildcards)
+		}
 		if len(config.Members) != 0 {
 			fmt.Printf("members: %+v\n", config.Members)
 		} else if len(config.MemberMappings) != 0 {
 			fmt.Printf("Member mappings: %+v\n", config.MemberMappings)
 		} else {
-			fmt.Printf("no members or mappings defined\n")
+			fmt.Println("no members or mappings defined")
 		}
 		activeMembers, err := pcgroups.ListElasticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 		if err != nil {
@@ -174,8 +176,7 @@ func (cg *cgStruct) dropElasticAction(_ *fisk.ParseContext) error {
 
 func (cg *cgStruct) createStaticBalancedAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
-
-	_, err := pcgroups.CreateStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.memberNames, []pcgroups.MemberMapping{})
+	_, err := pcgroups.CreateStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filters, cg.memberNames, []pcgroups.MemberMapping{})
 	if err != nil {
 		return err
 	}
@@ -187,7 +188,21 @@ func (cg *cgStruct) createStaticMappedAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 	memberMappings, _ := parseMemberMappings(cg.memberMappingArgs)
 
-	_, err := pcgroups.CreateStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, []string{}, memberMappings)
+	if len(memberMappings) == 0 {
+		return errors.New("no valid member mappings provided")
+	}
+
+	_, err := pcgroups.CreateStatic(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filters, cg.memberNames, memberMappings)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (cg *cgStruct) createElastic(pfs []pcgroups.PartitioningFilter) error {
+	myContext := context.Background()
+	_, err := pcgroups.CreateElastic(myContext, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, pfs, cg.maxBufferedMsgs, cg.maxBufferedBytes)
 	if err != nil {
 		return err
 	}
@@ -196,14 +211,58 @@ func (cg *cgStruct) createStaticMappedAction(_ *fisk.ParseContext) error {
 }
 
 func (cg *cgStruct) createElasticAction(_ *fisk.ParseContext) error {
-	myContext := context.Background()
+	var pfs []pcgroups.PartitioningFilter
+	r := bufio.NewReader(os.Stdin)
 
-	_, err := pcgroups.CreateElastic(myContext, cg.js, cg.streamName, cg.consumerGroupName, cg.maxMembers, cg.filter, cg.pwcis, cg.maxBufferedMsgs, cg.maxBufferedBytes)
-	if err != nil {
-		return err
+	if len(cg.filters) == 0 {
+		for done := false; !done; {
+			var filter string
+
+			fmt.Print("filter (empty when done): ")
+			_, _ = fmt.Scanln(&filter)
+
+			if filter != "" {
+				fmt.Print("space separated partitioning wildcard indexes: ")
+				pwciInput, _ := r.ReadString('\n')
+				pwciInput = strings.TrimSpace(pwciInput)
+				pwciArgs := strings.Split(pwciInput, " ")
+
+				pwcis := make([]int, len(pwciArgs))
+
+				for i, pwci := range pwciArgs {
+					var err error
+					pwcis[i], err = strconv.Atoi(pwci)
+					if err != nil {
+						fmt.Printf("can't parse partition %s: %v\n", pwci, err)
+						break
+					}
+				}
+
+				pfs = append(pfs, pcgroups.PartitioningFilter{Filter: filter, PartitioningWildcards: pwcis})
+			} else {
+				done = true
+			}
+		}
+	} else {
+		for _, filter := range cg.filters {
+			fmt.Print("space separated partitioning wildcard indexes for filter " + filter + ": ")
+			pwciInput, _ := r.ReadString('\n')
+			pwciInput = strings.TrimSpace(pwciInput)
+			pwciArgs := strings.Split(pwciInput, " ")
+			pwcis := make([]int, len(pwciArgs))
+			for i, pwci := range pwciArgs {
+				var err error
+				pwcis[i], err = strconv.Atoi(pwci)
+				if err != nil {
+					fmt.Printf("can't parse partition %s: %v\n", pwci, err)
+					break
+				}
+			}
+			pfs = append(pfs, pcgroups.PartitioningFilter{Filter: filter, PartitioningWildcards: pwcis})
+		}
 	}
 
-	return nil
+	return cg.createElastic(pfs)
 }
 
 func (cg *cgStruct) deleteStaticAction(_ *fisk.ParseContext) error {
@@ -395,7 +454,14 @@ func messageHandler(processingTime time.Duration) func(msg jetstream.Msg) {
 		ctx := context.Background()
 		err = msg.DoubleAck(ctx)
 		if err != nil {
-			log.Printf("message could not be acked! (it will be or may already have been re-delivered): %+v\n", err)
+			//
+			if errors.Is(err, nats.ErrNoResponders) {
+				// this is very likely to happen during a membership change
+				log.Printf("message seq %d can not be acknowledged (most likely because of a membership or pinned id change) it will be or may already have been re-delivered: %+v\n", seqNumber, err)
+			} else {
+				// unexpected error, the message will or may already be re-delivered
+				log.Printf("message seq %d can not be acknowledged!: %+v\n", seqNumber, err)
+			}
 		} else {
 			log.Printf("acked\n")
 		}
@@ -454,14 +520,14 @@ func main() {
 	staticCreateBalancedCommand := staticCreateCommand.Command("balanced", "create a static partitioned consumer group with balanced members").Action(cg.createStaticBalancedAction)
 	addCommonArgs(staticCreateBalancedCommand)
 	staticCreateBalancedCommand.Arg("max-members", "max number of members").Required().UintVar(&cg.maxMembers)
-	staticCreateBalancedCommand.Arg("filter", "filter").Required().StringVar(&cg.filter)
 	staticCreateBalancedCommand.Arg("members", "member names").Required().StringsVar(&cg.memberNames)
+	staticCreateBalancedCommand.Flag("filter", "filter(s)").Default().StringsVar(&cg.filters)
 
 	staticCreateMappedCommand := staticCreateCommand.Command("mapped", "create a static partitioned consumer group with member mappings").Action(cg.createStaticMappedAction)
 	addCommonArgs(staticCreateMappedCommand)
 	staticCreateMappedCommand.Arg("max-members", "max number of members").Required().UintVar(&cg.maxMembers)
-	staticCreateMappedCommand.Arg("filter", "filter").Required().StringVar(&cg.filter)
 	staticCreateMappedCommand.Arg("mappings", "mappings of members to partition numbers in the format <member>:<partition1>,<partition2>,...").Required().StringsVar(&cg.memberMappingArgs)
+	staticCreateMappedCommand.Flag("filter", "filter(s)").Default().StringsVar(&cg.filters)
 
 	staticDeleteCommand := staticCommand.Command("delete", "delete a static partitioned consumer group").Alias("rm").Action(cg.deleteStaticAction)
 	addCommonArgs(staticDeleteCommand)
@@ -493,8 +559,7 @@ func main() {
 	elasticCreateCommand := elasticCommand.Command("create", "create an elastic partitioned consumer group").Action(cg.createElasticAction)
 	addCommonArgs(elasticCreateCommand)
 	elasticCreateCommand.Arg("max-members", "max number of members").Required().UintVar(&cg.maxMembers)
-	elasticCreateCommand.Arg("filter", "filter").Required().StringVar(&cg.filter)
-	elasticCreateCommand.Arg("partitioning wildcard indexes", "list of partitioning wildcard indexes").Required().IntsVar(&cg.pwcis)
+	elasticCreateCommand.Flag("filter", "filter(s)").Default().StringsVar(&cg.filters)
 	elasticCreateCommand.Flag("max-buffered-msgs", "max number of buffered messages").Default("0").Int64Var(&cg.maxBufferedMsgs)
 	elasticCreateCommand.Flag("max-buffered-bytes", "max number of buffered bytes").Default("0").Int64Var(&cg.maxBufferedBytes)
 
@@ -557,7 +622,7 @@ func main() {
 		if err != nil {
 			log.Printf("instanced returned with an error: %v\n", err)
 		} else {
-			log.Printf("instanced returned with no error\n")
+			log.Println("instanced returned with no error")
 		}
 	}
 
@@ -682,7 +747,7 @@ func prompt() {
 			err = cg.addElasticAction(nil)
 
 			if err != nil {
-				fmt.Printf("can't add members: %v", err)
+				fmt.Printf("can't add members: %v\n", err)
 			}
 		case "drop":
 			var memberNameInput string
@@ -711,7 +776,7 @@ func prompt() {
 			err = cg.dropElasticAction(nil)
 
 			if err != nil {
-				fmt.Printf("can't drop members: %v", err)
+				fmt.Printf("can't drop members: %v\n", err)
 			}
 		case "createmapping", "create-mapping", "cm":
 			var err error
@@ -729,14 +794,14 @@ func prompt() {
 			memberMappingsArgs := inputMemberMappings()
 			memberMappings, err := parseMemberMappings(memberMappingsArgs)
 			if err != nil {
-				fmt.Printf("can't parse member mappings: %v", err)
+				fmt.Printf("can't parse member mappings: %v\n", err)
 				break
 			}
 
 			err = cg.createElasticMappingAction(nil)
 
 			if err != nil {
-				fmt.Printf("can't set member mappings: %v", err)
+				fmt.Printf("can't set member mappings: %v\n", err)
 			} else {
 				fmt.Printf("member mappings set: %+v\n", memberMappings)
 			}
@@ -762,9 +827,9 @@ func prompt() {
 			ctx := context.Background()
 			err = pcgroups.DeleteMemberMappings(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 			if err != nil {
-				fmt.Printf("can't delete member mappings: %v", err)
+				fmt.Printf("can't delete member mappings: %v\n", err)
 			} else {
-				fmt.Printf("member mappings deleted")
+				fmt.Println("member mappings deleted")
 			}
 
 		case "create":
@@ -774,8 +839,6 @@ func prompt() {
 			_, _ = fmt.Scanln(&cg.consumerGroupName)
 			fmt.Print("max members: ")
 			_, _ = fmt.Scanf("%d", &cg.maxMembers)
-			fmt.Print("filter: ")
-			_, _ = fmt.Scanln(&cg.filter)
 			if cg.consumerStatic {
 				fmt.Print("space separated set of members (hit return to set member mappings instead): ")
 				memberNameInput, _ := r.ReadString('\n')
@@ -786,7 +849,7 @@ func prompt() {
 					fmt.Println("enter the member mappings")
 					cg.memberMappingArgs = inputMemberMappings()
 					if len(cg.memberMappingArgs) == 0 {
-						fmt.Printf("member mappings not defined, can't create the paritioned consumer group")
+						fmt.Println("member mappings not defined, can't create the paritioned consumer group")
 						break
 					}
 
@@ -807,33 +870,50 @@ func prompt() {
 					}
 				}
 			} else { // Elastic
-				fmt.Print("space separated partitioning wildcard indexes: ")
-				pwciInput, _ := r.ReadString('\n')
-				pwciInput = strings.TrimSpace(pwciInput)
-				pwciArgs := strings.Split(pwciInput, " ")
+				var pfs []pcgroups.PartitioningFilter
+
+				for done := false; !done; {
+					var filter string
+
+					fmt.Print("filter (empty when done): ")
+					_, _ = fmt.Scanln(&filter)
+
+					if filter != "" {
+						fmt.Print("space separated partitioning wildcard indexes: ")
+						pwciInput, _ := r.ReadString('\n')
+						pwciInput = strings.TrimSpace(pwciInput)
+						pwciArgs := strings.Split(pwciInput, " ")
+
+						pwcis := make([]int, len(pwciArgs))
+
+						for i, pwci := range pwciArgs {
+							var err error
+							pwcis[i], err = strconv.Atoi(pwci)
+							if err != nil {
+								fmt.Printf("can't parse partition %s: %v\n", pwci, err)
+								break
+							}
+						}
+
+						pfs = append(pfs, pcgroups.PartitioningFilter{Filter: filter, PartitioningWildcards: pwcis})
+					} else {
+						done = true
+					}
+				}
+
 				fmt.Print("max buffered messages (0 for no limit): ")
 				_, _ = fmt.Scanf("%d", &cg.maxBufferedMsgs)
 				fmt.Print("max buffered bytes (0 for no limit): ")
 				_, _ = fmt.Scanf("%d", &cg.maxBufferedBytes)
 
-				cg.pwcis = make([]int, len(pwciArgs))
-
-				for i, pwci := range pwciArgs {
-					var err error
-					cg.pwcis[i], err = strconv.Atoi(pwci)
-					if err != nil {
-						fmt.Printf("can't parse partition %s: %v", pwci, err)
-						break
-					}
-				}
-
-				err := cg.createElasticAction(nil)
+				err := cg.createElastic(pfs)
 				if err != nil {
-					fmt.Printf("can't create elastic partitioned consumer group: %v", err)
+					fmt.Printf("can't create elastic partitioned consumer group: %v\n", err)
 					break
 				} else {
 					fmt.Println("elastic partitioned consumer group created")
 				}
+
 			}
 		case "delete", "rm":
 			if len(args) != 2 {
@@ -853,7 +933,7 @@ func prompt() {
 				err = cg.deleteElasticAction(nil)
 			}
 			if err != nil {
-				fmt.Printf("can't delete paritioned consumer group: %v", err)
+				fmt.Printf("can't delete paritioned consumer group: %v\n", err)
 			}
 		case "info":
 			if len(args) != 2 {
@@ -869,12 +949,12 @@ func prompt() {
 			if cg.consumerStatic {
 				err = cg.infoStaticAction(nil)
 				if err != nil {
-					fmt.Printf("can't get static partitioned consumer group config: %v", err)
+					fmt.Printf("can't get static partitioned consumer group config: %v\n", err)
 				}
 			} else {
 				err = cg.infoElasticAction(nil)
 				if err != nil {
-					fmt.Printf("can't get elastic partitioned consumer group config: %v", err)
+					fmt.Printf("can't get elastic partitioned consumer group config: %v\n", err)
 				}
 			}
 		case "memberinfo", "member-info", "minfo":
@@ -897,7 +977,7 @@ func prompt() {
 				err = cg.memberElasticInfoAction(nil)
 			}
 			if err != nil {
-				fmt.Printf("can't get partitioned consumer group member info: %v", err)
+				fmt.Printf("can't get partitioned consumer group member info: %v\n", err)
 			}
 		case "stepdown", "step-down", "sd":
 
@@ -921,9 +1001,9 @@ func prompt() {
 				err = cg.stepDownElasticAction(nil)
 			}
 			if err != nil {
-				fmt.Printf("can't step down member: %v", err)
+				fmt.Printf("can't step down member: %v\n", err)
 			} else {
-				fmt.Printf("member %s step down initiated", cg.memberName)
+				fmt.Printf("member %s step down initiated\n", cg.memberName)
 			}
 		case "consume", "join":
 			if cg.consuming {
@@ -950,6 +1030,7 @@ func prompt() {
 				break
 			}
 
+			fmt.Printf("consuming from group %s as member %s\n", cg.consumerGroupName, cg.memberName)
 			myContext := context.Background()
 			err = cg.consume(myContext, cg.streamName, cg.consumerGroupName, cg.memberName, messageHandler(cg.processingDuration), 1)
 			if err != nil {
@@ -963,7 +1044,7 @@ func prompt() {
 			if err != nil {
 				log.Printf("instanced returned with an error: %v\n", err)
 			} else {
-				log.Printf("instanced returned with no error\n")
+				log.Println("instanced returned with no error")
 			}
 			cg.consuming = false
 		case "":

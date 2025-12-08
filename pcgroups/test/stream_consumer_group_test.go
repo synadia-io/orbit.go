@@ -16,6 +16,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,7 +28,9 @@ import (
 func TestStatic(t *testing.T) {
 	streamName := "test"
 	cgName := "group"
-	var c1, c2 int
+	var c1, c2 atomic.Uint32
+	c1.Store(0)
+	c2.Store(0)
 
 	server := RunBasicJetStreamServer()
 	defer shutdownJSServerAndRemoveStorage(t, server)
@@ -43,13 +46,23 @@ func TestStatic(t *testing.T) {
 
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
 		Name:     streamName,
-		Subjects: []string{"bar.*"},
+		Subjects: []string{"foo.*", "bar.*", "bad.*"},
 		SubjectTransform: &jetstream.SubjectTransformConfig{
-			Source:      "bar.*",
-			Destination: "{{partition(2,1)}}.bar.{{wildcard(1)}}",
+			Source:      "*.*",
+			Destination: "{{partition(2,2)}}.{{wildcard(1)}}.{{wildcard(2)}}",
 		},
 	})
 	require_NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish(ctx, fmt.Sprintf("foo.%d", i), []byte("payload"))
+		require_NoError(t, err)
+	}
+
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish(ctx, fmt.Sprintf("bad.%d", i), []byte("payload"))
+		require_NoError(t, err)
+	}
 
 	for i := 0; i < 10; i++ {
 		_, err = js.Publish(ctx, fmt.Sprintf("bar.%d", i), []byte("payload"))
@@ -62,19 +75,19 @@ func TestStatic(t *testing.T) {
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	}
 
-	_, err = pcgroups.CreateStatic(ctx, js, streamName, cgName, 2, "bar.*", []string{"m1", "m2"}, []pcgroups.MemberMapping{})
+	_, err = pcgroups.CreateStatic(ctx, js, streamName, cgName, 2, []string{"foo.*", "bar.*"}, []string{"m1", "m2"}, []pcgroups.MemberMapping{})
 	require_NoError(t, err)
 
 	sc1 := func() {
 		pcgroups.StaticConsume(ctx, js, streamName, cgName, "m1", func(msg jetstream.Msg) {
-			c1++
+			c1.Add(1)
 			msg.Ack()
 		}, config)
 	}
 
 	sc2 := func() {
 		pcgroups.StaticConsume(ctx, js, streamName, cgName, "m2", func(msg jetstream.Msg) {
-			c2++
+			c2.Add(1)
 			msg.Ack()
 		}, config)
 	}
@@ -84,12 +97,14 @@ func TestStatic(t *testing.T) {
 
 	now := time.Now()
 	for {
-		if c1+c2 == 10 {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(1000 * time.Millisecond)
 		if time.Since(now) > 5*time.Second {
 			t.Fatalf("timeout")
+		}
+
+		// this happens to hash to 10 for each member (may break if the partitioning algorithm changes
+		if c1.Load() == 10 && c2.Load() == 10 {
+			break
 		}
 	}
 
@@ -100,7 +115,9 @@ func TestStatic(t *testing.T) {
 func TestElastic(t *testing.T) {
 	var streamName = "test"
 	var cgName = "group"
-	var c1, c2 int
+	var c1, c2 atomic.Uint32
+	c1.Store(0)
+	c2.Store(0)
 
 	server := RunBasicJetStreamServer()
 	defer shutdownJSServerAndRemoveStorage(t, server)
@@ -116,9 +133,21 @@ func TestElastic(t *testing.T) {
 
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
 		Name:     streamName,
-		Subjects: []string{"bar.*"},
+		Subjects: []string{"foo.*", "bar.*", "bad.*"},
 	})
 	require_NoError(t, err)
+
+	time.Sleep(100 * time.Millisecond)
+
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish(ctx, fmt.Sprintf("foo.%d", i), []byte("payload"))
+		require_NoError(t, err)
+	}
+
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish(ctx, fmt.Sprintf("bad.%d", i), []byte("payload"))
+		require_NoError(t, err)
+	}
 
 	for i := 0; i < 10; i++ {
 		_, err = js.Publish(ctx, fmt.Sprintf("bar.%d", i), []byte("payload"))
@@ -131,19 +160,19 @@ func TestElastic(t *testing.T) {
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	}
 
-	_, err = pcgroups.CreateElastic(ctx, js, streamName, cgName, 2, "bar.*", []int{1}, -1, -1)
+	_, err = pcgroups.CreateElastic(ctx, js, streamName, cgName, 2, []pcgroups.PartitioningFilter{{Filter: "foo.*", PartitioningWildcards: []int{1}}, {Filter: "bar.*", PartitioningWildcards: []int{1}}}, -1, -1)
 	require_NoError(t, err)
 
 	ec1 := func() {
 		pcgroups.ElasticConsume(ctx, js, streamName, cgName, "m1", func(msg jetstream.Msg) {
-			c1++
+			c1.Add(1)
 			msg.Ack()
 		}, config)
 	}
 
 	ec2 := func() {
 		pcgroups.ElasticConsume(ctx, js, streamName, cgName, "m2", func(msg jetstream.Msg) {
-			c2++
+			c2.Add(1)
 			msg.Ack()
 		}, config)
 	}
@@ -156,15 +185,15 @@ func TestElastic(t *testing.T) {
 
 	now := time.Now()
 	for {
-		if c1 == 10 && c2 == 0 {
+		time.Sleep(100 * time.Millisecond)
+		if c1.Load() == 20 && c2.Load() == 0 {
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
-		if time.Since(now) > 5*time.Second {
+		if time.Since(now) > 6*time.Second {
 			t.Fatalf("timeout")
 		}
 	}
-	require_Equal(t, c1 == 10 && c2 == 0, true)
+	require_Equal(t, c1.Load() == 20 && c2.Load() == 0, true)
 
 	_, err = pcgroups.AddMembers(ctx, js, streamName, cgName, []string{"m2"})
 	require_NoError(t, err)
@@ -177,14 +206,24 @@ func TestElastic(t *testing.T) {
 		require_NoError(t, err)
 	}
 
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish(ctx, fmt.Sprintf("bad.%d", i), []byte("payload"))
+		require_NoError(t, err)
+	}
+
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish(ctx, fmt.Sprintf("foo.%d", i), []byte("payload"))
+		require_NoError(t, err)
+	}
+
 	now = time.Now()
 	for {
-		if c1 == 15 && c2 == 5 {
+		if c1.Load() == 30 && c2.Load() == 10 {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 		if time.Since(now) > 10*time.Second {
-			println(c1, c2)
+			println(c1.Load(), c2.Load())
 			t.Fatalf("timeout")
 		}
 	}
@@ -196,22 +235,35 @@ func TestElastic(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	for i := 0; i < 10; i++ {
+		_, err = js.Publish(ctx, fmt.Sprintf("bad.%d", i), []byte("payload"))
+		require_NoError(t, err)
+	}
+
+	for i := 0; i < 10; i++ {
 		_, err = js.Publish(ctx, fmt.Sprintf("bar.%d", i), []byte("payload"))
+		require_NoError(t, err)
+	}
+
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish(ctx, fmt.Sprintf("foo.%d", i), []byte("payload"))
 		require_NoError(t, err)
 	}
 
 	now = time.Now()
 	for {
-		if c1 == 15 && c2 == 15 {
+		if c1.Load() == 30 && c2.Load() == 30 {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 		if time.Since(now) > 10*time.Second {
-			println(c1, c2)
+			println(c1.Load(), c2.Load())
 			t.Fatalf("timeout")
 		}
 	}
 
 	err = pcgroups.DeleteElastic(ctx, js, streamName, cgName)
+	require_NoError(t, err)
+
+	err = js.DeleteStream(ctx, streamName)
 	require_NoError(t, err)
 }

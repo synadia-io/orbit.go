@@ -51,7 +51,7 @@ type StaticConsumerGroupConsumerInstance struct {
 // StaticConsumerGroupConfig is the configuration for a static consumer group
 type StaticConsumerGroupConfig struct {
 	MaxMembers     uint            `json:"max_members"`               // The maximum number of members the consumer group can have, i.e. the number of partitions
-	Filter         string          `json:"filter"`                    // Optional filter
+	Filters        []string        `json:"filters,omitempty"`         // Optional filters
 	Members        []string        `json:"members,omitempty"`         // The list of members in the consumer group (automatically mapped to partitions)
 	MemberMappings []MemberMapping `json:"member_mappings,omitempty"` // Or the member mappings, which is a list of member names and the partitions that are assigned to them
 }
@@ -177,7 +177,7 @@ func (instance *StaticConsumerGroupConsumerInstance) instanceRoutine(ctx context
 					}
 
 					if newConfig.MaxMembers != instance.Config.MaxMembers ||
-						newConfig.Filter != instance.Config.Filter ||
+						!slices.Equal(newConfig.Filters, instance.Config.Filters) ||
 						!reflect.DeepEqual(newConfig.Members, instance.Config.Members) || !reflect.DeepEqual(newConfig.MemberMappings, instance.Config.MemberMappings) {
 						instance.stopAndDeleteMemberConsumer()
 						instance.doneChan <- errors.New(" static consumer group config watcher received a change in the configuration, terminating")
@@ -195,10 +195,10 @@ func (instance *StaticConsumerGroupConsumerInstance) instanceRoutine(ctx context
 }
 
 // CreateStatic creates a static consumer group
-func CreateStatic(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, maxNumMembers uint, filter string, members []string, memberMappings []MemberMapping) (*StaticConsumerGroupConfig, error) {
+func CreateStatic(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, maxNumMembers uint, filters []string, members []string, memberMappings []MemberMapping) (*StaticConsumerGroupConfig, error) {
 	config := StaticConsumerGroupConfig{
 		MaxMembers:     maxNumMembers,
-		Filter:         filter,
+		Filters:        filters,
 		Members:        members,
 		MemberMappings: memberMappings,
 	}
@@ -254,7 +254,7 @@ func CreateStatic(ctx context.Context, js jetstream.JetStream, streamName string
 			return nil, fmt.Errorf("static consumer group config already exists and is not valid JSON: %w", err)
 		}
 
-		if cgConfig.MaxMembers != maxNumMembers || cgConfig.Filter != filter || !slices.Equal(cgConfig.Members, members) || !reflect.DeepEqual(cgConfig.MemberMappings, memberMappings) {
+		if cgConfig.MaxMembers != maxNumMembers || !slices.Equal(cgConfig.Filters, filters) || !slices.Equal(cgConfig.Members, members) || !reflect.DeepEqual(cgConfig.MemberMappings, memberMappings) {
 			return nil, errors.New("the existing static consumer group config doesn't match ours")
 		}
 	}
@@ -407,9 +407,16 @@ func (instance *StaticConsumerGroupConsumerInstance) consumerCallback(msg jetstr
 
 // CreateStatic attempts to create the member's consumer if the member is in the current list of members and if successful, starts consuming messages from it
 func (instance *StaticConsumerGroupConsumerInstance) joinMemberConsumerStatic(ctx context.Context) error {
+	var filters []string
 	var err error
 
-	filters := GeneratePartitionFilters(instance.Config.Members, instance.Config.MaxMembers, instance.Config.MemberMappings, instance.MemberName)
+	if len(instance.Config.Filters) > 0 {
+		for _, f := range instance.Config.Filters {
+			filters = append(filters, GeneratePartitionFilters(instance.Config.Members, instance.Config.MaxMembers, instance.Config.MemberMappings, instance.MemberName, f)...)
+		}
+	} else {
+		filters = GeneratePartitionFilters(instance.Config.Members, instance.Config.MaxMembers, instance.Config.MemberMappings, instance.MemberName, ">")
+	}
 
 	if len(filters) == 0 {
 		return nil
@@ -518,7 +525,7 @@ func validateStaticConfig(config StaticConsumerGroupConfig) error {
 		}
 
 		if uniquePartitionNumbersCount != int(numActualPartitions) {
-			return errors.New("the number of unique partition numbers must be equal to the max number of members")
+			return errors.New("the number of unique partition numbers specified in the mappings must be equal to the max number of members")
 		}
 	}
 
