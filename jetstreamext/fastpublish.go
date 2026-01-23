@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"strconv"
 	"sync"
 	"time"
@@ -26,10 +25,10 @@ type (
 		// and no further messages can be added.
 		// If a gap is detected and continueOnGap is true, the batch will continue
 		// to accept messages, but the user will be notified via the error handler.
-		Add(subject string, data []byte, opts ...BatchMsgOpt) error
+		Add(subject string, data []byte, opts ...BatchMsgOpt) (*FastPubAck, error)
 
 		// AddMsg publishes a message to the batch.
-		AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error
+		AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck, error)
 
 		// Commit publishes the final message with the given subject and data,
 		// and commits the batch. Returns a BatchAck containing the acknowledgment
@@ -42,10 +41,7 @@ type (
 
 		// Close closes the batch, signalling the server that no more messages will be added.
 		// It sends an EOB commit to the server, without adding a message.
-		Close() (*BatchAck, error)
-
-		// Size returns the number of messages added to the batch so far.
-		Size() int
+		Close(ctx context.Context) (*BatchAck, error)
 
 		// IsClosed returns true if the batch has been committed or discarded.
 		IsClosed() bool
@@ -55,12 +51,12 @@ type (
 		// Flow is the initial flow control value (ack frequency by message count).
 		// Server may adjust this dynamically via BatchFlowAck responses.
 		// Default: 100
-		Flow int
+		Flow uint16
 
 		// MaxOutstandingAcks limits how many unacknowledged messages before stalling.
 		// When this limit is reached, Add/AddMsg will block until acks are received.
-		// Default: 10
-		MaxOutstandingAcks int
+		// Default: 2
+		MaxOutstandingAcks uint16
 
 		// AckTimeout is the timeout for waiting on acks.
 		// Default: JetStream context default timeout
@@ -68,19 +64,39 @@ type (
 	}
 
 	BatchFlowAck struct {
-		// LastSequence is the previously highest sequence seen, this is set when a gap is detected
-		LastSequence int `json:"last_seq,omitempty"`
-		// CurrentSequence is the sequence of the message that triggered the ack
-		CurrentSequence int `json:"seq,omitempty"`
-		// AckMessages indicates the active per-message frequency of Flow Acks
-		AckMessages int `json:"messages,omitempty"`
-		// AckBytes indicates the active per-bytes frequency of Flow Acks in unit of bytes
-		AckBytes int64 `json:"bytes,omitempty"`
+		// Type: "ack"
+		Type string `json:"type"`
+		// Sequence is the sequence of the message that triggered the ack.
+		// If "gap: fail" this means the messages up to and including Sequence were persisted.
+		// If "gap: ok" this means _some_ of the messages up to and including Sequence were persisted.
+		// But there could have been gaps.
+		Sequence uint64 `json:"seq"`
+		// AckMessages indicates acknowledgements will be sent every N messages.
+		Messages uint16 `json:"msgs"`
 	}
 
-	batchFlowAckResponse struct {
-		*BatchFlowAck
-		apiResponse
+	// BatchFlowGap is used for reporting gaps when fast batch publishing into a stream.
+	// This message is purely informational and could technically be lost without the client receiving it.
+	BatchFlowGap struct {
+		// Type: "gap"
+		Type string `json:"type"`
+		// ExpectedLastSequence is the sequence expected to be received next.
+		// Messages starting from ExpectedLastSequence up to (but not including) CurrentSequence were lost.
+		ExpectedLastSequence uint64 `json:"last_seq"`
+		// CurrentSequence is the sequence of the message that just came in and detected the gap.
+		CurrentSequence uint64 `json:"seq"`
+	}
+
+	// BatchFlowErr is used for reporting errors with "gap: ok" when fast batch publishing into a stream.
+	// This message is purely informational and could technically be lost without the client receiving it.
+	BatchFlowErr struct {
+		// Type: "err"
+		Type string `json:"type"`
+		// Sequence is the sequence of the message that triggered the error.
+		// There are no (relative) guarantees whatsoever about whether the messages up to this sequence were persisted.
+		Sequence uint64 `json:"seq"`
+		// Error is used for "gap:ok" to return the error for the Sequence.
+		Error *jetstream.APIError `json:"error"`
 	}
 
 	// FastPublisherOpt is a functional option for configuring a FastPublisher.
@@ -90,27 +106,29 @@ type (
 
 	fastPublisher struct {
 		js             jetstream.JetStream
-		flow           int
+		flow           uint16
 		ackInboxPrefix string
 		ackSub         *nats.Subscription
-		sequence       int
+		sequence       uint64
+		ackSequence    uint64
 		closed         bool
 		opts           fastPublisherOpts
 		stallCh        chan struct{}
 		commitCh       chan *batchAckResponse
-		firstAckCh     chan *batchFlowAckResponse
+		firstAckCh     chan *BatchFlowAck
+		initialErrCh   chan error
 		errHandler     FastPublishErrHandler
-		pendingAcks    map[int]struct{}
-		lastSubject    string
-		mu             sync.Mutex
+		// stored to use when closing batch (EOB commit)
+		batchSubject string
+		mu           sync.Mutex
 	}
 
 	FastPublishErrHandler func(error)
 
 	fastPublisherOpts struct {
 		continueOnGap      bool
-		flow               int
-		maxOutstandingAcks int
+		flow               uint16
+		maxOutstandingAcks uint16
 		ackTimeout         time.Duration
 		errHandler         FastPublishErrHandler
 	}
@@ -119,7 +137,7 @@ type (
 const (
 	// TODO: decide on defaults
 	defaultFastFlow           = 100
-	defaultMaxOutstandingAcks = 10
+	defaultMaxOutstandingAcks = 2
 )
 
 const (
@@ -152,25 +170,33 @@ func NewFastPublisher(js jetstream.JetStream, opts ...FastPublisherOpt) (FastPub
 		flow:           pubOpts.flow,
 		opts:           pubOpts,
 		errHandler:     pubOpts.errHandler,
-		commitCh:       make(chan *batchAckResponse, 1),
-		pendingAcks:    make(map[int]struct{}),
 	}, nil
 }
 
 // TODO: Should we use unique option type?
-func (fp *fastPublisher) Add(subject string, data []byte, opts ...BatchMsgOpt) error {
+func (fp *fastPublisher) Add(subject string, data []byte, opts ...BatchMsgOpt) (*FastPubAck, error) {
 	return fp.AddMsg(&nats.Msg{
 		Subject: subject,
 		Data:    data,
 	}, opts...)
 }
 
-func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
+type FastPubAck struct {
+	// BatchSequence is the sequence of this message within the current batch.
+	BatchSequence uint64
+	// AckSequence is the highest sequence within the current batch that has been acknowledged.
+	// This can be used by application code to release resources of the messages it might want to otherwise retry.
+	// If "gap: fail" is used this means all messages below and including this sequence were persisted.
+	// If "gap: ok" is used there's no guarantee that all messages were persisted.
+	AckSequence uint64
+}
+
+func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck, error) {
 	fp.mu.Lock()
 
 	if fp.closed {
 		fp.mu.Unlock()
-		return ErrBatchClosed
+		return nil, ErrBatchClosed
 	}
 
 	if msg.Header == nil {
@@ -182,7 +208,7 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	for _, opt := range opts {
 		if err := opt(&o); err != nil {
 			fp.mu.Unlock()
-			return err
+			return nil, err
 		}
 	}
 
@@ -204,7 +230,6 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	}
 
 	fp.sequence++
-	fp.lastSubject = msg.Subject
 	gap := "fail"
 	if fp.opts.continueOnGap {
 		gap = "ok"
@@ -220,17 +245,19 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 		ackSub, err := fp.js.Conn().Subscribe(fmt.Sprintf("%s.>", fp.ackInboxPrefix), fp.ackMsgHandler)
 		if err != nil {
 			fp.mu.Unlock()
-			return err
+			return nil, err
 		}
 		fp.ackSub = ackSub
 
 		// Create channel to receive first ack
-		firstAckCh := make(chan *batchFlowAckResponse, 1)
+		firstAckCh := make(chan *BatchFlowAck, 1)
 		fp.firstAckCh = firstAckCh
+		initialErrCh := make(chan error, 1)
+		fp.initialErrCh = initialErrCh
 
 		// Publish with reply inbox already set (without holding lock)
 		if err := fp.js.Conn().PublishMsg(msg); err != nil {
-			return fmt.Errorf("batch message %d publish failed: %w", fp.sequence, err)
+			return nil, fmt.Errorf("batch message %d publish failed: %w", fp.sequence, err)
 		}
 
 		// Release lock to enable ack handler to run
@@ -241,19 +268,22 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 			fp.mu.Lock()
 			defer fp.mu.Unlock()
 
-			if firstAck.Error != nil {
-				return fmt.Errorf("batch message %d ack error: %w", fp.sequence, firstAck.Error)
-			}
-			fp.flow = firstAck.AckMessages
-			return nil
+			fp.flow = firstAck.Messages
+			fp.batchSubject = msg.Subject
+			return &FastPubAck{
+				BatchSequence: fp.sequence,
+				AckSequence:   firstAck.Sequence,
+			}, nil
 
+		case err := <-fp.initialErrCh:
+			return nil, fmt.Errorf("batch message %d ack error: %w", fp.sequence, err)
 		case <-time.After(fp.opts.ackTimeout):
 			// Re-acquire lock to mark closed
 			fp.mu.Lock()
 			defer fp.mu.Unlock()
 
 			fp.closed = true
-			return fmt.Errorf("batch message %d ack timeout", fp.sequence)
+			return nil, fmt.Errorf("batch message %d ack timeout", fp.sequence)
 		}
 	}
 
@@ -261,30 +291,31 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	// if we exceed max outstanding acks, we stall until we get a flow ack.
 	defer fp.mu.Unlock()
 
-	if len(fp.pendingAcks) > fp.opts.maxOutstandingAcks {
+	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) < fp.sequence
+	if waitForAck {
+		var stallCh chan struct{}
 		if fp.stallCh == nil {
 			fp.stallCh = make(chan struct{}, 1)
+			stallCh = fp.stallCh
 		}
 		fp.mu.Unlock()
 		select {
-		case <-fp.stallCh:
+		case <-stallCh:
 		case <-time.After(fp.opts.ackTimeout):
 			fp.mu.Lock()
 			fp.closed = true
-			return fmt.Errorf("batch message %d ack timeout", fp.sequence)
+			return nil, fmt.Errorf("batch message %d ack timeout; current sequence: %d", fp.sequence, fp.ackSequence)
 		}
 		fp.mu.Lock()
 	}
 	if err := fp.js.Conn().PublishMsg(msg); err != nil {
-		return fmt.Errorf("batch message %d publish failed: %w", fp.sequence, err)
+		return nil, fmt.Errorf("batch message %d publish failed: %w", fp.sequence, err)
 	}
 
-	// Track pending acks for messages that will receive a flow ack
-	// Message 1 always gets an ack, then every flow-th message
-	if fp.sequence == 1 || fp.sequence%fp.flow == 0 {
-		fp.pendingAcks[fp.sequence] = struct{}{}
-	}
-	return nil
+	return &FastPubAck{
+		BatchSequence: fp.sequence,
+		AckSequence:   fp.ackSequence,
+	}, nil
 }
 
 func (fp *fastPublisher) Commit(ctx context.Context, subject string, data []byte, opts ...BatchMsgOpt) (*BatchAck, error) {
@@ -349,6 +380,9 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 	}
 	msg.Reply = fmt.Sprintf("%s.%d.%s.%d.%d.$FI", fp.ackInboxPrefix, fp.flow, gap, fp.sequence, operation)
 
+	if fp.commitCh == nil {
+		fp.commitCh = make(chan *batchAckResponse, 1)
+	}
 	if fp.ackSub == nil {
 		ackSub, err := fp.js.Conn().Subscribe(fp.ackInboxPrefix, fp.ackMsgHandler)
 		if err != nil {
@@ -357,13 +391,16 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 		}
 		fp.ackSub = ackSub
 	}
-	if len(fp.pendingAcks) >= fp.opts.maxOutstandingAcks {
+	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) < fp.sequence
+	if waitForAck {
+		var stallCh chan struct{}
 		if fp.stallCh == nil {
 			fp.stallCh = make(chan struct{}, 1)
+			stallCh = fp.stallCh
 		}
 		fp.mu.Unlock()
 		select {
-		case <-fp.stallCh:
+		case <-stallCh:
 		case <-time.After(fp.opts.ackTimeout):
 			fp.mu.Lock()
 			fp.closed = true
@@ -417,7 +454,7 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 	return batchAck, commitErr
 }
 
-func (fp *fastPublisher) Close() (*BatchAck, error) {
+func (fp *fastPublisher) Close(ctx context.Context) (*BatchAck, error) {
 	fp.mu.Lock()
 
 	if fp.sequence == 0 {
@@ -429,13 +466,7 @@ func (fp *fastPublisher) Close() (*BatchAck, error) {
 		return nil, ErrBatchClosed
 	}
 	fp.mu.Unlock()
-	return fp.commit(context.Background(), nats.NewMsg(fp.lastSubject), true)
-}
-
-func (fp *fastPublisher) Size() int {
-	fp.mu.Lock()
-	defer fp.mu.Unlock()
-	return fp.sequence
+	return fp.commit(ctx, nats.NewMsg(fp.batchSubject), true)
 }
 
 func (fp *fastPublisher) IsClosed() bool {
@@ -445,88 +476,82 @@ func (fp *fastPublisher) IsClosed() bool {
 }
 
 func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
 	var commitAck *batchAckResponse
-	var flowAck *batchFlowAckResponse
 	var respErr error
+	var flowAck *BatchFlowAck
+	var flowErr *BatchFlowErr
 
-	if bytes.Contains(msg.Data, []byte(`"batch":`)) {
-		// Has "batch" field, unmarshal as commit ack
-		if err := json.Unmarshal(msg.Data, &commitAck); err != nil {
+	switch {
+	case bytes.Contains(msg.Data, []byte(`"type":"gap"`)):
+		var gapErr *BatchFlowGap
+		if err := json.Unmarshal(msg.Data, &gapErr); err != nil {
 			respErr = err
+		} else {
+			if fp.errHandler != nil {
+				fp.errHandler(fmt.Errorf("%w: expected last sequence %d; current sequence %d", ErrFastBatchGapDetected, gapErr.ExpectedLastSequence, gapErr.CurrentSequence))
+			}
+			return
 		}
-	} else {
-		// No "batch" field, unmarshal as flow ack
+	case bytes.Contains(msg.Data, []byte(`"type":"ack"`)):
 		if err := json.Unmarshal(msg.Data, &flowAck); err != nil {
 			respErr = err
 		}
-	}
-
-	fp.mu.Lock()
-	defer fp.mu.Unlock()
-	if respErr != nil && fp.errHandler != nil {
-		fp.errHandler(respErr)
-		return
-	}
-
-	if commitAck != nil {
-		if commitAck.Error != nil {
-			fp.sendErr(commitAck.Error)
+		if respErr != nil && fp.errHandler != nil {
+			fp.errHandler(respErr)
 			return
 		}
 
-		fp.commitCh <- commitAck
-		fp.closed = true
-		return
-	}
-
-	if flowAck != nil {
-		if flowAck.Error != nil {
-			fp.sendErr(flowAck.Error)
-			return
-		}
-		fp.flow = flowAck.AckMessages
-		// Handle first message ack specially - firstAckCh is only set for first message
-		if fp.firstAckCh != nil {
-			fp.firstAckCh <- flowAck
-			close(fp.firstAckCh)
-			fp.firstAckCh = nil
-			return
-		}
-
-		// Clean up all pending acks up to and including the current sequence
-		maps.DeleteFunc(fp.pendingAcks, func(k int, _ struct{}) bool {
-			return k <= flowAck.CurrentSequence
-		})
-
-		if flowAck.LastSequence > 0 {
-			if !fp.opts.continueOnGap {
-				fp.sendErr(fmt.Errorf("%w: last sequence %d; current sequence %d", ErrFastBatchGapDetected, flowAck.LastSequence, flowAck.CurrentSequence))
+		if flowAck != nil {
+			fp.flow = flowAck.Messages
+			fp.ackSequence = flowAck.Sequence
+			// Handle first message ack specially - firstAckCh is only set for first message
+			if fp.firstAckCh != nil {
+				fp.firstAckCh <- flowAck
+				close(fp.firstAckCh)
+				fp.firstAckCh = nil
 				return
 			}
+
+			// Handle flow ack. We want to let the publisher know if we are no longer stalled
+			// and can continue publishing.
+			if fp.stallCh != nil {
+				// Unblock publisher if we were stalled and are now below the max outstanding acks
+				close(fp.stallCh)
+				fp.stallCh = nil
+			}
+		}
+	case bytes.Contains(msg.Data, []byte(`"type":"err"`)):
+		if err := json.Unmarshal(msg.Data, &flowErr); err != nil {
+			respErr = err
+		} else {
 			if fp.errHandler != nil {
-				fp.errHandler(fmt.Errorf("%w: last sequence %d; current sequence %d", ErrFastBatchGapDetected, flowAck.LastSequence, flowAck.CurrentSequence))
+				fp.errHandler(fmt.Errorf("Error processing batch at sequence %d: %w", flowErr.Sequence, flowErr.Error))
 			}
 			return
 		}
-		// Handle flow ack. We want to let the publisher know if we are no longer stalled
-		// and can continue publishing.
-		if fp.stallCh != nil && len(fp.pendingAcks) < fp.opts.maxOutstandingAcks {
-			// Unblock publisher if we were stalled and are now below the max outstanding acks
-			close(fp.stallCh)
-			fp.stallCh = nil
+	default:
+		// no type hint, thus unmarshal as commit ack
+		// this always means end of batch
+		if err := json.Unmarshal(msg.Data, &commitAck); err != nil {
+			respErr = err
 		}
-	}
-}
-
-func (fp *fastPublisher) sendErr(err error) {
-	if fp.errHandler != nil {
-		fp.errHandler(err)
-	}
-	if !errors.Is(err, ErrFastBatchGapDetected) || !fp.opts.continueOnGap {
 		fp.closed = true
+		if fp.commitCh != nil {
+			fp.commitCh <- commitAck
+		}
+		// only invoke callback if there is an error and we're NOT during commit (as commit would surface the error)
+		if commitAck.Error != nil && fp.commitCh != nil {
+			if fp.errHandler != nil {
+				fp.errHandler(commitAck.Error)
+			}
+			return
+		}
 		if fp.ackSub != nil {
 			fp.ackSub.Unsubscribe()
 			fp.ackSub = nil
 		}
+		return
 	}
 }

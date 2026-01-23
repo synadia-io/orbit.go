@@ -53,20 +53,24 @@ func TestFastPublisher(t *testing.T) {
 		}
 
 		// Add messages to the batch
-		if err := batch.Add("test.1", []byte("message 1")); err != nil {
+		if _, err := batch.Add("test.1", []byte("message 1")); err != nil {
 			t.Fatalf("Unexpected error adding message 1: %v", err)
 		}
 
-		if err := batch.AddMsg(&nats.Msg{
+		fastAck, err := batch.AddMsg(&nats.Msg{
 			Subject: "test.2",
 			Data:    []byte("message 2"),
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("Unexpected error adding message 2: %v", err)
 		}
 
-		// Check size
-		if size := batch.Size(); size != 2 {
-			t.Fatalf("Expected batch size to be 2, got %d", size)
+		// Check ack
+		if fastAck.BatchSequence != 2 {
+			t.Fatalf("Expected fastAck.BatchSequence to be 2, got %d", fastAck.BatchSequence)
+		}
+		if fastAck.AckSequence != 0 {
+			t.Fatalf("Expected fastAck.AckSequence to be 1, got %d", fastAck.AckSequence)
 		}
 
 		// Commit the batch
@@ -97,7 +101,7 @@ func TestFastPublisher(t *testing.T) {
 		}
 
 		// Verify we can't add more messages
-		if err := batch.Add("test.4", []byte("message 4")); !errors.Is(err, jetstreamext.ErrBatchClosed) {
+		if _, err := batch.Add("test.4", []byte("message 4")); !errors.Is(err, jetstreamext.ErrBatchClosed) {
 			t.Fatalf("Expected ErrBatchClosed adding to closed batch, got %v", err)
 		}
 
@@ -136,7 +140,7 @@ func TestFastPublisher(t *testing.T) {
 		batch, err := jetstreamext.NewFastPublisher(js,
 			jetstreamext.FastPublishFlowControl{
 				Flow:               50,
-				MaxOutstandingAcks: 10,
+				MaxOutstandingAcks: 3,
 				AckTimeout:         3 * time.Second,
 			},
 		)
@@ -146,7 +150,7 @@ func TestFastPublisher(t *testing.T) {
 
 		// Add multiple messages
 		for i := range 200 {
-			if err := batch.Add("test.msg", []byte("data")); err != nil {
+			if _, err := batch.Add("test.msg", []byte("data")); err != nil {
 				t.Fatalf("Unexpected error adding message %d: %v", i, err)
 			}
 		}
@@ -193,7 +197,7 @@ func TestFastPublisher(t *testing.T) {
 
 		// Add messages
 		for i := range 5 {
-			if err := batch.Add("test.msg", []byte("data")); err != nil {
+			if _, err := batch.Add("test.msg", []byte("data")); err != nil {
 				t.Fatalf("Unexpected error adding message %d: %v", i, err)
 			}
 		}
@@ -237,10 +241,10 @@ func TestFastPublisher(t *testing.T) {
 		}
 
 		// Add messages
-		if err := batch.Add("test.1", []byte("message 1")); err != nil {
+		if _, err := batch.Add("test.1", []byte("message 1")); err != nil {
 			t.Fatalf("Unexpected error adding message: %v", err)
 		}
-		if err := batch.Add("test.2", []byte("message 2")); err != nil {
+		if _, err := batch.Add("test.2", []byte("message 2")); err != nil {
 			t.Fatalf("Unexpected error adding message: %v", err)
 		}
 
@@ -263,7 +267,7 @@ func TestFastPublisher(t *testing.T) {
 		}
 
 		// Verify we can't add more messages
-		if err := batch.Add("test.3", []byte("message 3")); !errors.Is(err, jetstreamext.ErrBatchClosed) {
+		if _, err := batch.Add("test.3", []byte("message 3")); !errors.Is(err, jetstreamext.ErrBatchClosed) {
 			t.Fatalf("Expected ErrBatchClosed adding to discarded batch, got %v", err)
 		}
 	})
@@ -276,16 +280,13 @@ func TestFastPublisher_LargeBatch(t *testing.T) {
 	nc, js := jsClient(t, s)
 	defer nc.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	// Create a stream with batch publishing enabled
 	cfg := jetstream.StreamConfig{
 		Name:              "TEST",
 		Subjects:          []string{"test.>"},
 		AllowBatchPublish: true,
 	}
-	_, err := js.CreateStream(ctx, cfg)
+	_, err := js.CreateStream(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Unexpected error creating stream: %v", err)
 	}
@@ -294,7 +295,7 @@ func TestFastPublisher_LargeBatch(t *testing.T) {
 	batch, err := jetstreamext.NewFastPublisher(js,
 		jetstreamext.FastPublishFlowControl{
 			Flow:               100,
-			MaxOutstandingAcks: 50,
+			MaxOutstandingAcks: 2,
 			AckTimeout:         2 * time.Second,
 		},
 	)
@@ -304,17 +305,18 @@ func TestFastPublisher_LargeBatch(t *testing.T) {
 
 	// Add multiple messages
 	for i := range 100000 {
-		if err := batch.Add("test.msg", []byte("data")); err != nil {
+		if _, err := batch.Add("test.msg", []byte("data")); err != nil {
 			t.Fatalf("Unexpected error adding message %d: %v", i, err)
 		}
 	}
+
 	// Commit the batch
-	ack, err := batch.Commit(ctx, "test.final", []byte("final"))
+	ack, err := batch.Close()
 	if err != nil {
 		t.Fatalf("Unexpected error committing batch: %v", err)
 	}
 
-	if ack.BatchSize != 100001 {
-		t.Fatalf("Expected BatchAck.BatchSize to be 1001, got %d", ack.BatchSize)
+	if ack.BatchSize != 100000 {
+		t.Fatalf("Expected BatchAck.BatchSize to be 100000, got %d", ack.BatchSize)
 	}
 }
