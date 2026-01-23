@@ -126,9 +126,7 @@ type (
 
 	batchAckResponse struct {
 		apiResponse
-		*jetstream.PubAck
-		BatchID   string `json:"batch,omitempty"`
-		BatchSize int    `json:"count,omitempty"`
+		*BatchAck
 	}
 
 	// BatchMsgOpt is an option for configuring batch message publishing.
@@ -228,7 +226,7 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(uint64(b.sequence), 10))
 
 	// Determine if we need flow control for this message
-	needsAck := false
+	var needsAck bool
 	if b.opts.flowControl.AckFirst && b.sequence == 1 {
 		needsAck = true // wait on first message
 	} else if b.opts.flowControl.AckEvery > 0 && b.sequence%b.opts.flowControl.AckEvery == 0 {
@@ -336,18 +334,12 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 	if batchResp.Error != nil {
 		return nil, batchResp.Error
 	}
-	if batchResp.PubAck == nil || batchResp.PubAck.Stream == "" ||
+	if batchResp.BatchAck == nil || batchResp.Stream == "" ||
 		batchResp.BatchID != b.batchID || batchResp.BatchSize != int(b.sequence) {
 		return nil, ErrInvalidBatchAck
 	}
 
-	return &BatchAck{
-		Stream:    batchResp.PubAck.Stream,
-		Sequence:  batchResp.PubAck.Sequence,
-		Domain:    batchResp.PubAck.Domain,
-		BatchID:   batchResp.BatchID,
-		BatchSize: batchResp.BatchSize,
-	}, nil
+	return batchResp.BatchAck, nil
 }
 
 // Discard cancels the batch without committing.
@@ -469,19 +461,13 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 		if batchResp.Error != nil {
 			return nil, batchResp.Error
 		}
-		if batchResp.PubAck == nil || batchResp.PubAck.Stream == "" ||
+		if batchResp.BatchAck == nil || batchResp.Stream == "" ||
 			batchResp.BatchID != batchID || batchResp.BatchSize != msgs {
 
 			return nil, ErrInvalidBatchAck
 		}
 
-		batchAck = &BatchAck{
-			Stream:    batchResp.PubAck.Stream,
-			Sequence:  batchResp.PubAck.Sequence,
-			Domain:    batchResp.PubAck.Domain,
-			BatchID:   batchResp.BatchID,
-			BatchSize: batchResp.BatchSize,
-		}
+		batchAck = batchResp.BatchAck
 
 	}
 	return batchAck, nil
