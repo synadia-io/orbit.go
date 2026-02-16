@@ -24,12 +24,15 @@ import (
 )
 
 // Contains the things that are common to both types of consumer groups
-// TODO: the failover times and elasticity reaction times could be made more 'real time' by lowering those values. And could maybe be exposed as tunable by the user by making them all derive from the ack wait value set by the user in the consumer config it passes in when joining the consumer group
-// At this point however those values are hard-coded to values that seemed to be reasonable in terms of not incurring too much overhead. This is expected to be revisited later according to community feedback.
+
+// Fields that affect how reactive the consumer group is to faults (PinnedTTL, PullTimeout) are linked to AckWait
+// and therefore derived from the AckWait value specified by the user when joining the consumer group.
+// Note: the default value (0) is set to 5 seconds (to ensure it doesn't take pretty long time to react from a fault by default)
 const (
-	pullTimeout         = 3 * time.Second
-	ackWait             = 2 * pullTimeout
-	consumerIdleTimeout = 2 * pullTimeout
+	pullTimeoutDivider        = 2
+	consumerIdleTimeoutFactor = 1
+	defaultAckWait            = 5 * time.Second
+	minPullExpiryPinnedTTL    = time.Second
 )
 
 const priorityGroupName = "PCG"

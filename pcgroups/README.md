@@ -50,6 +50,10 @@ Elastic consumer groups operate on any stream, the messages in the stream do not
 
 You can deploy and run multiple instances of the consuming application using the same member name, in that case only one of the running instances of the member will be 'pinned' and have messages delivered to it (thereby the other instances are effectively in hot standby). There are functions (`ElasticMemberStepDown()` and `StaticMemberStepDown`) to force a change of the currently pinned member instance.
 
+### The importance of AckWait for reactivity to faults
+
+The timers related to how quickly consumer group member instances react to faults (for example the currently pinned instance getting killed or suspended for an extended period of time) are related and derived from the AckWait value passed when joining the consumer group to consume messages, due to the limit of nats.go current implementation of `Consume`, if the AckWait value passed is less than 2 seconds _and_ the consumer group is caught up with the head of the stream, then you may see some (slow and harmless) flapping of the active instance for the members in the consumer group. If the AckWait value passed is 0 then the default AckWait value of 5 seconds is used. Note that in the case of static consumer groups without acknowledgements, you can adjust the Pinned TTL value by specifying an AckWait value in the ConsumerConfig you pass to static consume.
+
 ## Using Partitioned Consumer Groups
 
 For the client application programmer, there is one basic functionality exposed by both static and elastic partitioned consumer groups: join and consume messages (when selected) from a named consumer group on a stream by specifying a _member name_, a regular JetStream consumer config, and a _callback_. The library takes care of stripping the partition number token from the subject such that you can use any existing callback code you may already have as is.

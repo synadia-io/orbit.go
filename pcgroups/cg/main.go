@@ -427,7 +427,7 @@ func (cg *cgStruct) consume(myContext context.Context, streamName string, consum
 	var err error
 	config := jetstream.ConsumerConfig{
 		MaxAckPending: maxAcksPending,
-		AckWait:       6 * time.Second,
+		AckWait:       2 * time.Second,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	}
 
