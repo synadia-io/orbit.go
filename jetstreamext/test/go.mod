@@ -3,14 +3,14 @@ module tests
 go 1.24.0
 
 require (
-	github.com/nats-io/nats-server/v2 v2.12.0
-	github.com/nats-io/nats.go v1.46.0
+	github.com/nats-io/nats-server/v2 v2.12.1-0.20251202175723-5afa1393b2f9
+	github.com/nats-io/nats.go v1.46.2-0.20251010124230-303a0fb20d67
 	github.com/synadia-io/orbit.go/jetstreamext v0.1.0
 )
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.4.3-default-no-op // indirect
-	github.com/google/go-tpm v0.9.5 // indirect
+	github.com/google/go-tpm v0.9.6 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/minio/highwayhash v1.0.3 // indirect
 	github.com/nats-io/jwt/v2 v2.8.0 // indirect
