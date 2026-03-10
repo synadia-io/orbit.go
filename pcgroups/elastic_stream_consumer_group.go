@@ -53,7 +53,7 @@ type ElasticConsumerGroupConsumerInstance struct {
 
 type PartitioningFilter struct {
 	Filter                string `json:"filter"`                 // The filter, used to both filter the message and partition them, must include at least one "*" wildcard
-	PartitioningWildcards []int  `json:"partitioning_wildcards"` // The indexes of the wildcards in the filter that will be used for partitioning. For example, if the subject has the pattern `"foo.<key>", then the filter is "foo.*" and the partitioning wildcard is 1.
+	PartitioningWildcards []int  `json:"partitioning_wildcards"` // The indexes of the wildcards in the filter that will be used for partitioning. For example, if the subject has the pattern `"foo.<key>", then the filter is "foo.*" and the partitioning wildcard is 1. If empty, then the entire subject will be used.
 }
 
 // ElasticConsumerGroupConfig is the configuration of an elastic consumer group
@@ -303,11 +303,17 @@ func CreateElastic(ctx context.Context, js jetstream.JetStream, streamName strin
 
 	subjectTransforms := make([]jetstream.SubjectTransformConfig, numFilters)
 
-	for i, filter := range consumerGroupConfig.PartitioningFilters {
-		subjectTransforms[i] = jetstream.SubjectTransformConfig{
-			Source:      filter.Filter,
-			Destination: getPartitioningTransformDest(filter, config.MaxMembers),
+	if len(consumerGroupConfig.PartitioningFilters) > 0 {
+		for i, filter := range consumerGroupConfig.PartitioningFilters {
+			subjectTransforms[i] = jetstream.SubjectTransformConfig{
+				Source:      filter.Filter,
+				Destination: getPartitioningTransformDest(filter, config.MaxMembers),
+			}
 		}
+	} else {
+		subjectTransforms = append(subjectTransforms, jetstream.SubjectTransformConfig{Source: ">",
+			Destination: getPartitioningTransformDest(PartitioningFilter{Filter: ">", PartitioningWildcards: []int{}}, config.MaxMembers),
+		})
 	}
 
 	source.SubjectTransforms = subjectTransforms
@@ -661,8 +667,12 @@ func ElasticMemberStepDown(ctx context.Context, js jetstream.JetStream, streamNa
 // ElasticGetPartitionFilters For the given ElasticConsumerGroupConfig returns the list of partition filters for the given member
 func ElasticGetPartitionFilters(config ElasticConsumerGroupConfig, memberName string) []string {
 	var filters []string
-	for _, pFilter := range config.PartitioningFilters {
-		filters = append(filters, GeneratePartitionFilters(config.Members, config.MaxMembers, config.MemberMappings, memberName, pFilter.Filter)...)
+	if len(config.PartitioningFilters) > 0 {
+		for _, pFilter := range config.PartitioningFilters {
+			filters = append(filters, GeneratePartitionFilters(config.Members, config.MaxMembers, config.MemberMappings, memberName, pFilter.Filter)...)
+		}
+	} else {
+		filters = GeneratePartitionFilters(config.Members, config.MaxMembers, config.MemberMappings, memberName, ">")
 	}
 
 	return filters
@@ -825,9 +835,6 @@ func validateConfig(config ElasticConsumerGroupConfig) error {
 	}
 
 	// validate the filters and the partitioning wildcards
-	if len(config.PartitioningFilters) == 0 {
-		return errors.New("at least one partitioning filter must be specified")
-	}
 
 	for _, pf := range config.PartitioningFilters {
 
@@ -840,12 +847,8 @@ func validateConfig(config ElasticConsumerGroupConfig) error {
 			}
 		}
 
-		if numWildcards < 1 {
-			return errors.New("filter must contain at least one * wildcard")
-		}
-
-		if len(pf.PartitioningWildcards) < 1 || len(pf.PartitioningWildcards) > numWildcards {
-			return errors.New("the number of partitioning wildcards must be between 1 and the total number of * wildcards in the filter")
+		if len(pf.PartitioningWildcards) > numWildcards {
+			return errors.New("the number of partitioning wildcards must not be larger than the total number of * wildcards in the filter")
 		}
 
 		pwcs := make(map[int]struct{}) // partitioning wildcard presence
@@ -853,12 +856,12 @@ func validateConfig(config ElasticConsumerGroupConfig) error {
 		for _, pWildcard := range pf.PartitioningWildcards {
 			if _, ok := pwcs[pWildcard]; ok {
 				return errors.New("partitioning wildcard indexes must be unique")
-			} else {
-				pwcs[pWildcard] = struct{}{}
 			}
 
-			if pWildcard < 1 || pWildcard > numWildcards {
-				return errors.New("partitioning wildcard indexes must be greater than 1 and less than or equal to the number of * wildcards in the filter")
+			pwcs[pWildcard] = struct{}{}
+
+			if pWildcard > numWildcards {
+				return errors.New("partitioning wildcard indexes must be less than or equal to the number of * wildcards in the filter")
 			}
 		}
 	}
@@ -881,16 +884,16 @@ func validateConfig(config ElasticConsumerGroupConfig) error {
 		for _, mm := range config.MemberMappings {
 			if _, ok := members[mm.Member]; ok {
 				return errors.New("member names must be unique")
-			} else {
-				members[mm.Member] = struct{}{}
 			}
+
+			members[mm.Member] = struct{}{}
 
 			for _, p := range mm.Partitions {
 				if _, ok := partitions[p]; ok {
 					return errors.New("partition numbers must be used only once")
-				} else {
-					partitions[p] = struct{}{}
 				}
+
+				partitions[p] = struct{}{}
 
 				if p < 0 || p >= int(numActualPartitions) {
 					return errors.New("partition numbers must be between 0 and one less than the max number of members")
@@ -931,6 +934,11 @@ func getPartitioningTransformDest(partitioningFilter PartitioningFilter, maxMemb
 	}
 
 	destFromFilter := strings.Join(filterTokens, ".")
+
+	if len(partitioningFilter.PartitioningWildcards) == 0 {
+		return fmt.Sprintf("{{Partition(%d)}}.%s", maxMembers, destFromFilter)
+	}
+
 	return fmt.Sprintf("{{Partition(%d,%s)}}.%s", maxMembers, wildcardList, destFromFilter)
 }
 
@@ -943,9 +951,9 @@ func getElasticConsumerGroupConfig(ctx context.Context, kv jetstream.KeyValue, s
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil, errors.New("error getting the elastic consumer group's config: not found")
-		} else {
-			return nil, fmt.Errorf("error getting the elastic consumer group's config: %w", err)
 		}
+
+		return nil, fmt.Errorf("error getting the elastic consumer group's config: %w", err)
 	}
 
 	var consumerGroupConfig ElasticConsumerGroupConfig

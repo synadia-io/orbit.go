@@ -104,22 +104,26 @@ func (cg *cgStruct) infoStaticAction(_ *fisk.ParseContext) error {
 	config, err := pcgroups.GetStaticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
-	} else {
-		fmt.Printf("config: max members=%d, filters=%v\n", config.MaxMembers, config.Filters)
-		if len(config.Members) != 0 {
-			fmt.Printf("members: %+v\n", config.Members)
-		} else if len(config.MemberMappings) != 0 {
-			fmt.Printf("Member mappings: %+v\n", config.MemberMappings)
-		} else {
-			fmt.Println("no members or mappings defined")
-		}
-		activeMembers, err := pcgroups.ListStaticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("currently active members: %+v\n", activeMembers)
-		return nil
 	}
+
+	fmt.Printf("config: max members=%d, filters=%v\n", config.MaxMembers, config.Filters)
+
+	if len(config.Members) != 0 {
+		fmt.Printf("members: %+v\n", config.Members)
+	} else if len(config.MemberMappings) != 0 {
+		fmt.Printf("Member mappings: %+v\n", config.MemberMappings)
+	} else {
+		fmt.Println("no members or mappings defined")
+	}
+
+	activeMembers, err := pcgroups.ListStaticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("currently active members: %+v\n", activeMembers)
+	return nil
+
 }
 
 func (cg *cgStruct) infoElasticAction(_ *fisk.ParseContext) error {
@@ -128,37 +132,40 @@ func (cg *cgStruct) infoElasticAction(_ *fisk.ParseContext) error {
 	config, err := pcgroups.GetElasticConsumerGroupConfig(ctx, cg.js, cg.streamName, cg.consumerGroupName)
 	if err != nil {
 		return err
-	} else {
-		for _, pf := range config.PartitioningFilters {
-			fmt.Printf("config: max members=%d, filter=%s, partitioning wildcards %+v\n", config.MaxMembers, pf.Filter, pf.PartitioningWildcards)
-		}
-		if len(config.Members) != 0 {
-			fmt.Printf("members: %+v\n", config.Members)
-		} else if len(config.MemberMappings) != 0 {
-			fmt.Printf("Member mappings: %+v\n", config.MemberMappings)
-		} else {
-			fmt.Println("no members or mappings defined")
-		}
-		activeMembers, err := pcgroups.ListElasticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("currently active members: %+v\n", activeMembers)
-		return nil
 	}
+
+	for _, pf := range config.PartitioningFilters {
+		fmt.Printf("config: max members=%d, filter=%s, partitioning wildcards %+v\n", config.MaxMembers, pf.Filter, pf.PartitioningWildcards)
+	}
+
+	if len(config.Members) != 0 {
+		fmt.Printf("members: %+v\n", config.Members)
+	} else if len(config.MemberMappings) != 0 {
+		fmt.Printf("Member mappings: %+v\n", config.MemberMappings)
+	} else {
+		fmt.Println("no members or mappings defined")
+	}
+
+	activeMembers, err := pcgroups.ListElasticActiveMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("currently active members: %+v\n", activeMembers)
+	return nil
 }
 
 func (cg *cgStruct) addElasticAction(_ *fisk.ParseContext) error {
 	ctx := context.Background()
 
 	members, err := pcgroups.AddMembers(ctx, cg.js, cg.streamName, cg.consumerGroupName, cg.memberNames)
-
 	if err != nil {
 		return err
-	} else {
-		fmt.Printf("added members: %+v\n", members)
-		return nil
 	}
+
+	fmt.Printf("added members: %+v\n", members)
+	return nil
+
 }
 
 func (cg *cgStruct) dropElasticAction(_ *fisk.ParseContext) error {
@@ -168,10 +175,10 @@ func (cg *cgStruct) dropElasticAction(_ *fisk.ParseContext) error {
 
 	if err != nil {
 		return err
-	} else {
-		fmt.Printf("dropped members: %+v\n", members)
-		return nil
 	}
+
+	fmt.Printf("dropped members: %+v\n", members)
+	return nil
 }
 
 func (cg *cgStruct) createStaticBalancedAction(_ *fisk.ParseContext) error {
