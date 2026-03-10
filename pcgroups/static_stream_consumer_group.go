@@ -80,8 +80,8 @@ func StaticConsume(ctx context.Context, js jetstream.JetStream, streamName strin
 		return nil, errors.New("a message handler must be provided")
 	}
 
-	if config.AckWait < ackWait {
-		config.AckWait = ackWait
+	if config.AckWait <= 0 {
+		config.AckWait = defaultAckWait
 	}
 
 	instance := StaticConsumerGroupConsumerInstance{
@@ -428,7 +428,7 @@ func (instance *StaticConsumerGroupConsumerInstance) joinMemberConsumerStatic(ct
 
 	config.PriorityGroups = []string{priorityGroupName}
 	config.PriorityPolicy = jetstream.PriorityPolicyPinned
-	config.PinnedTTL = config.AckWait
+	config.PinnedTTL = max(config.AckWait, minPullExpiryPinnedTTL)
 
 	instance.consumer, err = instance.js.CreateConsumer(ctx, instance.StreamName, config)
 	if err != nil {
@@ -444,7 +444,7 @@ func (instance *StaticConsumerGroupConsumerInstance) joinMemberConsumerStatic(ct
 func (instance *StaticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
-	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(priorityGroupName))
+	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(max(instance.consumerUserConfig.AckWait/pullTimeoutDivider, minPullExpiryPinnedTTL)), jetstream.PullPriorityGroup(priorityGroupName))
 	if err != nil {
 		log.Printf("Error starting to consume on my consumer: %v\n", err)
 		return

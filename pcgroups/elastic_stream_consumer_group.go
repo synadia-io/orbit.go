@@ -95,13 +95,11 @@ func ElasticConsume(ctx context.Context, js jetstream.JetStream, streamName stri
 		return nil, errors.New("the ack policy when consuming from elastic consumer groups must be explicit")
 	}
 
-	if config.InactiveThreshold == 0 {
-		config.InactiveThreshold = consumerIdleTimeout
+	if config.AckWait <= 0 {
+		config.AckWait = defaultAckWait
 	}
 
-	if config.AckWait < ackWait {
-		config.AckWait = ackWait
-	}
+	config.InactiveThreshold = config.AckWait * consumerIdleTimeoutFactor
 
 	instance := ElasticConsumerGroupConsumerInstance{
 		StreamName:         streamName,
@@ -217,7 +215,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) instanceRoutine(ctx contex
 			instance.stopConsuming()
 			instance.doneChan <- nil
 			return
-		case <-time.After(consumerIdleTimeout + 1*time.Second):
+		case <-time.After(instance.consumerUserConfig.AckWait*consumerIdleTimeoutFactor + 500*time.Millisecond):
 			// We want it to always be trying to self-correct if it's not currently joined (and in membership, so we should really be trying to consume something).
 			// This is what does the 'catch-all' if no-one deletes and re-creates the elastic consumers when the membership changes, because of the elastic consumer's idle time out eventually cleans up the old consumer.
 			// Which means that the consumer Create in joinMemberConsumer will then re-create it with the right filters for our membership's view, and then we can start actually consuming from it.
@@ -714,7 +712,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) joinMemberConsumer() {
 
 	config.PriorityGroups = []string{priorityGroupName}
 	config.PriorityPolicy = jetstream.PriorityPolicyPinned
-	config.PinnedTTL = config.AckWait
+	config.PinnedTTL = max(config.AckWait, minPullExpiryPinnedTTL)
 
 	// before starting to actually consume messages from the stream consumer, we need to verify that the consumer is created with the correct filters, so Create() must be successful
 	instance.consumer, err = instance.tryCreateConsumer(ctx, config)
@@ -759,7 +757,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) tryCreateConsumer(ctx cont
 func (instance *ElasticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
-	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(pullTimeout), jetstream.PullPriorityGroup(priorityGroupName))
+	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(max(instance.consumerUserConfig.AckWait/pullTimeoutDivider, minPullExpiryPinnedTTL)), jetstream.PullPriorityGroup(priorityGroupName))
 	if err != nil {
 		log.Printf("Error starting to consume on my consumer: %v\n", err)
 		return
