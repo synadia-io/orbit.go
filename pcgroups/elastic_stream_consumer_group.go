@@ -52,7 +52,7 @@ type ElasticConsumerGroupConsumerInstance struct {
 }
 
 type PartitioningFilter struct {
-	Filter                string `json:"filter"`                 // The filter, used to both filter the message and partition them, must include at least one "*" wildcard
+	Filter                string `json:"filter"`                 // The filter, used to both filter the messages and partition them
 	PartitioningWildcards []int  `json:"partitioning_wildcards"` // The indexes of the wildcards in the filter that will be used for partitioning. For example, if the subject has the pattern `"foo.<key>", then the filter is "foo.*" and the partitioning wildcard is 1. If empty, then the entire subject will be used.
 }
 
