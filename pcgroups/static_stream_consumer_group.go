@@ -501,16 +501,16 @@ func validateStaticConfig(config StaticConsumerGroupConfig) error {
 		for _, mm := range config.MemberMappings {
 			if _, ok := members[mm.Member]; ok {
 				return errors.New("member names must be unique")
-			} else {
-				members[mm.Member] = struct{}{}
 			}
+
+			members[mm.Member] = struct{}{}
 
 			for _, p := range mm.Partitions {
 				if _, ok := partitions[p]; ok {
 					return errors.New("partition numbers must be used only once")
-				} else {
-					partitions[p] = struct{}{}
 				}
+
+				partitions[p] = struct{}{}
 
 				if p < 0 || p >= int(numActualPartitions) {
 					return errors.New("partition numbers must be between 0 and one less than the max number of members")
@@ -541,9 +541,9 @@ func getStaticConsumerGroupConfig(ctx context.Context, kv jetstream.KeyValue, st
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil, errors.New("error getting the static consumer group's config: not found")
-		} else {
-			return nil, fmt.Errorf("error getting the static consumer group's config: %w", err)
 		}
+
+		return nil, fmt.Errorf("error getting the static consumer group's config: %w", err)
 	}
 
 	var consumerGroupConfig StaticConsumerGroupConfig

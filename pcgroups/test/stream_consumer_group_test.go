@@ -115,9 +115,11 @@ func TestStatic(t *testing.T) {
 func TestElastic(t *testing.T) {
 	var streamName = "test"
 	var cgName = "group"
-	var c1, c2 atomic.Uint32
+	var c1, c2, c3, c4 atomic.Uint32
 	c1.Store(0)
 	c2.Store(0)
+	c3.Store(0)
+	c4.Store(0)
 
 	server := RunBasicJetStreamServer()
 	defer shutdownJSServerAndRemoveStorage(t, server)
@@ -257,6 +259,46 @@ func TestElastic(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		if time.Since(now) > 10*time.Second {
 			println(c1.Load(), c2.Load())
+			t.Fatalf("timeout")
+		}
+	}
+
+	err = pcgroups.DeleteElastic(ctx, js, streamName, cgName)
+	require_NoError(t, err)
+
+	cgName = "group2"
+
+	_, err = pcgroups.CreateElastic(ctx, js, streamName, cgName, 2, []pcgroups.PartitioningFilter{}, -1, -1)
+	require_NoError(t, err)
+
+	ec3 := func() {
+		pcgroups.ElasticConsume(ctx, js, streamName, cgName, "m1", func(msg jetstream.Msg) {
+			c3.Add(1)
+			msg.Ack()
+		}, config)
+	}
+
+	ec4 := func() {
+		pcgroups.ElasticConsume(ctx, js, streamName, cgName, "m2", func(msg jetstream.Msg) {
+			c4.Add(1)
+			msg.Ack()
+		}, config)
+	}
+
+	go ec3()
+	go ec4()
+
+	_, err = pcgroups.AddMembers(ctx, js, streamName, cgName, []string{"m1", "m2"})
+	require_NoError(t, err)
+
+	now = time.Now()
+	for {
+		if c3.Load() == 45 && c4.Load() == 45 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+		if time.Since(now) > 10*time.Second {
+			println(c3.Load(), c4.Load())
 			t.Fatalf("timeout")
 		}
 	}
