@@ -837,6 +837,9 @@ func validateConfig(config ElasticConsumerGroupConfig) error {
 	// validate the filters and the partitioning wildcards
 
 	for _, pf := range config.PartitioningFilters {
+		if pf.Filter == "" {
+			return errors.New("partitioning filters must have a non-empty filter")
+		}
 
 		filterTokens := strings.Split(pf.Filter, ".")
 		numWildcards := 0
@@ -845,6 +848,10 @@ func validateConfig(config ElasticConsumerGroupConfig) error {
 			if s == "*" {
 				numWildcards++
 			}
+		}
+
+		if numWildcards == 0 && filterTokens[len(filterTokens)-1] != ">" {
+			return errors.New("partitioning filters must have at least one * wildcard or end with > wildcard")
 		}
 
 		if len(pf.PartitioningWildcards) > numWildcards {
@@ -860,8 +867,8 @@ func validateConfig(config ElasticConsumerGroupConfig) error {
 
 			pwcs[pWildcard] = struct{}{}
 
-			if pWildcard > numWildcards {
-				return errors.New("partitioning wildcard indexes must be less than or equal to the number of * wildcards in the filter")
+			if pWildcard > numWildcards || pWildcard < 1 {
+				return errors.New("partitioning wildcard indexes must be between 1 and the number of * wildcards in the filter")
 			}
 		}
 	}
