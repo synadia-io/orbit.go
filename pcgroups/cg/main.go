@@ -134,8 +134,14 @@ func (cg *cgStruct) infoElasticAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	for _, pf := range config.PartitioningFilters {
-		fmt.Printf("config: max members=%d, filter=%s, partitioning wildcards %+v\n", config.MaxMembers, pf.Filter, pf.PartitioningWildcards)
+	fmt.Printf("config: max members=%d, max buffered msgs=%d, max buffered bytes=%d\n", config.MaxMembers, config.MaxBufferedMsgs, config.MaxBufferedBytes)
+
+	if len(config.PartitioningFilters) == 0 {
+		fmt.Println("no partitioning filters defined (whole subject used)")
+	} else {
+		for _, pf := range config.PartitioningFilters {
+			fmt.Printf("filter=%s, partitioning wildcards %+v\n", pf.Filter, pf.PartitioningWildcards)
+		}
 	}
 
 	if len(config.Members) != 0 {
