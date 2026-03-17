@@ -3,7 +3,7 @@ module github.com/synadia-io/orbit.go/jetstreamext
 go 1.24.0
 
 require (
-	github.com/nats-io/nats.go v1.46.0
+	github.com/nats-io/nats.go v1.47.1-0.20251217134354-a5a509fddade
 	github.com/nats-io/nuid v1.0.1
 	github.com/synadia-io/orbit.go/natsext v0.1.1
 )

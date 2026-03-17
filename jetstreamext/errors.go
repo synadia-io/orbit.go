@@ -39,6 +39,20 @@ var (
 	// ErrInvalidBatchAck is returned when JetStream ack from batch publish is
 	// invalid.
 	ErrInvalidBatchAck jetstream.JetStreamError = &jsError{message: "invalid jetstream batch publish response"}
+
+	// Channel publisher errors
+
+	// ErrPublisherClosed is returned when attempting to publish on a closed publisher.
+	ErrPublisherClosed = &jsError{message: "channel publisher closed"}
+
+	// ErrTooManyStalledMsgs is returned when max pending acks is reached and stall wait expires.
+	ErrTooManyStalledMsgs = &jsError{message: "too many stalled messages"}
+
+	// ErrAckTimeout is returned when an ack is not received within the configured timeout.
+	ErrAckTimeout = &jsError{message: "ack timeout"}
+
+	// ErrChannelPublisherReplySubjectSet is returned when a message to be published already has a reply subject set.
+	ErrChannelPublisherReplySubjectSet = &jsError{message: "channel publisher cannot publish messages with reply subject set"}
 )
 
 type jsError struct {
