@@ -257,6 +257,10 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 
 		// Publish with reply inbox already set (without holding lock)
 		if err := fp.js.Conn().PublishMsg(msg); err != nil {
+			fp.ackSub.Unsubscribe()
+			fp.ackSub = nil
+			fp.closed = true
+			fp.mu.Unlock()
 			return nil, fmt.Errorf("batch message %d publish failed: %w", fp.sequence, err)
 		}
 
@@ -276,6 +280,11 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 			}, nil
 
 		case err := <-fp.initialErrCh:
+			fp.mu.Lock()
+			defer fp.mu.Unlock()
+			fp.closed = true
+			fp.ackSub.Unsubscribe()
+			fp.ackSub = nil
 			return nil, fmt.Errorf("batch message %d ack error: %w", fp.sequence, err)
 		case <-time.After(fp.opts.ackTimeout):
 			// Re-acquire lock to mark closed
@@ -283,6 +292,8 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 			defer fp.mu.Unlock()
 
 			fp.closed = true
+			fp.ackSub.Unsubscribe()
+			fp.ackSub = nil
 			return nil, fmt.Errorf("batch message %d ack timeout", fp.sequence)
 		}
 	}
@@ -293,11 +304,10 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 
 	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) < fp.sequence
 	if waitForAck {
-		var stallCh chan struct{}
 		if fp.stallCh == nil {
 			fp.stallCh = make(chan struct{}, 1)
-			stallCh = fp.stallCh
 		}
+		stallCh := fp.stallCh
 		fp.mu.Unlock()
 		select {
 		case <-stallCh:
@@ -384,7 +394,7 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 		fp.commitCh = make(chan *batchAckResponse, 1)
 	}
 	if fp.ackSub == nil {
-		ackSub, err := fp.js.Conn().Subscribe(fp.ackInboxPrefix, fp.ackMsgHandler)
+		ackSub, err := fp.js.Conn().Subscribe(fmt.Sprintf("%s.>", fp.ackInboxPrefix), fp.ackMsgHandler)
 		if err != nil {
 			fp.mu.Unlock()
 			return nil, err
@@ -393,11 +403,10 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 	}
 	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) < fp.sequence
 	if waitForAck {
-		var stallCh chan struct{}
 		if fp.stallCh == nil {
 			fp.stallCh = make(chan struct{}, 1)
-			stallCh = fp.stallCh
 		}
+		stallCh := fp.stallCh
 		fp.mu.Unlock()
 		select {
 		case <-stallCh:
@@ -540,13 +549,8 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 		fp.closed = true
 		if fp.commitCh != nil {
 			fp.commitCh <- commitAck
-		}
-		// only invoke callback if there is an error and we're NOT during commit (as commit would surface the error)
-		if commitAck.Error != nil && fp.commitCh != nil {
-			if fp.errHandler != nil {
-				fp.errHandler(commitAck.Error)
-			}
-			return
+		} else if commitAck != nil && commitAck.Error != nil && fp.errHandler != nil {
+			fp.errHandler(commitAck.Error)
 		}
 		if fp.ackSub != nil {
 			fp.ackSub.Unsubscribe()

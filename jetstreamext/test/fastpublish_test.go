@@ -249,7 +249,7 @@ func TestFastPublisher(t *testing.T) {
 		}
 
 		// Discard the batch
-		ack, err := batch.Close()
+		ack, err := batch.Close(context.Background())
 		if err != nil {
 			t.Fatalf("Unexpected error discarding batch: %v", err)
 		}
@@ -311,7 +311,7 @@ func TestFastPublisher_LargeBatch(t *testing.T) {
 	}
 
 	// Commit the batch
-	ack, err := batch.Close()
+	ack, err := batch.Close(context.Background())
 	if err != nil {
 		t.Fatalf("Unexpected error committing batch: %v", err)
 	}
