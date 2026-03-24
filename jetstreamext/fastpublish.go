@@ -108,16 +108,19 @@ type (
 		js             jetstream.JetStream
 		flow           uint16
 		ackInboxPrefix string
-		ackSub         *nats.Subscription
-		sequence       uint64
-		ackSequence    uint64
-		closed         bool
-		opts           fastPublisherOpts
-		stallCh        chan struct{}
-		commitCh       chan *batchAckResponse
-		firstAckCh     chan *BatchFlowAck
-		initialErrCh   chan error
-		errHandler     FastPublishErrHandler
+		// replyPrefix caches "<inbox>.<flow>.<gap>." to avoid fmt.Sprintf per message.
+		// Rebuilt when flow changes via server ack.
+		replyPrefix  string
+		ackSub       *nats.Subscription
+		sequence     uint64
+		ackSequence  uint64
+		closed       bool
+		opts         fastPublisherOpts
+		stallCh      chan struct{}
+		commitCh     chan *batchAckResponse
+		firstAckCh   chan *BatchFlowAck
+		initialErrCh chan error
+		errHandler   FastPublishErrHandler
 		// stored to use when closing batch (EOB commit)
 		batchSubject string
 		mu           sync.Mutex
@@ -164,13 +167,30 @@ func NewFastPublisher(js jetstream.JetStream, opts ...FastPublisherOpt) (FastPub
 		}
 	}
 
-	return &fastPublisher{
+	fp := &fastPublisher{
 		js:             js,
 		ackInboxPrefix: js.Conn().NewInbox(),
 		flow:           pubOpts.flow,
 		opts:           pubOpts,
 		errHandler:     pubOpts.errHandler,
-	}, nil
+	}
+	fp.buildReplyPrefix()
+	return fp, nil
+}
+
+// buildReplyPrefix pre-computes the stable portion of the reply subject:
+// "<inbox>.<flow>.<gap>." so that per-message we only append "<seq>.<op>.$FI".
+func (fp *fastPublisher) buildReplyPrefix() {
+	gap := "fail"
+	if fp.opts.continueOnGap {
+		gap = "ok"
+	}
+	fp.replyPrefix = fp.ackInboxPrefix + "." + strconv.FormatUint(uint64(fp.flow), 10) + "." + gap + "."
+}
+
+// buildReplySubject constructs the full reply subject using the cached prefix.
+func (fp *fastPublisher) buildReplySubject(seq uint64, operation int) string {
+	return fp.replyPrefix + strconv.FormatUint(seq, 10) + "." + strconv.FormatInt(int64(operation), 10) + ".$FI"
 }
 
 // TODO: Should we use unique option type?
@@ -199,46 +219,17 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		return nil, ErrBatchClosed
 	}
 
-	if msg.Header == nil {
-		msg.Header = nats.Header{}
-	}
-
-	// Process batch message options
-	o := batchMsgOpts{}
-	for _, opt := range opts {
-		if err := opt(&o); err != nil {
-			fp.mu.Unlock()
-			return nil, err
-		}
-	}
-
-	if o.ttl > 0 {
-		msg.Header.Set(jetstream.MsgTTLHeader, o.ttl.String())
-	}
-	if o.stream != "" {
-		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
-	}
-	if o.lastSubjectSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
-	if o.lastSubject != "" {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
-	if o.lastSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSeqHeader, strconv.FormatUint(*o.lastSeq, 10))
+	if err := applyBatchMsgOpts(msg, opts); err != nil {
+		fp.mu.Unlock()
+		return nil, err
 	}
 
 	fp.sequence++
-	gap := "fail"
-	if fp.opts.continueOnGap {
-		gap = "ok"
-	}
 	operation := FastBatchAddMsg
 	if fp.sequence == 1 {
 		operation = FastBatchStart
 	}
-	msg.Reply = fmt.Sprintf("%s.%d.%s.%d.%d.$FI", fp.ackInboxPrefix, fp.flow, gap, fp.sequence, operation)
+	msg.Reply = fp.buildReplySubject(fp.sequence, operation)
 
 	// Create subscription and handle first message specially
 	if fp.sequence == 1 {
@@ -300,7 +291,6 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 
 	// other than first message, we just publish and track pending acks.
 	// if we exceed max outstanding acks, we stall until we get a flow ack.
-	defer fp.mu.Unlock()
 
 	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) < fp.sequence
 	if waitForAck {
@@ -314,18 +304,63 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		case <-time.After(fp.opts.ackTimeout):
 			fp.mu.Lock()
 			fp.closed = true
+			fp.mu.Unlock()
 			return nil, fmt.Errorf("batch message %d ack timeout; current sequence: %d", fp.sequence, fp.ackSequence)
 		}
 		fp.mu.Lock()
 	}
+
+	// Capture state under lock, then release before the publish I/O
+	// so the ack handler can process responses concurrently.
+	seq := fp.sequence
+	ackSeq := fp.ackSequence
+	fp.mu.Unlock()
+
 	if err := fp.js.Conn().PublishMsg(msg); err != nil {
-		return nil, fmt.Errorf("batch message %d publish failed: %w", fp.sequence, err)
+		return nil, fmt.Errorf("batch message %d publish failed: %w", seq, err)
 	}
 
 	return &FastPubAck{
-		BatchSequence: fp.sequence,
-		AckSequence:   fp.ackSequence,
+		BatchSequence: seq,
+		AckSequence:   ackSeq,
 	}, nil
+}
+
+// applyBatchMsgOpts processes batch message options and sets the appropriate
+// headers on the message. Only allocates a header map when opts require it.
+func applyBatchMsgOpts(msg *nats.Msg, opts []BatchMsgOpt) error {
+	if len(opts) == 0 {
+		return nil
+	}
+	var o batchMsgOpts
+	for _, opt := range opts {
+		if err := opt(&o); err != nil {
+			return err
+		}
+	}
+	if o.ttl == 0 && o.stream == "" && o.lastSubjectSeq == nil && o.lastSeq == nil {
+		return nil
+	}
+	if msg.Header == nil {
+		msg.Header = nats.Header{}
+	}
+	if o.ttl > 0 {
+		msg.Header.Set(jetstream.MsgTTLHeader, o.ttl.String())
+	}
+	if o.stream != "" {
+		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
+	}
+	if o.lastSubjectSeq != nil {
+		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
+	}
+	if o.lastSubject != "" {
+		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
+		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
+	}
+	if o.lastSeq != nil {
+		msg.Header.Set(jetstream.ExpectedLastSeqHeader, strconv.FormatUint(*o.lastSeq, 10))
+	}
+	return nil
 }
 
 func (fp *fastPublisher) Commit(ctx context.Context, subject string, data []byte, opts ...BatchMsgOpt) (*BatchAck, error) {
@@ -343,34 +378,9 @@ func (fp *fastPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 		return nil, ErrBatchClosed
 	}
 
-	if msg.Header == nil {
-		msg.Header = nats.Header{}
-	}
-
-	// Process batch message options
-	o := batchMsgOpts{}
-	for _, opt := range opts {
-		if err := opt(&o); err != nil {
-			fp.mu.Unlock()
-			return nil, err
-		}
-	}
-
-	if o.ttl > 0 {
-		msg.Header.Set(jetstream.MsgTTLHeader, o.ttl.String())
-	}
-	if o.stream != "" {
-		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
-	}
-	if o.lastSubjectSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
-	if o.lastSubject != "" {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
-	if o.lastSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSeqHeader, strconv.FormatUint(*o.lastSeq, 10))
+	if err := applyBatchMsgOpts(msg, opts); err != nil {
+		fp.mu.Unlock()
+		return nil, err
 	}
 
 	fp.mu.Unlock()
@@ -380,15 +390,11 @@ func (fp *fastPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*BatchAck, error) {
 	fp.mu.Lock()
 	fp.sequence++
-	gap := "fail"
-	if fp.opts.continueOnGap {
-		gap = "ok"
-	}
 	operation := FastBatchCommitMsg
 	if eob {
 		operation = FastBatchCommitEOB
 	}
-	msg.Reply = fmt.Sprintf("%s.%d.%s.%d.%d.$FI", fp.ackInboxPrefix, fp.flow, gap, fp.sequence, operation)
+	msg.Reply = fp.buildReplySubject(fp.sequence, operation)
 
 	if fp.commitCh == nil {
 		fp.commitCh = make(chan *batchAckResponse, 1)
@@ -513,7 +519,10 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 		}
 
 		if flowAck != nil {
-			fp.flow = flowAck.Messages
+			if fp.flow != flowAck.Messages {
+				fp.flow = flowAck.Messages
+				fp.buildReplyPrefix()
+			}
 			fp.ackSequence = flowAck.Sequence
 			// Handle first message ack specially - firstAckCh is only set for first message
 			if fp.firstAckCh != nil {
