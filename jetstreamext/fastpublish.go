@@ -144,10 +144,11 @@ const (
 )
 
 const (
-	FastBatchStart = iota
-	FastBatchAddMsg
-	FastBatchCommitMsg
-	FastBatchCommitEOB
+	fastBatchStart = iota
+	fastBatchAddMsg
+	fastBatchCommitMsg
+	fastBatchCommitEOB
+	fastBatchPing
 )
 
 func NewFastPublisher(js jetstream.JetStream, opts ...FastPublisherOpt) (FastPublisher, error) {
@@ -176,6 +177,45 @@ func NewFastPublisher(js jetstream.JetStream, opts ...FastPublisherOpt) (FastPub
 	}
 	fp.buildReplyPrefix()
 	return fp, nil
+}
+
+// sendPing publishes a ping message (op=4) to recover potentially lost acks.
+// Ping reuses the highest batch sequence already sent
+// and the server responds with the latest BatchFlowAck.
+// Must be called WITHOUT holding fp.mu.
+func (fp *fastPublisher) sendPing() error {
+	fp.mu.Lock()
+	reply := fp.buildReplySubject(fp.sequence, fastBatchPing)
+	subject := fp.batchSubject
+	fp.mu.Unlock()
+
+	return fp.js.Conn().PublishRequest(subject, reply, nil)
+}
+
+// waitForStall blocks until the stall channel is signaled, sending periodic
+// pings to recover lost acks. Returns an error only on total timeout.
+// Must be called WITHOUT holding fp.mu.
+func (fp *fastPublisher) waitForStall(stallCh <-chan struct{}) error {
+	// Split timeout into intervals: try up to 2 pings before giving up.
+	pingInterval := fp.opts.ackTimeout / 3
+	deadline := time.NewTimer(fp.opts.ackTimeout)
+	defer deadline.Stop()
+	ping := time.NewTimer(pingInterval)
+	defer ping.Stop()
+
+	for {
+		select {
+		case <-stallCh:
+			return nil
+		case <-ping.C:
+			if err := fp.sendPing(); err != nil {
+				return fmt.Errorf("ping failed: %w", err)
+			}
+			ping.Reset(pingInterval)
+		case <-deadline.C:
+			return errors.New("ack timeout")
+		}
+	}
 }
 
 // buildReplyPrefix pre-computes the stable portion of the reply subject:
@@ -225,9 +265,9 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 	}
 
 	fp.sequence++
-	operation := FastBatchAddMsg
+	operation := fastBatchAddMsg
 	if fp.sequence == 1 {
-		operation = FastBatchStart
+		operation = fastBatchStart
 	}
 	msg.Reply = fp.buildReplySubject(fp.sequence, operation)
 
@@ -299,13 +339,11 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		}
 		stallCh := fp.stallCh
 		fp.mu.Unlock()
-		select {
-		case <-stallCh:
-		case <-time.After(fp.opts.ackTimeout):
+		if err := fp.waitForStall(stallCh); err != nil {
 			fp.mu.Lock()
 			fp.closed = true
 			fp.mu.Unlock()
-			return nil, fmt.Errorf("batch message %d ack timeout; current sequence: %d", fp.sequence, fp.ackSequence)
+			return nil, fmt.Errorf("batch message %d %w; current ack sequence: %d", fp.sequence, err, fp.ackSequence)
 		}
 		fp.mu.Lock()
 	}
@@ -390,9 +428,9 @@ func (fp *fastPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*BatchAck, error) {
 	fp.mu.Lock()
 	fp.sequence++
-	operation := FastBatchCommitMsg
+	operation := fastBatchCommitMsg
 	if eob {
-		operation = FastBatchCommitEOB
+		operation = fastBatchCommitEOB
 	}
 	msg.Reply = fp.buildReplySubject(fp.sequence, operation)
 
@@ -414,13 +452,11 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 		}
 		stallCh := fp.stallCh
 		fp.mu.Unlock()
-		select {
-		case <-stallCh:
-		case <-time.After(fp.opts.ackTimeout):
+		if err := fp.waitForStall(stallCh); err != nil {
 			fp.mu.Lock()
 			fp.closed = true
 			fp.mu.Unlock()
-			return nil, fmt.Errorf("batch commit timeout waiting for acks")
+			return nil, fmt.Errorf("batch commit %w", err)
 		}
 		fp.mu.Lock()
 	}
