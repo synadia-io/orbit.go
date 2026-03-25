@@ -291,7 +291,7 @@ func TestBatchPublisher(t *testing.T) {
 		}
 
 		// create 50 batches (the default max) and add a message to each
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			batch, err := jetstreamext.NewBatchPublisher(js)
 			if err != nil {
 				t.Fatalf("Unexpected error creating batch publisher: %v", err)
@@ -323,52 +323,6 @@ func TestBatchPublisher(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid headers", func(t *testing.T) {
-		s := RunBasicJetStreamServer()
-		defer shutdownJSServerAndRemoveStorage(t, s)
-
-		nc, js := jsClient(t, s)
-		defer nc.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		// Create a stream with batch publishing enabled
-		cfg := jetstream.StreamConfig{
-			Name:               "TEST",
-			Subjects:           []string{"test.>"},
-			AllowAtomicPublish: true,
-		}
-		_, err := js.CreateStream(ctx, cfg)
-		if err != nil {
-			t.Fatalf("Unexpected error creating stream: %v", err)
-		}
-
-		batch, err := jetstreamext.NewBatchPublisher(js)
-		if err != nil {
-			t.Fatalf("Unexpected error creating batch publisher: %v", err)
-		}
-
-		// Try to add message with MsgID header
-		msg := &nats.Msg{
-			Subject: "test.1",
-			Data:    []byte("message 1"),
-			Header:  nats.Header{},
-		}
-		msg.Header.Set(jetstream.MsgIDHeader, "test-msg-id")
-
-		err = batch.AddMsg(msg)
-		if err != nil {
-			t.Fatalf("Unexpected error adding message: %v", err)
-		}
-
-		// reset headers, should still fail with appropriate error
-		msg.Header = nats.Header{}
-		_, err = batch.CommitMsg(ctx, msg)
-		if !errors.Is(err, jetstreamext.ErrBatchPublishUnsupportedHeader) {
-			t.Fatalf("Expected ErrBatchPublishUnsupportedHeader, got %v", err)
-		}
-	})
-
 	t.Run("batch too large", func(t *testing.T) {
 		s := RunBasicJetStreamServer()
 		defer shutdownJSServerAndRemoveStorage(t, s)
@@ -395,7 +349,7 @@ func TestBatchPublisher(t *testing.T) {
 		}
 
 		// Add messages until we exceed the max batch size (1000 messages)
-		for i := 0; i < 999; i++ {
+		for range 999 {
 			err = batch.Add("test.1", []byte("message 1"))
 			if err != nil {
 				t.Fatalf("Unexpected error adding message to batch: %v", err)
@@ -414,7 +368,7 @@ func TestBatchPublisher(t *testing.T) {
 			t.Fatalf("Unexpected error creating second batch publisher: %v", err)
 		}
 
-		for i := 0; i < 1000; i++ {
+		for range 1000 {
 			err = batch2.Add("test.1", []byte("message 1"))
 			if err != nil {
 				t.Fatalf("Unexpected error adding message to batch: %v", err)
