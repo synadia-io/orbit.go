@@ -25,19 +25,17 @@ jobs:
         working-directory: natssysclient
         shell: bash --noprofile --norc -x -eo pipefail {0}
         run: |
-          go get -t ./...
+          go get -t work
           go install honnef.co/go/tools/cmd/staticcheck@latest
           go install github.com/client9/misspell/cmd/misspell@latest
-      
+
       - name: Run linters
         working-directory: natssysclient
         shell: bash --noprofile --norc -x -eo pipefail {0}
         run: |
-          $(exit $(go fmt  ./... | wc -l))
-          go vet ./...
-          go vet ./test/...
-          staticcheck ./...
-          staticcheck ./test/...
+          $(exit $(go fmt work | wc -l))
+          go vet work
+          staticcheck work
           find . -type f -name "*.go" | xargs misspell -error -locale US
     
   test:
@@ -55,4 +53,4 @@ jobs:
         working-directory: natssysclient
         shell: bash --noprofile --norc -x -eo pipefail {0}
         run: |
-          go test -v -count=1 ./test/...
+          go test -v -count=1 work
