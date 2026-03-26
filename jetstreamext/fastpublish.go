@@ -43,7 +43,7 @@ type (
 		// Returns a BatchAck containing the acknowledgment from the server.
 		CommitMsg(ctx context.Context, msg *nats.Msg, opts ...BatchMsgOpt) (*BatchAck, error)
 
-		// Close closes the batch, signalling the server that no more messages will be added.
+		// Close closes the batch, signaling the server that no more messages will be added.
 		// It sends an EOB commit to the server, without adding a message.
 		Close(ctx context.Context) (*BatchAck, error)
 

@@ -22,6 +22,10 @@ const (
 	JSErrCodeFastBatchInvalidPattern jetstream.ErrorCode = 10204
 	JSErrCodeFastBatchInvalidID      jetstream.ErrorCode = 10205
 	JSErrCodeFastBatchUnknownID      jetstream.ErrorCode = 10206
+
+	// Too many inflight error codes
+	JSErrCodeAtomicPublishTooManyInflight jetstream.ErrorCode = 10210
+	JSErrCodeBatchPublishTooManyInflight  jetstream.ErrorCode = 10211
 )
 
 var (
@@ -50,6 +54,12 @@ var (
 
 	// ErrBatchPublishInvalidGapMode is returned when invalid batch gap mode is specified.
 	ErrBatchPublishInvalidGapMode jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeBatchPublishInvalidGapMode, Description: "invalid batch gap mode", Code: 400}}
+
+	// ErrAtomicPublishTooManyInflight is returned when there are too many inflight atomic publish batches.
+	ErrAtomicPublishTooManyInflight jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeAtomicPublishTooManyInflight, Description: "atomic publish too many inflight", Code: 429}}
+
+	// ErrBatchPublishTooManyInflight is returned when there are too many inflight batch publish batches.
+	ErrBatchPublishTooManyInflight jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeBatchPublishTooManyInflight, Description: "batch publish too many inflight", Code: 429}}
 
 	// ErrBatchClosed is returned when attempting to use a batch that has been closed.
 	ErrBatchClosed = &jsError{message: "batch publisher closed"}
