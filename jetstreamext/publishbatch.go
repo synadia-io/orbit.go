@@ -210,11 +210,10 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	if o.stream != "" {
 		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
 	}
-	if o.lastSubjectSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
 	if o.lastSubject != "" {
 		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
+		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
+	} else if o.lastSubjectSeq != nil {
 		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
 	}
 	if o.lastSeq != nil {
@@ -294,11 +293,10 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 	if o.stream != "" {
 		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
 	}
-	if o.lastSubjectSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
 	if o.lastSubject != "" {
 		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
+		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
+	} else if o.lastSubjectSeq != nil {
 		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
 	}
 	if o.lastSeq != nil {

@@ -70,7 +70,7 @@ func TestFastPublisher(t *testing.T) {
 			t.Fatalf("Expected fastAck.BatchSequence to be 2, got %d", fastAck.BatchSequence)
 		}
 		if fastAck.AckSequence != 0 {
-			t.Fatalf("Expected fastAck.AckSequence to be 1, got %d", fastAck.AckSequence)
+			t.Fatalf("Expected fastAck.AckSequence to be 0, got %d", fastAck.AckSequence)
 		}
 
 		// Commit the batch
@@ -254,9 +254,6 @@ func TestFastPublisher(t *testing.T) {
 			t.Fatalf("Unexpected error discarding batch: %v", err)
 		}
 
-		if err != nil {
-			t.Fatalf("Unexpected error committing batch: %v", err)
-		}
 		if ack.BatchSize != 2 {
 			t.Fatalf("Expected BatchAck.BatchSize to be 2, got %d", ack.BatchSize)
 		}

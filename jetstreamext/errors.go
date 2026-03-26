@@ -61,6 +61,9 @@ var (
 	// ErrBatchPublishTooManyInflight is returned when there are too many inflight batch publish batches.
 	ErrBatchPublishTooManyInflight jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeBatchPublishTooManyInflight, Description: "batch publish too many inflight", Code: 429}}
 
+	// ErrEmptyBatch is returned when attempting to close or commit a batch with no messages.
+	ErrEmptyBatch = &jsError{message: "no messages in batch"}
+
 	// ErrBatchClosed is returned when attempting to use a batch that has been closed.
 	ErrBatchClosed = &jsError{message: "batch publisher closed"}
 
@@ -76,7 +79,7 @@ var (
 	// Fast-ingest batch publish errors
 
 	// ErrFastBatchNotEnabled is returned when fast batch publish is not enabled on the stream.
-	ErrFastBatchNotEnabled jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchNotEnabled, Description: "batch publish not enabled on stream", Code: 400}}
+	ErrFastBatchNotEnabled jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchNotEnabled, Description: "fast batch publish not enabled on stream", Code: 400}}
 
 	// ErrFastBatchInvalidPattern is returned when an invalid pattern is used for fast batch publish.
 	ErrFastBatchInvalidPattern jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchInvalidPattern, Description: "batch publish invalid pattern used", Code: 400}}

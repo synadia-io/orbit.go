@@ -300,6 +300,8 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		}
 
 		// Release lock to enable ack handler to run
+		ackTimer := time.NewTimer(fp.opts.ackTimeout)
+		defer ackTimer.Stop()
 		fp.mu.Unlock()
 		select {
 		case firstAck := <-firstAckCh:
@@ -317,15 +319,19 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		case err := <-fp.initialErrCh:
 			fp.mu.Lock()
 			defer fp.mu.Unlock()
+			fp.firstAckCh = nil
+			fp.initialErrCh = nil
 			fp.closed = true
 			fp.ackSub.Unsubscribe()
 			fp.ackSub = nil
 			return nil, fmt.Errorf("batch message %d ack error: %w", fp.sequence, err)
-		case <-time.After(fp.opts.ackTimeout):
+		case <-ackTimer.C:
 			// Re-acquire lock to mark closed
 			fp.mu.Lock()
 			defer fp.mu.Unlock()
 
+			fp.firstAckCh = nil
+			fp.initialErrCh = nil
 			fp.closed = true
 			fp.ackSub.Unsubscribe()
 			fp.ackSub = nil
@@ -392,11 +398,10 @@ func applyBatchMsgOpts(msg *nats.Msg, opts []BatchMsgOpt) error {
 	if o.stream != "" {
 		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
 	}
-	if o.lastSubjectSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
 	if o.lastSubject != "" {
 		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
+		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
+	} else if o.lastSubjectSeq != nil {
 		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
 	}
 	if o.lastSeq != nil {
@@ -514,7 +519,7 @@ func (fp *fastPublisher) Close(ctx context.Context) (*BatchAck, error) {
 
 	if fp.sequence == 0 {
 		fp.mu.Unlock()
-		return nil, errors.New("no messages in batch")
+		return nil, ErrEmptyBatch
 	}
 	if fp.closed {
 		fp.mu.Unlock()
