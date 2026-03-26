@@ -593,7 +593,7 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 			return
 		}
 		if fp.errHandler != nil {
-			fp.errHandler(fmt.Errorf("Error processing batch at sequence %d: %w", flowErr.Sequence, flowErr.Error))
+			fp.errHandler(fmt.Errorf("error processing batch at sequence %d: %w", flowErr.Sequence, flowErr.Error))
 		}
 		return
 	default:

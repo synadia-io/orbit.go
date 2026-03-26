@@ -162,7 +162,7 @@ func TestFastPublisher(t *testing.T) {
 		}
 
 		if ack.BatchSize != 201 {
-			t.Fatalf("Expected BatchAck.BatchSize to be 21, got %d", ack.BatchSize)
+			t.Fatalf("Expected BatchAck.BatchSize to be 201, got %d", ack.BatchSize)
 		}
 	})
 
