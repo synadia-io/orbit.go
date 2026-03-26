@@ -15,9 +15,13 @@ import (
 )
 
 type (
+	// FastPublisher manages a fast-ingest batch publish session.
+	//
+	// A FastPublisher is NOT safe for concurrent use. All calls to Add, AddMsg,
+	// Commit, CommitMsg, and Close must be made from a single goroutine.
 	FastPublisher interface {
 		// Add publishes a message to the batch with the given subject and data.
-		// It is an IO operation and the message will be published immediately
+		// It is an IO operation and the message will be published immediately.
 		// Add will wait for an ack on the first message published.
 		// If the number of outstanding acks exceeds the configured limit,
 		// Add will block until an ack is received or the ack timeout is reached.
@@ -49,7 +53,7 @@ type (
 	// FastPublishFlowControl configures flow control for fast batch publishing.
 	FastPublishFlowControl struct {
 		// Flow is the initial flow control value (ack frequency by message count).
-		// Server may adjust this dynamically via BatchFlowAck responses.
+		// Server may adjust this dynamically via flow ack responses.
 		// Default: 100
 		Flow uint16
 
@@ -63,7 +67,7 @@ type (
 		AckTimeout time.Duration
 	}
 
-	BatchFlowAck struct {
+	batchFlowAck struct {
 		// Type: "ack"
 		Type string `json:"type"`
 		// Sequence is the sequence of the message that triggered the ack.
@@ -75,9 +79,9 @@ type (
 		Messages uint16 `json:"msgs"`
 	}
 
-	// BatchFlowGap is used for reporting gaps when fast batch publishing into a stream.
+	// batchFlowGap is used for reporting gaps when fast batch publishing into a stream.
 	// This message is purely informational and could technically be lost without the client receiving it.
-	BatchFlowGap struct {
+	batchFlowGap struct {
 		// Type: "gap"
 		Type string `json:"type"`
 		// ExpectedLastSequence is the sequence expected to be received next.
@@ -87,15 +91,15 @@ type (
 		CurrentSequence uint64 `json:"seq"`
 	}
 
-	// BatchFlowErr is used for reporting errors with "gap: ok" when fast batch publishing into a stream.
+	// batchFlowErr is used for reporting errors when fast batch publishing into a stream.
 	// This message is purely informational and could technically be lost without the client receiving it.
-	BatchFlowErr struct {
+	batchFlowErr struct {
 		// Type: "err"
 		Type string `json:"type"`
 		// Sequence is the sequence of the message that triggered the error.
 		// There are no (relative) guarantees whatsoever about whether the messages up to this sequence were persisted.
 		Sequence uint64 `json:"seq"`
-		// Error is used for "gap:ok" to return the error for the Sequence.
+		// Error is used to return the error for the Sequence.
 		Error *jetstream.APIError `json:"error"`
 	}
 
@@ -118,7 +122,7 @@ type (
 		opts         fastPublisherOpts
 		stallCh      chan struct{}
 		commitCh     chan *batchAckResponse
-		firstAckCh   chan *BatchFlowAck
+		firstAckCh   chan *batchFlowAck
 		initialErrCh chan error
 		errHandler   FastPublishErrHandler
 		// stored to use when closing batch (EOB commit)
@@ -138,7 +142,6 @@ type (
 )
 
 const (
-	// TODO: decide on defaults
 	defaultFastFlow           = 100
 	defaultMaxOutstandingAcks = 2
 )
@@ -181,7 +184,7 @@ func NewFastPublisher(js jetstream.JetStream, opts ...FastPublisherOpt) (FastPub
 
 // sendPing publishes a ping message (op=4) to recover potentially lost acks.
 // Ping reuses the highest batch sequence already sent
-// and the server responds with the latest BatchFlowAck.
+// and the server responds with the latest flow ack.
 // Must be called WITHOUT holding fp.mu.
 func (fp *fastPublisher) sendPing() error {
 	fp.mu.Lock()
@@ -233,7 +236,6 @@ func (fp *fastPublisher) buildReplySubject(seq uint64, operation int) string {
 	return fp.replyPrefix + strconv.FormatUint(seq, 10) + "." + strconv.FormatInt(int64(operation), 10) + ".$FI"
 }
 
-// TODO: Should we use unique option type?
 func (fp *fastPublisher) Add(subject string, data []byte, opts ...BatchMsgOpt) (*FastPubAck, error) {
 	return fp.AddMsg(&nats.Msg{
 		Subject: subject,
@@ -281,7 +283,7 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		fp.ackSub = ackSub
 
 		// Create channel to receive first ack
-		firstAckCh := make(chan *BatchFlowAck, 1)
+		firstAckCh := make(chan *batchFlowAck, 1)
 		fp.firstAckCh = firstAckCh
 		initialErrCh := make(chan error, 1)
 		fp.initialErrCh = initialErrCh
@@ -290,6 +292,8 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		if err := fp.js.Conn().PublishMsg(msg); err != nil {
 			fp.ackSub.Unsubscribe()
 			fp.ackSub = nil
+			fp.firstAckCh = nil
+			fp.initialErrCh = nil
 			fp.closed = true
 			fp.mu.Unlock()
 			return nil, fmt.Errorf("batch message %d publish failed: %w", fp.sequence, err)
@@ -531,12 +535,12 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 	defer fp.mu.Unlock()
 	var commitAck *batchAckResponse
 	var respErr error
-	var flowAck *BatchFlowAck
-	var flowErr *BatchFlowErr
+	var flowAck *batchFlowAck
+	var flowErr *batchFlowErr
 
 	switch {
 	case bytes.Contains(msg.Data, []byte(`"type":"gap"`)):
-		var gapErr *BatchFlowGap
+		var gapErr *batchFlowGap
 		if err := json.Unmarshal(msg.Data, &gapErr); err != nil {
 			respErr = err
 		} else {

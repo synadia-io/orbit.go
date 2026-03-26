@@ -16,6 +16,12 @@ const (
 	JSErrCodeBatchPublishExceedsLimit      jetstream.ErrorCode = 10199
 	JSErrCodeBatchPublishDuplicateMsgID    jetstream.ErrorCode = 10201
 	JSErrCodeBatchPublishInvalidGapMode    jetstream.ErrorCode = 10202
+
+	// Fast-ingest batch publish error codes
+	JSErrCodeFastBatchNotEnabled      jetstream.ErrorCode = 10203
+	JSErrCodeFastBatchInvalidPattern  jetstream.ErrorCode = 10204
+	JSErrCodeFastBatchInvalidID       jetstream.ErrorCode = 10205
+	JSErrCodeFastBatchUnknownID       jetstream.ErrorCode = 10206
 )
 
 var (
@@ -56,6 +62,20 @@ var (
 	// ErrInvalidBatchAck is returned when JetStream ack from batch publish is
 	// invalid.
 	ErrInvalidBatchAck jetstream.JetStreamError = &jsError{message: "invalid jetstream batch publish response"}
+
+	// Fast-ingest batch publish errors
+
+	// ErrFastBatchNotEnabled is returned when fast batch publish is not enabled on the stream.
+	ErrFastBatchNotEnabled jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchNotEnabled, Description: "batch publish not enabled on stream", Code: 400}}
+
+	// ErrFastBatchInvalidPattern is returned when an invalid pattern is used for fast batch publish.
+	ErrFastBatchInvalidPattern jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchInvalidPattern, Description: "batch publish invalid pattern used", Code: 400}}
+
+	// ErrFastBatchInvalidID is returned when fast batch publish ID is invalid (exceeds 64 characters).
+	ErrFastBatchInvalidID jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchInvalidID, Description: "batch publish ID is invalid (exceeds 64 characters)", Code: 400}}
+
+	// ErrFastBatchUnknownID is returned when the fast batch publish ID is unknown.
+	ErrFastBatchUnknownID jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchUnknownID, Description: "batch publish ID is unknown", Code: 400}}
 )
 
 type jsError struct {
