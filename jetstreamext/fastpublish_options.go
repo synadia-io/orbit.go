@@ -18,13 +18,6 @@ import "fmt"
 // configureFastPublisher implements the FastPublisherOpt interface for FastPublishFlowControl,
 // allowing the flow control struct to be used as an option.
 func (fc FastPublishFlowControl) configureFastPublisher(opts *fastPublisherOpts) error {
-	// Validate non-negative values
-	if fc.Flow < 0 {
-		return fmt.Errorf("%w: flow must be non-negative", ErrInvalidOption)
-	}
-	if fc.MaxOutstandingAcks < 0 {
-		return fmt.Errorf("%w: max outstanding acks must be non-negative", ErrInvalidOption)
-	}
 	if fc.AckTimeout < 0 {
 		return fmt.Errorf("%w: ack timeout must be non-negative", ErrInvalidOption)
 	}

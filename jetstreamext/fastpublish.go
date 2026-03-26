@@ -534,7 +534,6 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 	fp.mu.Lock()
 	defer fp.mu.Unlock()
 	var commitAck *batchAckResponse
-	var respErr error
 	var flowAck *batchFlowAck
 	var flowErr *batchFlowErr
 
@@ -542,19 +541,20 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 	case bytes.Contains(msg.Data, []byte(`"type":"gap"`)):
 		var gapErr *batchFlowGap
 		if err := json.Unmarshal(msg.Data, &gapErr); err != nil {
-			respErr = err
-		} else {
 			if fp.errHandler != nil {
-				fp.errHandler(fmt.Errorf("%w: expected last sequence %d; current sequence %d", ErrFastBatchGapDetected, gapErr.ExpectedLastSequence, gapErr.CurrentSequence))
+				fp.errHandler(err)
 			}
 			return
 		}
+		if fp.errHandler != nil {
+			fp.errHandler(fmt.Errorf("%w: expected last sequence %d; current sequence %d", ErrFastBatchGapDetected, gapErr.ExpectedLastSequence, gapErr.CurrentSequence))
+		}
+		return
 	case bytes.Contains(msg.Data, []byte(`"type":"ack"`)):
 		if err := json.Unmarshal(msg.Data, &flowAck); err != nil {
-			respErr = err
-		}
-		if respErr != nil && fp.errHandler != nil {
-			fp.errHandler(respErr)
+			if fp.errHandler != nil {
+				fp.errHandler(err)
+			}
 			return
 		}
 
@@ -582,18 +582,23 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 		}
 	case bytes.Contains(msg.Data, []byte(`"type":"err"`)):
 		if err := json.Unmarshal(msg.Data, &flowErr); err != nil {
-			respErr = err
-		} else {
 			if fp.errHandler != nil {
-				fp.errHandler(fmt.Errorf("Error processing batch at sequence %d: %w", flowErr.Sequence, flowErr.Error))
+				fp.errHandler(err)
 			}
 			return
 		}
+		if fp.errHandler != nil {
+			fp.errHandler(fmt.Errorf("Error processing batch at sequence %d: %w", flowErr.Sequence, flowErr.Error))
+		}
+		return
 	default:
 		// no type hint, thus unmarshal as commit ack
 		// this always means end of batch
 		if err := json.Unmarshal(msg.Data, &commitAck); err != nil {
-			respErr = err
+			if fp.errHandler != nil {
+				fp.errHandler(err)
+			}
+			return
 		}
 		fp.closed = true
 		if fp.commitCh != nil {

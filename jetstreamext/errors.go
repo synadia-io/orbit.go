@@ -18,10 +18,10 @@ const (
 	JSErrCodeBatchPublishInvalidGapMode    jetstream.ErrorCode = 10202
 
 	// Fast-ingest batch publish error codes
-	JSErrCodeFastBatchNotEnabled      jetstream.ErrorCode = 10203
-	JSErrCodeFastBatchInvalidPattern  jetstream.ErrorCode = 10204
-	JSErrCodeFastBatchInvalidID       jetstream.ErrorCode = 10205
-	JSErrCodeFastBatchUnknownID       jetstream.ErrorCode = 10206
+	JSErrCodeFastBatchNotEnabled     jetstream.ErrorCode = 10203
+	JSErrCodeFastBatchInvalidPattern jetstream.ErrorCode = 10204
+	JSErrCodeFastBatchInvalidID      jetstream.ErrorCode = 10205
+	JSErrCodeFastBatchUnknownID      jetstream.ErrorCode = 10206
 )
 
 var (
