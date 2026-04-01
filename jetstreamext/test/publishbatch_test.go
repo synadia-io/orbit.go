@@ -310,7 +310,7 @@ func TestBatchPublisher(t *testing.T) {
 		err = batch.Add("test.1", []byte("message 1"))
 		if err != nil {
 			// With flow control enabled (WaitFirst=true by default), the first Add may fail
-			if errors.Is(err, jetstreamext.ErrBatchPublishIncomplete) {
+			if errors.Is(err, jetstreamext.ErrBatchPublishIncomplete) || errors.Is(err, jetstreamext.ErrAtomicPublishTooManyInflight) || errors.Is(err, jetstreamext.ErrBatchPublishTooManyInflight) {
 				// This is expected - too many outstanding batches
 				return
 			}
@@ -318,8 +318,8 @@ func TestBatchPublisher(t *testing.T) {
 		}
 		// If Add didn't fail, Commit should fail
 		_, err = batch.Commit(ctx, "test.2", []byte("message 2"))
-		if !errors.Is(err, jetstreamext.ErrBatchPublishIncomplete) {
-			t.Fatalf("Expected ErrBatchPublishIncomplete when too many outstanding batches, got %v", err)
+		if !errors.Is(err, jetstreamext.ErrBatchPublishIncomplete) && !errors.Is(err, jetstreamext.ErrAtomicPublishTooManyInflight) && !errors.Is(err, jetstreamext.ErrBatchPublishTooManyInflight) {
+			t.Fatalf("Expected too many inflight error when too many outstanding batches, got %v", err)
 		}
 	})
 
