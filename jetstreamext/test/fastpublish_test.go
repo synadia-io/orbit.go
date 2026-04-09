@@ -1,4 +1,4 @@
-// Copyright 2025 Synadia Communications Inc.
+// Copyright 2026 Synadia Communications Inc.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -288,7 +288,7 @@ func TestFastPublisher_LargeBatch(t *testing.T) {
 		t.Fatalf("Unexpected error creating stream: %v", err)
 	}
 
-	// Create a fast publisher with flow of 1
+	// Create a fast publisher with flow of 100
 	batch, err := jetstreamext.NewFastPublisher(js,
 		jetstreamext.FastPublishFlowControl{
 			Flow:               100,
