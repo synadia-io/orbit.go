@@ -3,8 +3,8 @@ module tests
 go 1.25.0
 
 require (
-	github.com/nats-io/nats-server/v2 v2.12.1-0.20260324122033-7755ef725c6c
-	github.com/nats-io/nats.go v1.50.1-0.20260326145913-a755b19fa15c
+	github.com/nats-io/nats-server/v2 v2.14.0-RC.1
+	github.com/nats-io/nats.go v1.51.0
 	github.com/synadia-io/orbit.go/jetstreamext v0.1.0
 )
 
@@ -17,9 +17,13 @@ require (
 	github.com/nats-io/nkeys v0.4.15 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/synadia-io/orbit.go/natsext v0.1.2 // indirect
-	golang.org/x/crypto v0.49.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
 
 replace github.com/synadia-io/orbit.go/jetstreamext => ..
+
+// Pin nats.go to the v2.14-dev branch for the AllowBatchPublish stream config field.
+// Remove once nats.go with v2.14 is released.
+replace github.com/nats-io/nats.go => github.com/nats-io/nats.go v1.50.1-0.20260401165322-1730e36511c5
