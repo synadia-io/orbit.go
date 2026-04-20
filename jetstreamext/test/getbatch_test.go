@@ -1,3 +1,16 @@
+// Copyright 2026 Synadia Communications Inc.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package test
 
 import (
@@ -371,7 +384,7 @@ func RunBasicJetStreamServer() *server.Server {
 	return RunServerWithOptions(&opts)
 }
 
-func shutdownJSServerAndRemoveStorage(t *testing.T, s *server.Server) {
+func shutdownJSServerAndRemoveStorage(t testing.TB, s *server.Server) {
 	t.Helper()
 	var sd string
 	if config := s.JetStreamConfig(); config != nil {
@@ -386,7 +399,7 @@ func shutdownJSServerAndRemoveStorage(t *testing.T, s *server.Server) {
 	s.WaitForShutdown()
 }
 
-func client(t *testing.T, s *server.Server, opts ...nats.Option) *nats.Conn {
+func client(t testing.TB, s *server.Server, opts ...nats.Option) *nats.Conn {
 	t.Helper()
 	nc, err := nats.Connect(s.ClientURL(), opts...)
 	if err != nil {
@@ -395,7 +408,7 @@ func client(t *testing.T, s *server.Server, opts ...nats.Option) *nats.Conn {
 	return nc
 }
 
-func jsClient(t *testing.T, s *server.Server, opts ...nats.Option) (*nats.Conn, jetstream.JetStream) {
+func jsClient(t testing.TB, s *server.Server, opts ...nats.Option) (*nats.Conn, jetstream.JetStream) {
 	t.Helper()
 	nc := client(t, s, opts...)
 	js, err := jetstream.New(nc)

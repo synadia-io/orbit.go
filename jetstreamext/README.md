@@ -221,3 +221,83 @@ if err != nil {
     // handle error
 }
 ```
+
+### Fast publishing
+
+`FastPublisher` provides high-throughput batch publishing to JetStream streams
+using the fast-ingest nats-server feature. Unlike `BatchPublisher`, which
+atomically publishes messages and only persists them in stream upon commit,
+`FastPublisher` persists messages as they are added to the batch, and the commit
+is used to signal the end of the batch and return an ack with the last persisted
+message.
+
+A `FastPublisher` is **not** safe for concurrent use — all calls to `Add`,
+`AddMsg`, `Commit`, `CommitMsg`, and `Close` must be made from a single
+goroutine.
+
+> Note: Fast publishing requires nats-server v2.14.0 or later.
+
+#### Basic usage
+
+```go
+// Create a fast publisher
+fp, err := jetstreamext.NewFastPublisher(js)
+if err != nil {
+    // handle error
+}
+
+// Add messages to the batch
+for i := range 1000 {
+    _, err := fp.Add("foo.bar", []byte(fmt.Sprintf("message %d", i)))
+    if err != nil {
+        // handle error
+    }
+}
+
+// Commit the batch with a final message
+ack, err := fp.Commit(ctx, "foo.bar", []byte("final message"))
+if err != nil {
+    // handle error
+}
+fmt.Printf("Batch committed: stream=%s, sequence=%d\n", ack.Stream, ack.Sequence)
+```
+
+#### Flow control
+
+Flow control can be configured to tune throughput and back-pressure behavior.
+The server may dynamically adjust the ack frequency based on its own load. Note
+that the server may send acks more frequently than the configured flow, but not
+less.
+
+```go
+fp, err := jetstreamext.NewFastPublisher(js, jetstreamext.FastPublishFlowControl{
+    Flow:               200,              // initial ack frequency (default: 100)
+    MaxOutstandingAcks: 3,                // max unacked batches before stalling (default: 2)
+    AckTimeout:         10 * time.Second, // timeout waiting for acks
+})
+```
+
+#### Gap handling
+
+By default, if the server detects a gap (lost messages), the batch is abandoned.
+You can configure the publisher to continue on gaps and be notified via an error handler:
+
+```go
+fp, err := jetstreamext.NewFastPublisher(js,
+    jetstreamext.WithFastPublisherContinueOnGap(true),
+    jetstreamext.WithFastPublisherErrorHandler(func(err error) {
+        log.Printf("fast publish error: %v", err)
+    }),
+)
+```
+
+#### Closing without a final message
+
+If you don't need to add a final message on commit, use `Close` to send an end-of-batch signal:
+
+```go
+ack, err := fp.Close(ctx)
+if err != nil {
+    // handle error
+}
+```

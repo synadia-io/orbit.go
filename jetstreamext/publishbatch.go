@@ -1,4 +1,4 @@
-// Copyright 2025 Synadia Communications Inc.
+// Copyright 2026 Synadia Communications Inc.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -126,9 +126,7 @@ type (
 
 	batchAckResponse struct {
 		apiResponse
-		*jetstream.PubAck
-		BatchID   string `json:"batch,omitempty"`
-		BatchSize int    `json:"count,omitempty"`
+		*BatchAck
 	}
 
 	// BatchMsgOpt is an option for configuring batch message publishing.
@@ -212,11 +210,10 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	if o.stream != "" {
 		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
 	}
-	if o.lastSubjectSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
 	if o.lastSubject != "" {
 		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
+		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
+	} else if o.lastSubjectSeq != nil {
 		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
 	}
 	if o.lastSeq != nil {
@@ -228,7 +225,7 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(uint64(b.sequence), 10))
 
 	// Determine if we need flow control for this message
-	needsAck := false
+	var needsAck bool
 	if b.opts.flowControl.AckFirst && b.sequence == 1 {
 		needsAck = true // wait on first message
 	} else if b.opts.flowControl.AckEvery > 0 && b.sequence%b.opts.flowControl.AckEvery == 0 {
@@ -296,11 +293,10 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 	if o.stream != "" {
 		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
 	}
-	if o.lastSubjectSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
 	if o.lastSubject != "" {
 		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
+		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
+	} else if o.lastSubjectSeq != nil {
 		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
 	}
 	if o.lastSeq != nil {
@@ -336,18 +332,12 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 	if batchResp.Error != nil {
 		return nil, batchResp.Error
 	}
-	if batchResp.PubAck == nil || batchResp.PubAck.Stream == "" ||
+	if batchResp.BatchAck == nil || batchResp.Stream == "" ||
 		batchResp.BatchID != b.batchID || batchResp.BatchSize != int(b.sequence) {
 		return nil, ErrInvalidBatchAck
 	}
 
-	return &BatchAck{
-		Stream:    batchResp.PubAck.Stream,
-		Sequence:  batchResp.PubAck.Sequence,
-		Domain:    batchResp.PubAck.Domain,
-		BatchID:   batchResp.BatchID,
-		BatchSize: batchResp.BatchSize,
-	}, nil
+	return batchResp.BatchAck, nil
 }
 
 // Discard cancels the batch without committing.
@@ -469,19 +459,13 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 		if batchResp.Error != nil {
 			return nil, batchResp.Error
 		}
-		if batchResp.PubAck == nil || batchResp.PubAck.Stream == "" ||
+		if batchResp.BatchAck == nil || batchResp.Stream == "" ||
 			batchResp.BatchID != batchID || batchResp.BatchSize != msgs {
 
 			return nil, ErrInvalidBatchAck
 		}
 
-		batchAck = &BatchAck{
-			Stream:    batchResp.PubAck.Stream,
-			Sequence:  batchResp.PubAck.Sequence,
-			Domain:    batchResp.PubAck.Domain,
-			BatchID:   batchResp.BatchID,
-			BatchSize: batchResp.BatchSize,
-		}
+		batchAck = batchResp.BatchAck
 
 	}
 	return batchAck, nil
