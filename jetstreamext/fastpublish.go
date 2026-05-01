@@ -125,8 +125,7 @@ type (
 		js             jetstream.JetStream
 		flow           uint16
 		ackInboxPrefix string
-		// replyPrefix caches "<inbox>.<flow>.<gap>." to avoid fmt.Sprintf per message.
-		// Rebuilt when flow changes via server ack.
+		// replyPrefix caches "<inbox>.<flow>.<gap>." fixed at initialization; not rebuilt when flow changes.
 		replyPrefix  string
 		ackSub       *nats.Subscription
 		sequence     uint64
@@ -191,7 +190,13 @@ func NewFastPublisher(js jetstream.JetStream, opts ...FastPublisherOpt) (FastPub
 		opts:           pubOpts,
 		errHandler:     pubOpts.errHandler,
 	}
-	fp.buildReplyPrefix()
+
+	gap := "fail"
+	if fp.opts.continueOnGap {
+		gap = "ok"
+	}
+	fp.replyPrefix = fp.ackInboxPrefix + "." + strconv.FormatUint(uint64(fp.flow), 10) + "." + gap + "."
+
 	return fp, nil
 }
 
@@ -232,16 +237,6 @@ func (fp *fastPublisher) waitForStall(stallCh <-chan struct{}) error {
 			return errors.New("ack timeout")
 		}
 	}
-}
-
-// buildReplyPrefix pre-computes the stable portion of the reply subject:
-// "<inbox>.<flow>.<gap>." so that per-message we only append "<seq>.<op>.$FI".
-func (fp *fastPublisher) buildReplyPrefix() {
-	gap := "fail"
-	if fp.opts.continueOnGap {
-		gap = "ok"
-	}
-	fp.replyPrefix = fp.ackInboxPrefix + "." + strconv.FormatUint(uint64(fp.flow), 10) + "." + gap + "."
 }
 
 // buildReplySubject constructs the full reply subject using the cached prefix.
@@ -579,7 +574,6 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 		if flowAck != nil {
 			if fp.flow != flowAck.Messages {
 				fp.flow = flowAck.Messages
-				fp.buildReplyPrefix()
 			}
 			fp.ackSequence = flowAck.Sequence
 			// Handle first message ack specially - firstAckCh is only set for first message
