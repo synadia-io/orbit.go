@@ -462,3 +462,51 @@ func TestFastPublisher_WaitForAckOnExactBoundary(t *testing.T) {
 		t.Fatalf("Unexpected error committing: %v", err)
 	}
 }
+
+func TestFastPublisher_StallEveryMessage(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer shutdownJSServerAndRemoveStorage(t, s)
+	nc, js := jsClient(t, s)
+	defer nc.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:              "TEST",
+		Subjects:          []string{"test.>"},
+		AllowBatchPublish: true,
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error creating stream: %v", err)
+	}
+
+	// flow=1, MaxOutstandingAcks=1: every message triggers a stall/unstall cycle.
+	// Stresses the persistent stall channel mechanics (send-not-close design
+	// that allows the channel to be reused across cycles).
+	batch, err := jetstreamext.NewFastPublisher(js,
+		jetstreamext.FastPublishFlowControl{
+			Flow:               1,
+			MaxOutstandingAcks: 1,
+			AckTimeout:         5 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Unexpected error creating publisher: %v", err)
+	}
+
+	const msgCount = 50
+	for i := range msgCount {
+		if _, err := batch.Add("test.msg", []byte("data")); err != nil {
+			t.Fatalf("Unexpected error adding message %d: %v", i, err)
+		}
+	}
+
+	ack, err := batch.Commit(ctx, "test.commit", []byte("commit"))
+	if err != nil {
+		t.Fatalf("Unexpected error committing: %v", err)
+	}
+	if ack.BatchSize != msgCount+1 {
+		t.Fatalf("Expected BatchSize %d, got %d", msgCount+1, ack.BatchSize)
+	}
+}

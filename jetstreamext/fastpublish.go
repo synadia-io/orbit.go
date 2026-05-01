@@ -215,6 +215,8 @@ func (fp *fastPublisher) sendPing() error {
 
 // waitForStall blocks until the stall channel is signaled, sending periodic
 // pings to recover lost acks. Returns an error only on total timeout.
+// The deadline is intentionally shared across all re-stall cycles: ackTimeout is a
+// hard ceiling on total wait time, not per-ack wait time.
 // Must be called WITHOUT holding fp.mu.
 func (fp *fastPublisher) waitForStall(stallCh <-chan struct{}) error {
 	// Split timeout into intervals: try up to 2 pings before giving up.
@@ -227,6 +229,13 @@ func (fp *fastPublisher) waitForStall(stallCh <-chan struct{}) error {
 	for {
 		select {
 		case <-stallCh:
+			// After receiving a new ack, it could be we still need to wait more if we're being slowed down.
+			fp.mu.Lock()
+			waitForAck := fp.waitForAck()
+			fp.mu.Unlock()
+			if waitForAck {
+				continue
+			}
 			return nil
 		case <-ping.C:
 			if err := fp.sendPing(); err != nil {
@@ -295,6 +304,7 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		fp.firstAckCh = firstAckCh
 		initialErrCh := make(chan error, 1)
 		fp.initialErrCh = initialErrCh
+		fp.stallCh = make(chan struct{}, 1)
 
 		// Publish with reply inbox already set (without holding lock)
 		if err := fp.js.Conn().PublishMsg(msg); err != nil {
@@ -317,7 +327,6 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 			fp.mu.Lock()
 			defer fp.mu.Unlock()
 
-			fp.flow = firstAck.Messages
 			fp.batchSubject = msg.Subject
 			return &FastPubAck{
 				BatchSequence: fp.sequence,
@@ -355,11 +364,7 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		return nil, fmt.Errorf("batch message %d publish failed: %w", seq, err)
 	}
 
-	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) <= fp.sequence
-	if waitForAck {
-		if fp.stallCh == nil {
-			fp.stallCh = make(chan struct{}, 1)
-		}
+	if fp.waitForAck() {
 		stallCh := fp.stallCh
 		fp.mu.Unlock()
 		if err := fp.waitForStall(stallCh); err != nil {
@@ -378,6 +383,11 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		BatchSequence: seq,
 		AckSequence:   ackSeq,
 	}, nil
+}
+
+// Lock should be held.
+func (fp *fastPublisher) waitForAck() bool {
+	return fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) <= fp.sequence
 }
 
 // applyBatchMsgOpts processes batch message options and sets the appropriate
@@ -584,10 +594,9 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 
 			// Handle flow ack. We want to let the publisher know if we are no longer stalled
 			// and can continue publishing.
-			if fp.stallCh != nil {
-				// Unblock publisher if we were stalled and are now below the max outstanding acks
-				close(fp.stallCh)
-				fp.stallCh = nil
+			select {
+			case fp.stallCh <- struct{}{}:
+			default:
 			}
 		}
 	case bytes.Contains(msg.Data, []byte(`"type":"err"`)):
