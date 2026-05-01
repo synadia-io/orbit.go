@@ -408,3 +408,57 @@ func TestFastPublisher_LargeBatch(t *testing.T) {
 		t.Fatalf("Expected BatchAck.BatchSize to be 100000, got %d", ack.BatchSize)
 	}
 }
+
+func TestFastPublisher_WaitForAckOnExactBoundary(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer shutdownJSServerAndRemoveStorage(t, s)
+	nc, js := jsClient(t, s)
+	defer nc.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:              "TEST",
+		Subjects:          []string{"test.>"},
+		AllowBatchPublish: true,
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error creating stream: %v", err)
+	}
+
+	// flow=1: ack every message, at most 1 outstanding ack at a time.
+	batch, err := jetstreamext.NewFastPublisher(js,
+		jetstreamext.FastPublishFlowControl{
+			Flow:               1,
+			MaxOutstandingAcks: 1,
+			AckTimeout:         5 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Unexpected error creating publisher: %v", err)
+	}
+
+	// Message 1 goes through the first-ack path and always waits.
+	_, err = batch.Add("test.msg", []byte("data"))
+	if err != nil {
+		t.Fatalf("Unexpected error adding msg 1: %v", err)
+	}
+
+	// Message 2: seq=2, ackSeq=1. Stall condition: 1+1 <= 2 = true.
+	// With old code (1+1 < 2 = false): no stall, AckSequence returned as 1. Additionally,
+	// if we would stall the ping timer would kick in and fail the batch due to there being a gap
+	// since the message wasn't sent right after increasing the sequence.
+	// With new code: sends first, stalls, waits for the server ack, AckSequence returned as 2.
+	ack2, err := batch.Add("test.msg", []byte("data"))
+	if err != nil {
+		t.Fatalf("Unexpected error adding msg 2: %v", err)
+	}
+	if ack2.AckSequence < ack2.BatchSequence {
+		t.Errorf("AckSequence %d < BatchSequence %d: publisher did not stall at the exact flow boundary; old code used '<' which skipped the stall when outstanding equalled flow*maxOA", ack2.AckSequence, ack2.BatchSequence)
+	}
+
+	if _, err = batch.Commit(ctx, "test.commit", []byte("commit")); err != nil {
+		t.Fatalf("Unexpected error committing: %v", err)
+	}
+}

@@ -349,8 +349,13 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 
 	// other than first message, we just publish and track pending acks.
 	// if we exceed max outstanding acks, we stall until we get a flow ack.
+	seq := fp.sequence
+	if err := fp.js.Conn().PublishMsg(msg); err != nil {
+		fp.mu.Unlock()
+		return nil, fmt.Errorf("batch message %d publish failed: %w", seq, err)
+	}
 
-	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) < fp.sequence
+	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) <= fp.sequence
 	if waitForAck {
 		if fp.stallCh == nil {
 			fp.stallCh = make(chan struct{}, 1)
@@ -366,15 +371,8 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		fp.mu.Lock()
 	}
 
-	// Capture state under lock, then release before the publish I/O
-	// so the ack handler can process responses concurrently.
-	seq := fp.sequence
 	ackSeq := fp.ackSequence
 	fp.mu.Unlock()
-
-	if err := fp.js.Conn().PublishMsg(msg); err != nil {
-		return nil, fmt.Errorf("batch message %d publish failed: %w", seq, err)
-	}
 
 	return &FastPubAck{
 		BatchSequence: seq,
@@ -462,7 +460,11 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 		}
 		fp.ackSub = ackSub
 	}
-	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) < fp.sequence
+	if err := fp.js.Conn().PublishMsg(msg); err != nil {
+		fp.mu.Unlock()
+		return nil, fmt.Errorf("batch commit failed: %w", err)
+	}
+	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) <= fp.sequence
 	if waitForAck {
 		if fp.stallCh == nil {
 			fp.stallCh = make(chan struct{}, 1)
@@ -476,10 +478,6 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 			return nil, fmt.Errorf("batch commit %w", err)
 		}
 		fp.mu.Lock()
-	}
-	if err := fp.js.Conn().PublishMsg(msg); err != nil {
-		fp.mu.Unlock()
-		return nil, fmt.Errorf("batch commit failed: %w", err)
 	}
 
 	// Release lock before waiting for commit response - handler needs lock to send to commitCh
