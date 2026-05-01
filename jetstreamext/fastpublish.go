@@ -219,11 +219,8 @@ func (fp *fastPublisher) sendPing() error {
 // hard ceiling on total wait time, not per-ack wait time.
 // Must be called WITHOUT holding fp.mu.
 func (fp *fastPublisher) waitForStall(stallCh <-chan struct{}) error {
-	// Split timeout into intervals: try up to 2 pings before giving up.
-	pingInterval := fp.opts.ackTimeout / 3
-	deadline := time.NewTimer(fp.opts.ackTimeout)
+	deadline, ping, pingInterval := fp.newPingTimers()
 	defer deadline.Stop()
-	ping := time.NewTimer(pingInterval)
 	defer ping.Stop()
 
 	for {
@@ -246,6 +243,14 @@ func (fp *fastPublisher) waitForStall(stallCh <-chan struct{}) error {
 			return errors.New("ack timeout")
 		}
 	}
+}
+
+func (fp *fastPublisher) newPingTimers() (deadline, ping *time.Timer, pingInterval time.Duration) {
+	// wait for commit ack with periodic pings to recover lost acks, or deadline/context cancel
+	pingInterval = fp.opts.ackTimeout / 3
+	deadline = time.NewTimer(fp.opts.ackTimeout)
+	ping = time.NewTimer(pingInterval)
+	return
 }
 
 // buildReplySubject constructs the full reply subject using the cached prefix.
@@ -474,48 +479,46 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 		fp.mu.Unlock()
 		return nil, fmt.Errorf("batch commit failed: %w", err)
 	}
-	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) <= fp.sequence
-	if waitForAck {
-		if fp.stallCh == nil {
-			fp.stallCh = make(chan struct{}, 1)
-		}
-		stallCh := fp.stallCh
-		fp.mu.Unlock()
-		if err := fp.waitForStall(stallCh); err != nil {
-			fp.mu.Lock()
-			fp.closed = true
-			fp.mu.Unlock()
-			return nil, fmt.Errorf("batch commit %w", err)
-		}
-		fp.mu.Lock()
-	}
 
 	// Release lock before waiting for commit response - handler needs lock to send to commitCh
 	fp.mu.Unlock()
 
-	// wait for commit ack or context cancel
+	deadline, ping, pingInterval := fp.newPingTimers()
+	defer deadline.Stop()
+	defer ping.Stop()
+
 	var batchAck *BatchAck
 	var commitErr error
-	select {
-	case commitResp := <-fp.commitCh:
-		if commitResp.Error != nil {
-			commitErr = commitResp.Error
-			break
+	for {
+		select {
+		case commitResp := <-fp.commitCh:
+			if commitResp.Error != nil {
+				commitErr = commitResp.Error
+			} else if commitResp.BatchAck == nil || commitResp.Stream == "" {
+				commitErr = ErrInvalidBatchAck
+			} else {
+				batchAck = commitResp.BatchAck
+			}
+		case <-ping.C:
+			if err := fp.sendPing(); err != nil {
+				commitErr = fmt.Errorf("ping failed: %w", err)
+				break
+			}
+			ping.Reset(pingInterval)
+			continue
+		case <-deadline.C:
+			commitErr = errors.New("ack timeout")
+		case <-ctx.Done():
+			fp.mu.Lock()
+			fp.closed = true
+			if fp.ackSub != nil {
+				fp.ackSub.Unsubscribe()
+				fp.ackSub = nil
+			}
+			fp.mu.Unlock()
+			return nil, ctx.Err()
 		}
-		if commitResp.BatchAck == nil || commitResp.Stream == "" {
-			commitErr = ErrInvalidBatchAck
-			break
-		}
-		batchAck = commitResp.BatchAck
-	case <-ctx.Done():
-		fp.mu.Lock()
-		fp.closed = true
-		if fp.ackSub != nil {
-			fp.ackSub.Unsubscribe()
-			fp.ackSub = nil
-		}
-		fp.mu.Unlock()
-		return nil, ctx.Err()
+		break
 	}
 
 	// Reacquire lock to safely modify shared state

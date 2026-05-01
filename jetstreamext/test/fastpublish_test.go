@@ -409,6 +409,50 @@ func TestFastPublisher_LargeBatch(t *testing.T) {
 	}
 }
 
+func TestFastPublisher_CommitRespectsAckTimeout(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer shutdownJSServerAndRemoveStorage(t, s)
+	nc, js := jsClient(t, s)
+	defer nc.Close()
+
+	_, err := js.CreateStream(context.Background(), jetstream.StreamConfig{
+		Name:              "TEST",
+		Subjects:          []string{"test.>"},
+		AllowBatchPublish: true,
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error creating stream: %v", err)
+	}
+
+	batch, err := jetstreamext.NewFastPublisher(js,
+		jetstreamext.FastPublishFlowControl{
+			Flow:               1,
+			MaxOutstandingAcks: 1,
+			AckTimeout:         5 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Unexpected error creating publisher: %v", err)
+	}
+
+	for i := range 10 {
+		if _, err := batch.Add("test.msg", []byte("data")); err != nil {
+			t.Fatalf("Unexpected error adding message %d: %v", i, err)
+		}
+	}
+
+	// Commit with no deadline on the context. With the old code this would hang
+	// forever because the stall timer didn't watch for the commit ack. Now we wait for
+	// the commit and include pings and a deadline as well.
+	ack, err := batch.Commit(context.Background(), "test.commit", []byte("commit"))
+	if err != nil {
+		t.Fatalf("Unexpected error committing with context.Background(): %v", err)
+	}
+	if ack.BatchSize != 11 {
+		t.Fatalf("Expected BatchSize 11, got %d", ack.BatchSize)
+	}
+}
+
 func TestFastPublisher_WaitForAckOnExactBoundary(t *testing.T) {
 	s := RunBasicJetStreamServer()
 	defer shutdownJSServerAndRemoveStorage(t, s)
