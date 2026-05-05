@@ -107,13 +107,13 @@ type (
 		BatchID string `json:"batch,omitempty"`
 
 		// BatchSize is the number of messages in the batch.
-		BatchSize int `json:"count,omitempty"`
+		BatchSize uint64 `json:"count,omitempty"`
 	}
 
 	batchPublisher struct {
 		js       jetstream.JetStream
 		batchID  string
-		sequence int
+		sequence uint64
 		closed   bool
 		opts     batchPublishOpts
 		mu       sync.Mutex
@@ -222,13 +222,13 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 
 	b.sequence++
 	msg.Header.Set(BatchIDHeader, b.batchID)
-	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(uint64(b.sequence), 10))
+	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(b.sequence, 10))
 
 	// Determine if we need flow control for this message
 	var needsAck bool
 	if b.opts.flowControl.AckFirst && b.sequence == 1 {
 		needsAck = true // wait on first message
-	} else if b.opts.flowControl.AckEvery > 0 && b.sequence%b.opts.flowControl.AckEvery == 0 {
+	} else if b.opts.flowControl.AckEvery > 0 && b.sequence%uint64(b.opts.flowControl.AckEvery) == 0 {
 		needsAck = true // periodic flow control
 	}
 
@@ -306,7 +306,7 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 	b.sequence++
 
 	msg.Header.Set(BatchIDHeader, b.batchID)
-	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(uint64(b.sequence), 10))
+	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(b.sequence, 10))
 	msg.Header.Set(BatchCommitHeader, "1")
 
 	ctx, cancel = wrapContextWithoutDeadline(ctx, b.js)
@@ -333,7 +333,7 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 		return nil, batchResp.Error
 	}
 	if batchResp.BatchAck == nil || batchResp.Stream == "" ||
-		batchResp.BatchID != b.batchID || batchResp.BatchSize != int(b.sequence) {
+		batchResp.BatchID != b.batchID || batchResp.BatchSize != b.sequence {
 		return nil, ErrInvalidBatchAck
 	}
 
@@ -355,6 +355,8 @@ func (b *batchPublisher) Discard() error {
 }
 
 // Size returns the number of messages added to the batch so far.
+// Note: the return type is int to satisfy the BatchPublisher interface; the internal counter is
+// uint64, so batches exceeding math.MaxInt will be reported incorrectly.
 func (b *batchPublisher) Size() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -460,7 +462,7 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 			return nil, batchResp.Error
 		}
 		if batchResp.BatchAck == nil || batchResp.Stream == "" ||
-			batchResp.BatchID != batchID || batchResp.BatchSize != msgs {
+			batchResp.BatchID != batchID || batchResp.BatchSize != uint64(msgs) {
 
 			return nil, ErrInvalidBatchAck
 		}

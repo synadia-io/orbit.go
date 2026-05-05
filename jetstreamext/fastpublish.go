@@ -125,8 +125,7 @@ type (
 		js             jetstream.JetStream
 		flow           uint16
 		ackInboxPrefix string
-		// replyPrefix caches "<inbox>.<flow>.<gap>." to avoid fmt.Sprintf per message.
-		// Rebuilt when flow changes via server ack.
+		// replyPrefix caches "<inbox>.<flow>.<gap>." fixed at initialization; not rebuilt when flow changes.
 		replyPrefix  string
 		ackSub       *nats.Subscription
 		sequence     uint64
@@ -191,7 +190,13 @@ func NewFastPublisher(js jetstream.JetStream, opts ...FastPublisherOpt) (FastPub
 		opts:           pubOpts,
 		errHandler:     pubOpts.errHandler,
 	}
-	fp.buildReplyPrefix()
+
+	gap := "fail"
+	if fp.opts.continueOnGap {
+		gap = "ok"
+	}
+	fp.replyPrefix = fp.ackInboxPrefix + "." + strconv.FormatUint(uint64(fp.flow), 10) + "." + gap + "."
+
 	return fp, nil
 }
 
@@ -210,18 +215,24 @@ func (fp *fastPublisher) sendPing() error {
 
 // waitForStall blocks until the stall channel is signaled, sending periodic
 // pings to recover lost acks. Returns an error only on total timeout.
+// The deadline is intentionally shared across all re-stall cycles: ackTimeout is a
+// hard ceiling on total wait time, not per-ack wait time.
 // Must be called WITHOUT holding fp.mu.
 func (fp *fastPublisher) waitForStall(stallCh <-chan struct{}) error {
-	// Split timeout into intervals: try up to 2 pings before giving up.
-	pingInterval := fp.opts.ackTimeout / 3
-	deadline := time.NewTimer(fp.opts.ackTimeout)
+	deadline, ping, pingInterval := fp.newPingTimers()
 	defer deadline.Stop()
-	ping := time.NewTimer(pingInterval)
 	defer ping.Stop()
 
 	for {
 		select {
 		case <-stallCh:
+			// After receiving a new ack, it could be we still need to wait more if we're being slowed down.
+			fp.mu.Lock()
+			waitForAck := fp.waitForAck()
+			fp.mu.Unlock()
+			if waitForAck {
+				continue
+			}
 			return nil
 		case <-ping.C:
 			if err := fp.sendPing(); err != nil {
@@ -234,14 +245,12 @@ func (fp *fastPublisher) waitForStall(stallCh <-chan struct{}) error {
 	}
 }
 
-// buildReplyPrefix pre-computes the stable portion of the reply subject:
-// "<inbox>.<flow>.<gap>." so that per-message we only append "<seq>.<op>.$FI".
-func (fp *fastPublisher) buildReplyPrefix() {
-	gap := "fail"
-	if fp.opts.continueOnGap {
-		gap = "ok"
-	}
-	fp.replyPrefix = fp.ackInboxPrefix + "." + strconv.FormatUint(uint64(fp.flow), 10) + "." + gap + "."
+func (fp *fastPublisher) newPingTimers() (deadline, ping *time.Timer, pingInterval time.Duration) {
+	// wait for commit ack with periodic pings to recover lost acks, or deadline/context cancel
+	pingInterval = fp.opts.ackTimeout / 3
+	deadline = time.NewTimer(fp.opts.ackTimeout)
+	ping = time.NewTimer(pingInterval)
+	return
 }
 
 // buildReplySubject constructs the full reply subject using the cached prefix.
@@ -300,6 +309,7 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		fp.firstAckCh = firstAckCh
 		initialErrCh := make(chan error, 1)
 		fp.initialErrCh = initialErrCh
+		fp.stallCh = make(chan struct{}, 1)
 
 		// Publish with reply inbox already set (without holding lock)
 		if err := fp.js.Conn().PublishMsg(msg); err != nil {
@@ -322,7 +332,6 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 			fp.mu.Lock()
 			defer fp.mu.Unlock()
 
-			fp.flow = firstAck.Messages
 			fp.batchSubject = msg.Subject
 			return &FastPubAck{
 				BatchSequence: fp.sequence,
@@ -354,12 +363,13 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 
 	// other than first message, we just publish and track pending acks.
 	// if we exceed max outstanding acks, we stall until we get a flow ack.
+	seq := fp.sequence
+	if err := fp.js.Conn().PublishMsg(msg); err != nil {
+		fp.mu.Unlock()
+		return nil, fmt.Errorf("batch message %d publish failed: %w", seq, err)
+	}
 
-	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) < fp.sequence
-	if waitForAck {
-		if fp.stallCh == nil {
-			fp.stallCh = make(chan struct{}, 1)
-		}
+	if fp.waitForAck() {
 		stallCh := fp.stallCh
 		fp.mu.Unlock()
 		if err := fp.waitForStall(stallCh); err != nil {
@@ -371,20 +381,18 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		fp.mu.Lock()
 	}
 
-	// Capture state under lock, then release before the publish I/O
-	// so the ack handler can process responses concurrently.
-	seq := fp.sequence
 	ackSeq := fp.ackSequence
 	fp.mu.Unlock()
-
-	if err := fp.js.Conn().PublishMsg(msg); err != nil {
-		return nil, fmt.Errorf("batch message %d publish failed: %w", seq, err)
-	}
 
 	return &FastPubAck{
 		BatchSequence: seq,
 		AckSequence:   ackSeq,
 	}, nil
+}
+
+// Lock should be held.
+func (fp *fastPublisher) waitForAck() bool {
+	return fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) <= fp.sequence
 }
 
 // applyBatchMsgOpts processes batch message options and sets the appropriate
@@ -467,21 +475,6 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 		}
 		fp.ackSub = ackSub
 	}
-	waitForAck := fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) < fp.sequence
-	if waitForAck {
-		if fp.stallCh == nil {
-			fp.stallCh = make(chan struct{}, 1)
-		}
-		stallCh := fp.stallCh
-		fp.mu.Unlock()
-		if err := fp.waitForStall(stallCh); err != nil {
-			fp.mu.Lock()
-			fp.closed = true
-			fp.mu.Unlock()
-			return nil, fmt.Errorf("batch commit %w", err)
-		}
-		fp.mu.Lock()
-	}
 	if err := fp.js.Conn().PublishMsg(msg); err != nil {
 		fp.mu.Unlock()
 		return nil, fmt.Errorf("batch commit failed: %w", err)
@@ -490,29 +483,42 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 	// Release lock before waiting for commit response - handler needs lock to send to commitCh
 	fp.mu.Unlock()
 
-	// wait for commit ack or context cancel
+	deadline, ping, pingInterval := fp.newPingTimers()
+	defer deadline.Stop()
+	defer ping.Stop()
+
 	var batchAck *BatchAck
 	var commitErr error
-	select {
-	case commitResp := <-fp.commitCh:
-		if commitResp.Error != nil {
-			commitErr = commitResp.Error
-			break
+	for {
+		select {
+		case commitResp := <-fp.commitCh:
+			if commitResp.Error != nil {
+				commitErr = commitResp.Error
+			} else if commitResp.BatchAck == nil || commitResp.Stream == "" {
+				commitErr = ErrInvalidBatchAck
+			} else {
+				batchAck = commitResp.BatchAck
+			}
+		case <-ping.C:
+			if err := fp.sendPing(); err != nil {
+				commitErr = fmt.Errorf("ping failed: %w", err)
+				break
+			}
+			ping.Reset(pingInterval)
+			continue
+		case <-deadline.C:
+			commitErr = errors.New("ack timeout")
+		case <-ctx.Done():
+			fp.mu.Lock()
+			fp.closed = true
+			if fp.ackSub != nil {
+				fp.ackSub.Unsubscribe()
+				fp.ackSub = nil
+			}
+			fp.mu.Unlock()
+			return nil, ctx.Err()
 		}
-		if commitResp.BatchAck == nil || commitResp.Stream == "" {
-			commitErr = ErrInvalidBatchAck
-			break
-		}
-		batchAck = commitResp.BatchAck
-	case <-ctx.Done():
-		fp.mu.Lock()
-		fp.closed = true
-		if fp.ackSub != nil {
-			fp.ackSub.Unsubscribe()
-			fp.ackSub = nil
-		}
-		fp.mu.Unlock()
-		return nil, ctx.Err()
+		break
 	}
 
 	// Reacquire lock to safely modify shared state
@@ -579,7 +585,6 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 		if flowAck != nil {
 			if fp.flow != flowAck.Messages {
 				fp.flow = flowAck.Messages
-				fp.buildReplyPrefix()
 			}
 			fp.ackSequence = flowAck.Sequence
 			// Handle first message ack specially - firstAckCh is only set for first message
@@ -592,10 +597,9 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 
 			// Handle flow ack. We want to let the publisher know if we are no longer stalled
 			// and can continue publishing.
-			if fp.stallCh != nil {
-				// Unblock publisher if we were stalled and are now below the max outstanding acks
-				close(fp.stallCh)
-				fp.stallCh = nil
+			select {
+			case fp.stallCh <- struct{}{}:
+			default:
 			}
 		}
 	case bytes.Contains(msg.Data, []byte(`"type":"err"`)):

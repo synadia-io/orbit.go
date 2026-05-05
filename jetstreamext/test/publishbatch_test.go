@@ -538,7 +538,7 @@ func TestPublishMsgBatch(t *testing.T) {
 		if info.State.Msgs != uint64(count) {
 			t.Fatalf("Expected %d messages in the stream, got %d", count, info.State.Msgs)
 		}
-		if ack.BatchSize != count {
+		if ack.BatchSize != uint64(count) {
 			t.Fatalf("Expected BatchAck.BatchSize to be %d, got %d", count, ack.BatchSize)
 		}
 	})
