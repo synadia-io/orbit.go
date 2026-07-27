@@ -134,7 +134,7 @@ func TestWithTraceCapture_Cluster(t *testing.T) {
 	}
 }
 
-func waitForTraceObject(t *testing.T, store jetstream.ObjectStore, instanceID string, timeout time.Duration) *jetstream.ObjectInfo {
+func waitForTraceObject(t testing.TB, store jetstream.ObjectStore, instanceID string, timeout time.Duration) *jetstream.ObjectInfo {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
@@ -158,7 +158,7 @@ func waitForTraceObject(t *testing.T, store jetstream.ObjectStore, instanceID st
 // waitForTraceCount polls until at least want objects exist for the instance, or
 // the timeout elapses. Captures upload asynchronously after a connection closes, so
 // a positive assertion has to wait rather than check once.
-func waitForTraceCount(t *testing.T, store jetstream.ObjectStore, instanceID string, want int, timeout time.Duration) bool {
+func waitForTraceCount(t testing.TB, store jetstream.ObjectStore, instanceID string, want int, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
@@ -172,7 +172,7 @@ func waitForTraceCount(t *testing.T, store jetstream.ObjectStore, instanceID str
 	}
 }
 
-func countTraceObjects(t *testing.T, store jetstream.ObjectStore, instanceID string) int {
+func countTraceObjects(t testing.TB, store jetstream.ObjectStore, instanceID string) int {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

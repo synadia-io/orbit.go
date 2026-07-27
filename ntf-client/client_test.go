@@ -19,7 +19,7 @@ func TestCreateServer(t *testing.T) {
 		client.Reset(t)
 	})
 
-	client.WithJetStreamServer(t, func(t *testing.T, nc *nats.Conn, inst *Instance) {
+	client.WithJetStreamServer(t, func(t testing.TB, nc *nats.Conn, inst *Instance) {
 		srv := inst.Servers[0]
 		if !strings.HasSuffix(srv.Name, "-n1") {
 			t.Fatalf("name not correct: %q", srv.Name)
@@ -42,7 +42,7 @@ func TestCreateCluster(t *testing.T) {
 		client.Reset(t)
 	})
 
-	client.WithJetStreamCluster(t, 3, func(t *testing.T, nc *nats.Conn, inst *Instance) {
+	client.WithJetStreamCluster(t, 3, func(t testing.TB, nc *nats.Conn, inst *Instance) {
 		if len(inst.Servers) != 3 {
 			t.Fatalf("cluster length not correct: %v", len(inst.Servers))
 		}
@@ -150,7 +150,7 @@ func TestParallelClusters(t *testing.T) {
 		i := i
 		t.Run(fmt.Sprintf("cluster-%d", i), func(t *testing.T) {
 			t.Parallel()
-			client.WithJetStreamCluster(t, 3, func(t *testing.T, nc *nats.Conn, inst *Instance) {
+			client.WithJetStreamCluster(t, 3, func(t testing.TB, nc *nats.Conn, inst *Instance) {
 				if len(inst.Servers) != 3 {
 					t.Fatalf("cluster length wrong: %d", len(inst.Servers))
 				}
@@ -620,7 +620,7 @@ accounts {
 	// so unauthenticated connects are rejected.
 	const authSnippet = `# auth required, no no_auth_user`
 
-	client.WithCluster(t, 2, func(t *testing.T, nc *nats.Conn, inst *Instance) {
+	client.WithCluster(t, 2, func(t testing.TB, nc *nats.Conn, inst *Instance) {
 		if !nc.IsConnected() {
 			t.Fatal("expected connected nc")
 		}
@@ -640,7 +640,7 @@ func TestCreateSuperCluster(t *testing.T) {
 		client.Reset(t)
 	})
 
-	client.WithJetStreamSuperCluster(t, 3, 3, func(t *testing.T, nc *nats.Conn, inst *Instance) {
+	client.WithJetStreamSuperCluster(t, 3, 3, func(t testing.TB, nc *nats.Conn, inst *Instance) {
 		if len(inst.Servers) != 9 {
 			t.Fatalf("cluster length not correct: %v", len(inst.Servers))
 		}
@@ -704,7 +704,7 @@ accounts {
 }
 `
 
-	client.WithServer(t, func(t *testing.T, _ *nats.Conn, inst *Instance) {
+	client.WithServer(t, func(t testing.TB, _ *nats.Conn, inst *Instance) {
 		target := inst.Servers[0]
 
 		// Pre-update: alice cannot connect.
@@ -786,7 +786,7 @@ func TestGeneratedTLS_Mutual(t *testing.T) {
 	client := New(t, testServerURL())
 	t.Cleanup(func() { client.Reset(t) })
 
-	client.WithCluster(t, 2, func(t *testing.T, nc *nats.Conn, inst *Instance) {
+	client.WithCluster(t, 2, func(t testing.TB, nc *nats.Conn, inst *Instance) {
 		if !nc.IsConnected() {
 			t.Fatal("expected helper to connect via TLS")
 		}
@@ -816,7 +816,7 @@ func TestGeneratedTLS_HandshakeFirst(t *testing.T) {
 	client := New(t, testServerURL())
 	t.Cleanup(func() { client.Reset(t) })
 
-	client.WithServer(t, func(t *testing.T, nc *nats.Conn, inst *Instance) {
+	client.WithServer(t, func(t testing.TB, nc *nats.Conn, inst *Instance) {
 		if !nc.IsConnected() {
 			t.Fatal("expected helper to connect via TLS handshake-first")
 		}
@@ -878,7 +878,7 @@ func TestGeneratedTLS_ServerOnly(t *testing.T) {
 	client := New(t, testServerURL())
 	t.Cleanup(func() { client.Reset(t) })
 
-	client.WithCluster(t, 2, func(t *testing.T, nc *nats.Conn, inst *Instance) {
+	client.WithCluster(t, 2, func(t testing.TB, nc *nats.Conn, inst *Instance) {
 		if !nc.IsConnected() {
 			t.Fatal("expected helper to connect via TLS")
 		}
@@ -1060,7 +1060,7 @@ websocket {
 }
 `
 
-	client.WithServer(t, func(t *testing.T, _ *nats.Conn, inst *Instance) {
+	client.WithServer(t, func(t testing.TB, _ *nats.Conn, inst *Instance) {
 		target := inst.Servers[0]
 
 		req, err := json.Marshal(api.UpdateServerRequest{
@@ -1282,7 +1282,7 @@ func TestReloadServerNoUpdateIsNoOp(t *testing.T) {
 		client.Reset(t)
 	})
 
-	client.WithServer(t, func(t *testing.T, _ *nats.Conn, inst *Instance) {
+	client.WithServer(t, func(t testing.TB, _ *nats.Conn, inst *Instance) {
 		if resp := inst.ReloadServer(t, inst.Servers[0]); !resp.Reloaded {
 			t.Fatalf("expected Reloaded=true, got %+v", resp)
 		}
@@ -1369,7 +1369,7 @@ func TestJetStreamDomainViaSnippet(t *testing.T) {
 	client := New(t, testServerURL())
 	t.Cleanup(func() { client.Reset(t) })
 
-	client.WithJetStreamServer(t, func(t *testing.T, nc *nats.Conn, inst *Instance) {
+	client.WithJetStreamServer(t, func(t testing.TB, nc *nats.Conn, inst *Instance) {
 		resp, err := nc.Request("$JS.API.INFO", nil, time.Second)
 		if err != nil {
 			t.Fatalf("$JS.API.INFO: %v", err)
