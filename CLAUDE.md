@@ -51,6 +51,8 @@ Multi-module Go repository. Each module is an independent Go module with:
 - `test/` subdirectory with separate `go.mod` for integration tests (isolates heavy deps like NATS server)
 - CI workflow in `.github/workflows/`
 
+Exception: `ntf-client` has no `go.work` or `test/` subdirectory — its tests live in the root package and run against a real `ntf-server` rather than an embedded one.
+
 ### Modules
 
 - **kvcodec** — Transparent encoding/decoding wrapper for NATS JetStream KeyValue stores (Base64, AES, Path codecs with wildcard support)
@@ -60,6 +62,7 @@ Multi-module Go repository. Each module is an independent Go module with:
 - **natscontext** — Context propagation and dialer utilities for NATS connections
 - **counters** — Distributed counter using JetStream message counting
 - **pcgroups** — Partitioned consumer groups (elastic/static/base)
+- **ntf-client** — Client for the NATS Testing Framework service (`ntf-server`), which spins up NATS servers, clusters, and super-clusters on demand
 
 ### Key Conventions
 
