@@ -16,6 +16,31 @@ import (
 	"github.com/synadia-io/orbit.go/ntf-client/api"
 )
 
+// Client is a handle to the management service of the test cluster manager.
+// Create one with New and use it to stand up managed servers, clusters, and
+// super-clusters.
+//
+// Every method takes a testing.TB, so the client works from tests
+// (*testing.T) and benchmarks (*testing.B) alike. Two notes for benchmarks:
+//
+// The convenience helpers (WithServer, WithCluster, WithSuperCluster and their
+// JetStream variants) create and tear down a whole instance per call, so the
+// call belongs outside the timed region — run the loop inside the callback.
+//
+// The callback receives a testing.TB, which does not carry the *testing.B API.
+// Close over the outer b to reach b.Loop, b.N, or b.ResetTimer:
+//
+//	func BenchmarkPublish(b *testing.B) {
+//		client := ntf.New(b, url)
+//		defer client.Close(b)
+//
+//		client.WithJetStreamCluster(b, 3, func(tb testing.TB, nc *nats.Conn, inst *ntf.Instance) {
+//			b.ResetTimer()
+//			for b.Loop() {
+//				_ = nc.Publish("bench", nil)
+//			}
+//		})
+//	}
 type Client struct {
 	address string
 	nc      *nats.Conn
@@ -332,7 +357,7 @@ func WithTLSTimeout(d time.Duration) UpdateOption {
 	})
 }
 
-func resolveCreateOptions(t *testing.T, opts []CreateOption) createOptions {
+func resolveCreateOptions(t testing.TB, opts []CreateOption) createOptions {
 	co := createOptions{description: t.Name()}
 	for _, o := range opts {
 		o.applyCreate(&co)
@@ -352,7 +377,7 @@ func resolveUpdateOptions(opts []UpdateOption) updateOptions {
 // convenience helpers. nats.Secure(cfg) is prepended when co.tls is set so
 // the post-create Connect uses TLS; user-supplied co.connectOptions compose
 // last and win on overlap.
-func helperConnectOptions(t *testing.T, co createOptions, inst *Instance) []nats.Option {
+func helperConnectOptions(t testing.TB, co createOptions, inst *Instance) []nats.Option {
 	t.Helper()
 	opts := []nats.Option{nats.MaxReconnects(-1)}
 	if co.tls != nil {
@@ -369,8 +394,9 @@ func helperConnectOptions(t *testing.T, co createOptions, inst *Instance) []nats
 	return opts
 }
 
-// New connects to the management service of the test cluster manager
-func New(t *testing.T, server string, opts ...nats.Option) *Client {
+// New connects to the management service of the test cluster manager. Pass the
+// *testing.T of a test or the *testing.B of a benchmark.
+func New(t testing.TB, server string, opts ...nats.Option) *Client {
 	t.Helper()
 
 	u, err := url.Parse(server)
@@ -394,7 +420,9 @@ func New(t *testing.T, server string, opts ...nats.Option) *Client {
 // WithJetStreamServer creates a server running JetStream and connects to it.
 // Pass CreateOptions to customize the rendered config (e.g. WithAccounts) and
 // the post-create nats.Connect (e.g. WithConnectOptions(nats.UserInfo(...))).
-func (c *Client) WithJetStreamServer(t *testing.T, h func(*testing.T, *nats.Conn, *Instance), opts ...CreateOption) {
+//
+// Usable from benchmarks; see Client for the *testing.B caveat.
+func (c *Client) WithJetStreamServer(t testing.TB, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
 	c.withServer(t, true, h, opts...)
@@ -403,13 +431,15 @@ func (c *Client) WithJetStreamServer(t *testing.T, h func(*testing.T, *nats.Conn
 // WithServer creates a non JetStream server and connects to it. Pass
 // CreateOptions to customize the rendered config and the post-create
 // nats.Connect.
-func (c *Client) WithServer(t *testing.T, h func(*testing.T, *nats.Conn, *Instance), opts ...CreateOption) {
+//
+// Usable from benchmarks; see Client for the *testing.B caveat.
+func (c *Client) WithServer(t testing.TB, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
 	c.withServer(t, false, h, opts...)
 }
 
-func (c *Client) withServer(t *testing.T, js bool, h func(*testing.T, *nats.Conn, *Instance), opts ...CreateOption) {
+func (c *Client) withServer(t testing.TB, js bool, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
 	co := resolveCreateOptions(t, opts)
@@ -428,7 +458,9 @@ func (c *Client) withServer(t *testing.T, js bool, h func(*testing.T, *nats.Conn
 // WithJetStreamCluster creates a cluster with the given server count running
 // JetStream and connects to a random server. Pass CreateOptions to customize
 // the rendered config and the post-create nats.Connect.
-func (c *Client) WithJetStreamCluster(t *testing.T, servers int, h func(*testing.T, *nats.Conn, *Instance), opts ...CreateOption) {
+//
+// Usable from benchmarks; see Client for the *testing.B caveat.
+func (c *Client) WithJetStreamCluster(t testing.TB, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
 	c.withCluster(t, servers, true, h, opts...)
@@ -437,13 +469,15 @@ func (c *Client) WithJetStreamCluster(t *testing.T, servers int, h func(*testing
 // WithCluster creates a non JetStream cluster with the given server count and
 // connects to a random server. Pass CreateOptions to customize the rendered
 // config and the post-create nats.Connect.
-func (c *Client) WithCluster(t *testing.T, servers int, h func(*testing.T, *nats.Conn, *Instance), opts ...CreateOption) {
+//
+// Usable from benchmarks; see Client for the *testing.B caveat.
+func (c *Client) WithCluster(t testing.TB, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
 	c.withCluster(t, servers, false, h, opts...)
 }
 
-func (c *Client) withCluster(t *testing.T, servers int, js bool, h func(*testing.T, *nats.Conn, *Instance), opts ...CreateOption) {
+func (c *Client) withCluster(t testing.TB, servers int, js bool, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
 	co := resolveCreateOptions(t, opts)
@@ -468,10 +502,10 @@ func (c *Client) withCluster(t *testing.T, servers int, js bool, h func(*testing
 }
 
 // WaitForJetStream polls '$JS.API.INFO' regularly waiting for Jetstream to be ready, fails after 5 seconds
-func (c *Client) WaitForJetStream(t *testing.T, nc *nats.Conn) {
+func (c *Client) WaitForJetStream(t testing.TB, nc *nats.Conn) {
 	t.Helper()
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		_, err := nc.Request("$JS.API.INFO", nil, time.Second)
 		if err == nil {
 			return
@@ -489,7 +523,9 @@ func (c *Client) WaitForJetStream(t *testing.T, nc *nats.Conn) {
 // cluster counts running JetStream and connects to a random server. Pass
 // CreateOptions to customize the rendered config and the post-create
 // nats.Connect.
-func (c *Client) WithJetStreamSuperCluster(t *testing.T, clusters int, servers int, h func(*testing.T, *nats.Conn, *Instance), opts ...CreateOption) {
+//
+// Usable from benchmarks; see Client for the *testing.B caveat.
+func (c *Client) WithJetStreamSuperCluster(t testing.TB, clusters int, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
 	c.withSuperCluster(t, clusters, servers, true, h, opts...)
@@ -498,13 +534,15 @@ func (c *Client) WithJetStreamSuperCluster(t *testing.T, clusters int, servers i
 // WithSuperCluster creates a non JetStream super-cluster with the given server
 // and cluster counts and connects to a random server. Pass CreateOptions to
 // customize the rendered config and the post-create nats.Connect.
-func (c *Client) WithSuperCluster(t *testing.T, clusters int, servers int, h func(*testing.T, *nats.Conn, *Instance), opts ...CreateOption) {
+//
+// Usable from benchmarks; see Client for the *testing.B caveat.
+func (c *Client) WithSuperCluster(t testing.TB, clusters int, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
 	c.withSuperCluster(t, clusters, servers, false, h, opts...)
 }
 
-func (c *Client) withSuperCluster(t *testing.T, clusters int, servers int, js bool, h func(*testing.T, *nats.Conn, *Instance), opts ...CreateOption) {
+func (c *Client) withSuperCluster(t testing.TB, clusters int, servers int, js bool, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
 	co := resolveCreateOptions(t, opts)
@@ -529,7 +567,7 @@ func (c *Client) withSuperCluster(t *testing.T, clusters int, servers int, js bo
 }
 
 // CreateSuperCluster creates a super cluster
-func (c *Client) CreateSuperCluster(t *testing.T, clusters int, servers int, js bool, opts ...CreateOption) *Instance {
+func (c *Client) CreateSuperCluster(t testing.TB, clusters int, servers int, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
 	co := resolveCreateOptions(t, opts)
@@ -551,7 +589,7 @@ func (c *Client) CreateSuperCluster(t *testing.T, clusters int, servers int, js 
 }
 
 // CreateCluster creates a cluster
-func (c *Client) CreateCluster(t *testing.T, servers int, js bool, opts ...CreateOption) *Instance {
+func (c *Client) CreateCluster(t testing.TB, servers int, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
 	co := resolveCreateOptions(t, opts)
@@ -572,7 +610,7 @@ func (c *Client) CreateCluster(t *testing.T, servers int, js bool, opts ...Creat
 }
 
 // CreateServer creates a server
-func (c *Client) CreateServer(t *testing.T, js bool, opts ...CreateOption) *Instance {
+func (c *Client) CreateServer(t testing.TB, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
 	co := resolveCreateOptions(t, opts)
@@ -591,7 +629,7 @@ func (c *Client) CreateServer(t *testing.T, js bool, opts ...CreateOption) *Inst
 	return c.doCreate(t, "tester.create.server", jreq)
 }
 
-func (c *Client) doCreate(t *testing.T, subject string, jreq []byte) *Instance {
+func (c *Client) doCreate(t testing.TB, subject string, jreq []byte) *Instance {
 	t.Helper()
 
 	msg, err := c.nc.Request(subject, jreq, 30*time.Second)
@@ -626,7 +664,7 @@ func (c *Client) doCreate(t *testing.T, subject string, jreq []byte) *Instance {
 
 // List returns a lightweight summary of every instance currently held by the
 // management service.
-func (c *Client) List(t *testing.T) *api.ListResponse {
+func (c *Client) List(t testing.TB) *api.ListResponse {
 	t.Helper()
 
 	msg, err := c.nc.Request("tester.list", nil, 10*time.Second)
@@ -647,7 +685,7 @@ func (c *Client) List(t *testing.T) *api.ListResponse {
 // Reset shuts down and removes all servers across every instance. Use sparingly
 // — most tests should call inst.Destroy() to scope cleanup to the instance they
 // own. Reset remains for CI safety nets between job stages.
-func (c *Client) Reset(t *testing.T) api.ResetResponse {
+func (c *Client) Reset(t testing.TB) api.ResetResponse {
 	t.Helper()
 
 	msg, err := c.nc.Request("tester.reset", nil, 10*time.Second)
@@ -670,7 +708,7 @@ func (c *Client) Reset(t *testing.T) api.ResetResponse {
 
 // Status returns status of all instances managed by the tester. Use
 // inst.Status() if you only care about a single instance.
-func (c *Client) Status(t *testing.T) *api.StatusResponse {
+func (c *Client) Status(t testing.TB) *api.StatusResponse {
 	t.Helper()
 
 	msg, err := c.nc.Request("tester.status", nil, 10*time.Second)
@@ -692,7 +730,7 @@ func (c *Client) Status(t *testing.T) *api.StatusResponse {
 }
 
 // Close closes the connection to the management service
-func (c *Client) Close(t *testing.T) {
+func (c *Client) Close(t testing.TB) {
 	t.Helper()
 
 	c.nc.Close()
@@ -700,7 +738,7 @@ func (c *Client) Close(t *testing.T) {
 
 // Destroy tears down this instance — shuts down its servers and removes its
 // storage dir. Other instances on the same management service are unaffected.
-func (i *Instance) Destroy(t *testing.T) *api.DestroyResponse {
+func (i *Instance) Destroy(t testing.TB) *api.DestroyResponse {
 	t.Helper()
 
 	jreq, err := json.Marshal(api.DestroyRequest{InstanceID: i.ID})
@@ -724,7 +762,7 @@ func (i *Instance) Destroy(t *testing.T) *api.DestroyResponse {
 }
 
 // StopServer stops a single server within this instance.
-func (i *Instance) StopServer(t *testing.T, server *api.ManagedServer) *api.StopServerResponse {
+func (i *Instance) StopServer(t testing.TB, server *api.ManagedServer) *api.StopServerResponse {
 	t.Helper()
 
 	if server == nil || server.Name == "" {
@@ -756,7 +794,7 @@ func (i *Instance) StopServer(t *testing.T, server *api.ManagedServer) *api.Stop
 
 // StartServer starts a single server within this instance that was previously
 // stopped.
-func (i *Instance) StartServer(t *testing.T, server *api.ManagedServer) *api.StartServerResponse {
+func (i *Instance) StartServer(t testing.TB, server *api.ManagedServer) *api.StartServerResponse {
 	t.Helper()
 
 	if server == nil || server.Name == "" {
@@ -794,7 +832,7 @@ func (i *Instance) StartServer(t *testing.T, server *api.ManagedServer) *api.Sta
 // The set of port-bearing snippets present at create time (websocket, mqtt,
 // leafnode) is fixed for the server's lifetime; an update that adds or drops
 // one is rejected.
-func (i *Instance) UpdateServer(t *testing.T, server *api.ManagedServer, opts ...UpdateOption) *api.UpdateServerResponse {
+func (i *Instance) UpdateServer(t testing.TB, server *api.ManagedServer, opts ...UpdateOption) *api.UpdateServerResponse {
 	t.Helper()
 
 	if server == nil || server.Name == "" {
@@ -833,7 +871,7 @@ func (i *Instance) UpdateServer(t *testing.T, server *api.ManagedServer, opts ..
 // ReloadServer signals the running server to re-read its on-disk config
 // (nats-server Reload()). Pair it with a prior UpdateServer to apply a staged
 // change without restarting.
-func (i *Instance) ReloadServer(t *testing.T, server *api.ManagedServer) *api.ReloadServerResponse {
+func (i *Instance) ReloadServer(t testing.TB, server *api.ManagedServer) *api.ReloadServerResponse {
 	t.Helper()
 
 	if server == nil || server.Name == "" {
@@ -863,7 +901,7 @@ func (i *Instance) ReloadServer(t *testing.T, server *api.ManagedServer) *api.Re
 }
 
 // Status returns the current status of just this instance.
-func (i *Instance) Status(t *testing.T) *api.InstanceStatus {
+func (i *Instance) Status(t testing.TB) *api.InstanceStatus {
 	t.Helper()
 
 	jreq, err := json.Marshal(api.StatusRequest{InstanceID: i.ID})
@@ -893,7 +931,7 @@ func (i *Instance) Status(t *testing.T) *api.InstanceStatus {
 // via WithTraceCapture are stored. Use the standard jetstream.ObjectStore API to list and
 // fetch objects; each object's metadata carries instance_id, server_name, and client_name
 // so the captures for this instance can be found.
-func (i *Instance) TraceStore(t *testing.T) jetstream.ObjectStore {
+func (i *Instance) TraceStore(t testing.TB) jetstream.ObjectStore {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

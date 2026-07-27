@@ -133,6 +133,9 @@ management endpoint itself needs auth or TLS:
 client := ntf.New(t, "nats://localhost:4222")
 ```
 
+Every method takes a `testing.TB` rather than a `*testing.T`, so the same helpers work from tests and benchmarks — see
+[Benchmarks](#benchmarks).
+
 ### Creating a topology
 
 The `WithX` convenience helpers create the instance, connect a NATS client to it, run your callback, and destroy the
@@ -142,7 +145,7 @@ instance on the way out — so a whole test is one call:
 func TestCreateCluster(t *testing.T) {
     client := ntf.New(t, "nats://localhost:4222")
 
-    client.WithJetStreamCluster(t, 3, func(t *testing.T, nc *nats.Conn, inst *ntf.Instance) {
+    client.WithJetStreamCluster(t, 3, func(t testing.TB, nc *nats.Conn, inst *ntf.Instance) {
         if len(inst.Servers) != 3 {
             t.Fatalf("cluster length not correct: %v", len(inst.Servers))
         }
@@ -191,7 +194,7 @@ Because each instance has its own UUID, storage dir, and auto-generated cluster 
 for i := range 3 {
     t.Run(fmt.Sprintf("cluster-%d", i), func(t *testing.T) {
         t.Parallel()
-        client.WithJetStreamCluster(t, 3, func(t *testing.T, nc *nats.Conn, inst *ntf.Instance) {
+        client.WithJetStreamCluster(t, 3, func(t testing.TB, nc *nats.Conn, inst *ntf.Instance) {
             // ...
         })
     })
@@ -201,6 +204,33 @@ for i := range 3 {
 Pass `ntf.WithDescription("...")` on a `Create*` call to attach a label that surfaces in `tester.list` /
 `tester.status` output — handy for spotting which test owns which instance in the service logs. It defaults to
 `t.Name()`.
+
+### Benchmarks
+
+Because the client takes a `testing.TB`, a `*testing.B` works everywhere a `*testing.T` does:
+
+```go
+func BenchmarkPublish(b *testing.B) {
+    client := ntf.New(b, "nats://localhost:4222")
+    defer client.Close(b)
+
+    client.WithJetStreamCluster(b, 3, func(tb testing.TB, nc *nats.Conn, inst *ntf.Instance) {
+        b.ResetTimer()
+        for b.Loop() {
+            if err := nc.Publish("bench", nil); err != nil {
+                b.Fatal(err)
+            }
+        }
+    })
+}
+```
+
+Two things to keep in mind:
+
+- The callback receives a `testing.TB`, which does not carry the `*testing.B` API. Close over the outer `b` to reach
+  `b.Loop`, `b.N`, or `b.ResetTimer`, as above.
+- The `WithX` helpers create and destroy a whole instance per call, so keep the call itself outside the timed region
+  and put the loop inside the callback.
 
 ### Customizing the configuration
 
@@ -256,7 +286,7 @@ accounts {
 `
 const authSnippet = `# auth required, no no_auth_user`
 
-client.WithCluster(t, 2, func(t *testing.T, nc *nats.Conn, inst *ntf.Instance) {
+client.WithCluster(t, 2, func(t testing.TB, nc *nats.Conn, inst *ntf.Instance) {
     // nc is connected as alice
 }, ntf.WithAccounts(accountsSnippet), ntf.WithAuthorization(authSnippet),
    ntf.WithConnectOptions(nats.UserInfo("alice", "wonder")))
@@ -274,7 +304,7 @@ gateways and routes stay plaintext. The convenience helpers auto-wire the return
 `nats.Connect`, so a TLS test is a one-liner:
 
 ```go
-client.WithCluster(t, 2, func(t *testing.T, nc *nats.Conn, inst *ntf.Instance) {
+client.WithCluster(t, 2, func(t testing.TB, nc *nats.Conn, inst *ntf.Instance) {
     // nc is already connected over TLS
 }, ntf.WithGeneratedTLS())
 ```
@@ -320,7 +350,7 @@ So a hot-swap is `UpdateServer` then `ReloadServer`; an apply-on-restart is `Upd
 `StartServer`:
 
 ```go
-client.WithServer(t, func(t *testing.T, nc *nats.Conn, inst *ntf.Instance) {
+client.WithServer(t, func(t testing.TB, nc *nats.Conn, inst *ntf.Instance) {
     srv := inst.Servers[0]
 
     // Stage a new accounts block, then hot-swap it in.
