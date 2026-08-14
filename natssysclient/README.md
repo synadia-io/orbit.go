@@ -16,7 +16,27 @@
 
 NATS System API Client exposes APIs to interact with the [NATS server monitoring endpoints](https://docs.nats.io/running-a-nats-service/configuration/sys_accounts).
 
-> **Note**: All response structures are compatible with the NATS server v2.10.23 and will be updated to support future additions.
+> **Note**: All response structures target NATS server v2.10.23. Endpoints marked **(2.11+)** below require a newer server.
+
+## Supported endpoints
+
+Server-scoped (`$SYS.REQ.SERVER.<id|PING>.<NAME>`):
+
+- `VARZ` — general server information (`Varz`, `VarzPing`)
+- `STATSZ` — server statistics (`ServerStatsz`, `ServerStatszPing`)
+- `CONNZ` — connection details (`Connz`, `ConnzPing`, `AllConnz`, `AllConnzPing`)
+- `SUBSZ` — subscription details (`ServerSubsz`, `ServerSubszPing`, `AllServerSubsz`, `AllServerSubszPing`)
+- `HEALTHZ` — health check (`Healthz`, `HealthzPing`)
+- `JSZ` — JetStream details (`Jsz`, `JszPing`, `AllJsz`, `AllJszPing`)
+- `IDZ` — basic server identification (`Idz`, `IdzPing`)
+- `ROUTEZ` — route connections (`Routez`, `RoutezPing`)
+- `GATEWAYZ` — gateway connections (`Gatewayz`, `GatewayzPing`)
+- `LEAFZ` — leafnode connections (`Leafz`, `LeafzPing`)
+- `ACCOUNTZ` — account information (`Accountz`, `AccountzPing`)
+- `PROFILEZ` — runtime profiling data (`Profilez`, `ProfilezPing`)
+- `EXPVARZ` — runtime variables (`Expvarz`, `ExpvarzPing`) **(2.11+)**
+- `IPQUEUESZ` — internal producer queues (`Ipqueuesz`, `IpqueueszPing`) **(2.11+)**
+- `RAFTZ` — Raft group state (`Raftz`, `RaftzPing`) **(2.11+)**
 
 ## Installation
 
