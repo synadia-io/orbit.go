@@ -468,6 +468,40 @@ func mustRequest(t *testing.T, nc *nats.Conn, subject string, req any, resp any)
 	}
 }
 
+// TestCreateSuperCluster proves every node of every cluster starts. Each node binds
+// a route and a gateway port reserved before it existed, so this exercises the
+// hand-off of those reservations: a node whose listener was released early would
+// fail to bind and fail the create.
+func TestCreateSuperCluster(t *testing.T) {
+	ms := startTestService(t)
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.super-cluster", api.CreateSuperClusterRequest{Clusters: 2, Servers: 2}, &created)
+
+	if len(created.Servers) != 4 {
+		t.Fatalf("created %d servers, want 4", len(created.Servers))
+	}
+
+	clusters := map[string]int{}
+	for _, srv := range created.Servers {
+		if !srv.Running {
+			t.Errorf("server %q is not running", srv.Name)
+		}
+		if srv.Port == 0 {
+			t.Errorf("server %q reported no client port", srv.Name)
+		}
+		clusters[srv.Cluster]++
+	}
+	if len(clusters) != 2 {
+		t.Errorf("servers span %d clusters, want 2: %v", len(clusters), clusters)
+	}
+	for name, n := range clusters {
+		if n != 2 {
+			t.Errorf("cluster %q has %d servers, want 2", name, n)
+		}
+	}
+}
+
 // TestStatusReportsClientPort proves the status handler reports the client port
 // (not the cluster/route port) so callers can build a usable connect URL.
 func TestStatusReportsClientPort(t *testing.T) {

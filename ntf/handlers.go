@@ -1072,9 +1072,23 @@ func (s *Service) createSuperCluster(req micro.Request) {
 	inst := s.newInstance("super-cluster", creq.Description)
 	short := shortID(inst.ID)
 
-	var heldListeners []*net.TCPListener
+	// One gateway listener per node in every cluster, and one route listener per
+	// node within each cluster. Both are reserved before the nodes that bind them
+	// exist, because every node's config lists the full set of route and gateway
+	// URLs. Each entry stays held until ITS node starts: the node moves it into
+	// its own hand-off set (clearing the slot here) right before that node's
+	// runServerWithConfig closes it. Closing them all on the first node's start
+	// would free every later node's route and gateway port into the hand-over
+	// gap, where another spawn could grab the port and crash the binding node.
+	gatewayLns := make([][]*net.TCPListener, creq.Clusters)
+	routeLns := make([][]*net.TCPListener, creq.Clusters)
 	rollback := func() {
-		closeListeners(heldListeners)
+		for _, lns := range gatewayLns {
+			closeListeners(lns) // gateway listeners for nodes that have not started
+		}
+		for _, lns := range routeLns {
+			closeListeners(lns) // route listeners for nodes that have not started
+		}
 		s.dropInstance(inst.ID)
 	}
 
@@ -1115,9 +1129,10 @@ func (s *Service) createSuperCluster(req micro.Request) {
 	// configuration can reference all the others' gateway URLs.
 	superClusterPorts := map[string][]int{}
 	superClusterUrls := map[string][]string{}
-	for _, name := range clusterNames {
+	for ci, name := range clusterNames {
 		ports := make([]int, creq.Servers)
 		urls := make([]string, creq.Servers)
+		gatewayLns[ci] = make([]*net.TCPListener, creq.Servers)
 
 		for i := 0; i < creq.Servers; i++ {
 			p, ln, err := s.reservePort()
@@ -1128,7 +1143,7 @@ func (s *Service) createSuperCluster(req micro.Request) {
 			}
 			ports[i] = p
 			urls[i] = fmt.Sprintf("localhost:%d", p)
-			heldListeners = append(heldListeners, ln)
+			gatewayLns[ci][i] = ln
 		}
 
 		superClusterPorts[name] = ports
@@ -1140,6 +1155,7 @@ func (s *Service) createSuperCluster(req micro.Request) {
 
 		clusterPorts := make([]int, creq.Servers)
 		clusterUrls := make([]string, creq.Servers)
+		routeLns[c-1] = make([]*net.TCPListener, creq.Servers)
 		for i := 0; i < creq.Servers; i++ {
 			p, ln, err := s.reservePort()
 			if err != nil {
@@ -1149,14 +1165,23 @@ func (s *Service) createSuperCluster(req micro.Request) {
 			}
 			clusterPorts[i] = p
 			clusterUrls[i] = fmt.Sprintf("localhost:%d", p)
-			heldListeners = append(heldListeners, ln)
+			routeLns[c-1][i] = ln
 		}
 
 		for i := 1; i <= creq.Servers; i++ {
+			// Hand-off set for this node: its own route and gateway listeners plus
+			// the client (and snippet) listeners reserved below. runServerWithConfig
+			// closes exactly these right before Start(); the other nodes' listeners
+			// stay held until their own iteration.
+			nodeLns := []*net.TCPListener{routeLns[c-1][i-1], gatewayLns[c-1][i-1]}
+			routeLns[c-1][i-1] = nil   // ownership moved into nodeLns
+			gatewayLns[c-1][i-1] = nil // ownership moved into nodeLns
+
 			name := fmt.Sprintf("%s-c%d_s%d", short, c, i)
 			sd := filepath.Join(inst.RootDir, fmt.Sprintf("c%d_s%d", c, i))
 			snippetsDir := filepath.Join(sd, "snippets")
 			if err := os.MkdirAll(snippetsDir, 0700); err != nil {
+				closeListeners(nodeLns)
 				rollback()
 				req.Error("002", "Failed to create server directory", nil)
 				return
@@ -1164,24 +1189,27 @@ func (s *Service) createSuperCluster(req micro.Request) {
 
 			clientPort, clientLn, err := s.reservePort()
 			if err != nil {
+				closeListeners(nodeLns)
 				rollback()
 				req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
 				return
 			}
-			heldListeners = append(heldListeners, clientLn)
+			nodeLns = append(nodeLns, clientLn)
 
 			listenerPorts, listenerLns, err := s.reserveListenerPorts(listenersForSnippets(creq.Snippets))
 			if err != nil {
+				closeListeners(nodeLns)
 				rollback()
 				req.Error("006", err.Error(), nil)
 				return
 			}
-			heldListeners = append(heldListeners, listenerLns...)
+			nodeLns = append(nodeLns, listenerLns...)
 
 			var tlsInclude string
 			if tlsFiles != nil {
 				tlsInclude, err = writeServerTLSSnippet(snippetsDir, tlsFiles)
 				if err != nil {
+					closeListeners(nodeLns)
 					rollback()
 					req.Error("008", fmt.Sprintf("TLS snippet failed: %v", err), nil)
 					return
@@ -1209,6 +1237,7 @@ func (s *Service) createSuperCluster(req micro.Request) {
 			})
 
 			if err := renderAndWriteSnippets(td, creq.Snippets, snippetsDir); err != nil {
+				closeListeners(nodeLns)
 				rollback()
 				req.Error("002", fmt.Sprintf("Snippet failure: %v", err), nil)
 				return
@@ -1216,13 +1245,16 @@ func (s *Service) createSuperCluster(req micro.Request) {
 
 			serverConfig, err := renderConfig(td, mainTemplate)
 			if err != nil {
+				closeListeners(nodeLns)
 				rollback()
 				req.Error("002", fmt.Sprintf("Template parse failure: %v", err), nil)
 				return
 			}
 
-			srv, cfgPath, err := runServerWithConfig(s.log, serverConfig, sd, heldListeners)
-			heldListeners = nil
+			// nodeLns (incl. this node's route and gateway listeners) are closed
+			// inside runServerWithConfig on every path; routeLns and gatewayLns then
+			// hold only the listeners of nodes that have not started yet.
+			srv, cfgPath, err := runServerWithConfig(s.log, serverConfig, sd, nodeLns)
 			if err != nil {
 				rollback()
 				req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
@@ -1306,6 +1338,11 @@ func (s *Service) stopServer(req micro.Request) {
 		req.Error("001", "Server not found", nil)
 		return
 	}
+
+	// Hold cfgMu so a concurrent start cannot replace ms.srv while it is read and
+	// shut down here: startServer holds cfgMu across its ms.srv store.
+	ms.cfgMu.Lock()
+	defer ms.cfgMu.Unlock()
 
 	if !ms.srv.Running() {
 		req.Error("003", "Server not running", nil)
@@ -1627,15 +1664,17 @@ func (s *Service) reloadServer(req micro.Request) {
 		return
 	}
 
+	// Hold cfgMu across both the running check and the reload: it keeps a
+	// concurrent start from replacing ms.srv underneath them, keeps the server
+	// from stopping between the two, and stops Reload() (which re-reads
+	// configPath) observing a torn file mid-write from a concurrent update.
+	ms.cfgMu.Lock()
+	defer ms.cfgMu.Unlock()
+
 	if !ms.srv.Running() {
 		req.Error("002", "Server not running", nil)
 		return
 	}
-
-	// Hold cfgMu so reload's Reload() (which re-reads configPath) can't
-	// observe a torn file mid-write from a concurrent update.
-	ms.cfgMu.Lock()
-	defer ms.cfgMu.Unlock()
 
 	if err := ms.srv.Reload(); err != nil {
 		req.Error("010", fmt.Sprintf("reload failed: %v", err), nil)
@@ -1684,23 +1723,22 @@ func (s *Service) status(req micro.Request) {
 			Servers:     make([]api.ManagedServer, 0, len(snap.servers)),
 		}
 		for _, ms := range snap.servers {
-			// Port is the client port (captured at create, so it survives a stop);
-			// the route/cluster port is exposed under Ports["cluster"]. Clone the
-			// shared ports map rather than mutating it.
-			ports := maps.Clone(ms.ports)
-			if ms.srv.ClusterAddr() != nil {
+			// Port is the client port; the route/cluster port is exposed under
+			// Ports["cluster"]. The map is already a private clone.
+			ports := ms.ports
+			if ms.clusterPort != 0 {
 				if ports == nil {
 					ports = map[string]int{}
 				}
-				ports["cluster"] = ms.srv.ClusterAddr().Port
+				ports["cluster"] = ms.clusterPort
 			}
 			ist.Servers = append(ist.Servers, api.ManagedServer{
-				Name:      ms.srv.Name(),
-				Cluster:   ms.srv.ClusterName(),
+				Name:      ms.name,
+				Cluster:   ms.cluster,
 				Port:      ms.clientPort,
 				Ports:     ports,
 				Advertise: ms.advertiseHost,
-				Running:   ms.srv.Running(),
+				Running:   ms.running,
 			})
 		}
 		resp.Instances = append(resp.Instances, ist)
@@ -1758,19 +1796,52 @@ func (s *Service) list(req micro.Request) {
 	req.RespondJSON(resp)
 }
 
-// instanceSnapshot is a lock-released view of an Instance's metadata and server
-// pointers. Holding the *server.Server pointer is safe outside the lock because
-// the server itself isn't owned by the lock — only the instances map is.
+// instanceSnapshot is a lock-released view of an instance's metadata and the
+// reportable state of its servers, taken so a status response can be built
+// without holding s.mu.
 type instanceSnapshot struct {
 	id          string
 	kind        string
 	description string
-	servers     []*managedServer
+	servers     []serverSnapshot
 }
 
+// serverSnapshot is a managed server's reportable state, read out while the
+// caller holds s.mu. It holds no *server.Server: startServer and startInstance
+// replace that pointer under s.mu, so reading it afterwards would race them.
+type serverSnapshot struct {
+	name          string
+	cluster       string
+	clientPort    int
+	ports         map[string]int
+	advertiseHost string
+	running       bool
+	clusterPort   int // 0 when the server has no cluster listener
+}
+
+// snapshotInstance reads an instance and its servers into plain values. The
+// caller must hold s.mu.
 func snapshotInstance(inst *instance) instanceSnapshot {
-	srvs := make([]*managedServer, len(inst.Servers))
-	copy(srvs, inst.Servers)
+	srvs := make([]serverSnapshot, 0, len(inst.Servers))
+	for _, ms := range inst.Servers {
+		snap := serverSnapshot{
+			// clientPort is captured at create time, so it survives a stop; the
+			// route/cluster port is reported separately as clusterPort.
+			clientPort:    ms.clientPort,
+			ports:         maps.Clone(ms.ports),
+			advertiseHost: ms.advertiseHost,
+		}
+		if ms.srv != nil {
+			snap.name = ms.srv.Name()
+			snap.cluster = ms.srv.ClusterName()
+			snap.running = ms.srv.Running()
+			if addr := ms.srv.ClusterAddr(); addr != nil {
+				snap.clusterPort = addr.Port
+			}
+		}
+		srvs = append(srvs, snap)
+	}
+
 	return instanceSnapshot{
 		id:          inst.ID,
 		kind:        inst.Kind,
