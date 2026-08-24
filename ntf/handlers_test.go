@@ -468,6 +468,284 @@ func mustRequest(t *testing.T, nc *nats.Conn, subject string, req any, resp any)
 	}
 }
 
+// TestCreateRejectsOversizedRequests proves the sanity caps are enforced, so a
+// typo cannot ask for more servers than the host can start.
+// errorCodeFor sends a request expected to fail and returns the service error
+// code, so a test can assert on the rejection rather than the happy path.
+func errorCodeFor(t *testing.T, nc *nats.Conn, subject string, req any) string {
+	t.Helper()
+
+	payload, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := nc.Request(subject, payload, 10*time.Second)
+	if err != nil {
+		t.Fatalf("request %s: %v", subject, err)
+	}
+	return msg.Header.Get("Nats-Service-Error-Code")
+}
+
+func TestCreateRejectsOversizedRequests(t *testing.T) {
+	ms := startTestService(t)
+
+	tests := []struct {
+		name    string
+		subject string
+		req     any
+		want    string
+	}{
+		{
+			"cluster over the server cap",
+			"tester.create.cluster",
+			api.CreateClusterRequest{Servers: maxServersPerCluster + 1},
+			"002",
+		},
+		{
+			"super-cluster over the server cap",
+			"tester.create.super-cluster",
+			api.CreateSuperClusterRequest{Servers: maxServersPerCluster + 1, Clusters: 2},
+			"002",
+		},
+		{
+			"super-cluster over the cluster cap",
+			"tester.create.super-cluster",
+			api.CreateSuperClusterRequest{Servers: 2, Clusters: maxClusters + 1},
+			"004",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := errorCodeFor(t, ms.nc, tt.subject, tt.req); got != tt.want {
+				t.Errorf("error code = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateListenerPortSet(t *testing.T) {
+	tests := []struct {
+		name     string
+		snippets map[string]string
+		current  map[string]int
+		wantErr  bool
+	}{
+		{"both empty", nil, nil, false},
+		{
+			"unchanged set",
+			map[string]string{"websocket": "port: {{ .ListenerPorts.websocket }}"},
+			map[string]int{"websocket": 8080},
+			false,
+		},
+		{
+			"non-port-bearing snippets are ignored",
+			map[string]string{"accounts": "A: {}"},
+			nil,
+			false,
+		},
+		{
+			"listener dropped from the new payload",
+			nil,
+			map[string]int{"websocket": 8080},
+			true,
+		},
+		{
+			"listener added by the new payload",
+			map[string]string{"mqtt": "port: {{ .ListenerPorts.mqtt }}"},
+			nil,
+			true,
+		},
+		{
+			"listener swapped for another",
+			map[string]string{"leafnode": "port: {{ .ListenerPorts.leafnode }}"},
+			map[string]int{"websocket": 8080},
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateListenerPortSet(tt.snippets, tt.current)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected an error, got none")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestUpdateAndReloadServer covers the update/reload pair over the wire: an update
+// stages a new on-disk config and a reload makes the running server read it back.
+func TestUpdateAndReloadServer(t *testing.T) {
+	ms := startTestService(t)
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{}, &created)
+	name := created.Servers[0].Name
+
+	// The accounts snippet replaces the whole accounts block, so it has to carry
+	// the users the rest of the template refers to (no_auth_user and
+	// system_account) alongside whatever the update is adding.
+	const accounts = `accounts {
+	USERS1 { users = [ { user: "user1", pass: "password" } ] }
+	EXTRA { users = [ { user: "extra", pass: "password" } ] }
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}`
+
+	var updated api.UpdateServerResponse
+	mustRequest(t, ms.nc, "tester.update.server", api.UpdateServerRequest{
+		Name:     name,
+		Snippets: map[string]string{"accounts": accounts},
+	}, &updated)
+	if !updated.Updated {
+		t.Fatal("update reported no change")
+	}
+
+	// The staged config includes the snippet file; the running server only picks
+	// it up on reload.
+	snippet, err := os.ReadFile(filepath.Join(ms.findServerByName(name).rootDir, "snippets", "accounts.conf"))
+	if err != nil {
+		t.Fatalf("read staged snippet: %v", err)
+	}
+	if !strings.Contains(string(snippet), "EXTRA") {
+		t.Errorf("staged accounts snippet missing the new account:\n%s", snippet)
+	}
+
+	var reloaded api.ReloadServerResponse
+	mustRequest(t, ms.nc, "tester.reload.server", api.ReloadServerRequest{Name: name}, &reloaded)
+	if !reloaded.Reloaded {
+		t.Fatal("reload reported no change")
+	}
+}
+
+func TestUpdateAndReloadServerRejections(t *testing.T) {
+	ms := startTestService(t)
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{}, &created)
+	name := created.Servers[0].Name
+
+	tests := []struct {
+		name    string
+		subject string
+		req     any
+		want    string
+	}{
+		{
+			"update without a name",
+			"tester.update.server",
+			api.UpdateServerRequest{},
+			"001",
+		},
+		{
+			"update an unknown server",
+			"tester.update.server",
+			api.UpdateServerRequest{Name: "no-such-server"},
+			"001",
+		},
+		{
+			"update with an unknown snippet key",
+			"tester.update.server",
+			api.UpdateServerRequest{Name: name, Snippets: map[string]string{"nonsense": "x"}},
+			"007",
+		},
+		{
+			"update adding a listener port",
+			"tester.update.server",
+			api.UpdateServerRequest{Name: name, Snippets: map[string]string{"websocket": "port: 0"}},
+			"008",
+		},
+		{
+			"update tls_timeout on a non-TLS server",
+			"tester.update.server",
+			api.UpdateServerRequest{Name: name, TLSTimeout: func() *float64 { v := 1.0; return &v }()},
+			"007",
+		},
+		{
+			"reload without a name",
+			"tester.reload.server",
+			api.ReloadServerRequest{},
+			"001",
+		},
+		{
+			"reload an unknown server",
+			"tester.reload.server",
+			api.ReloadServerRequest{Name: "no-such-server"},
+			"001",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := errorCodeFor(t, ms.nc, tt.subject, tt.req); got != tt.want {
+				t.Errorf("error code = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestUpdateTracedServer proves a server fronted by a capture proxy can still be
+// updated. The proxy's port rides in the wire-facing port map, so validating the
+// listener set against that map rejected every such update; the check reads the
+// set the config was rendered with instead.
+func TestUpdateTracedServer(t *testing.T) {
+	ms := startTestService(t, withCapturer(&fakeCapturer{}))
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
+
+	name := created.Servers[0].Name
+	if created.Servers[0].Ports["trace"] == 0 {
+		t.Fatal("traced server reported no trace port")
+	}
+
+	const accounts = `accounts {
+	USERS1 { users = [ { user: "user1", pass: "password" } ] }
+	EXTRA { users = [ { user: "extra", pass: "password" } ] }
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}`
+
+	var updated api.UpdateServerResponse
+	mustRequest(t, ms.nc, "tester.update.server", api.UpdateServerRequest{
+		Name:     name,
+		Snippets: map[string]string{"accounts": accounts},
+	}, &updated)
+	if !updated.Updated {
+		t.Fatal("update reported no change")
+	}
+
+	// The listener-set invariant still holds for a traced server: the trace port
+	// is excused, a genuinely new listener is not.
+	got := errorCodeFor(t, ms.nc, "tester.update.server", api.UpdateServerRequest{
+		Name:     name,
+		Snippets: map[string]string{"accounts": accounts, "websocket": "port: 0"},
+	})
+	if got != "008" {
+		t.Errorf("adding a listener to a traced server: error code = %q, want 008", got)
+	}
+}
+
+// TestReloadStoppedServerIsRejected proves reload refuses a server that is not
+// running, rather than reporting a reload that cannot have happened.
+func TestReloadStoppedServerIsRejected(t *testing.T) {
+	ms := startTestService(t)
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{}, &created)
+	name := created.Servers[0].Name
+
+	var stopped api.StopServerResponse
+	mustRequest(t, ms.nc, "tester.stop.server", api.StopServerRequest{Name: name}, &stopped)
+
+	got := errorCodeFor(t, ms.nc, "tester.reload.server", api.ReloadServerRequest{Name: name})
+	if got != "002" {
+		t.Errorf("error code = %q, want 002", got)
+	}
+}
+
 // TestCreateSuperCluster proves every node of every cluster starts. Each node binds
 // a route and a gateway port reserved before it existed, so this exercises the
 // hand-off of those reservations: a node whose listener was released early would

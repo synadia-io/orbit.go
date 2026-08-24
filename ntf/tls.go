@@ -25,7 +25,10 @@ import (
 	"time"
 )
 
-const tlsCertValidity = 24 * time.Hour
+// tlsCertValidity is how long generated certs are good for, measured from the
+// moment they are minted. Long enough for a preserved instance or a long-running
+// CI service to outlive a day, short enough to be unmistakably test-only.
+const tlsCertValidity = 7 * 24 * time.Hour
 
 // tlsMaterial bundles PEM-encoded cert material produced for one managed
 // instance. ClientCertPEM and ClientKeyPEM are nil when mutual TLS was not

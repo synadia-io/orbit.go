@@ -37,6 +37,17 @@ import (
 	"github.com/synadia-io/orbit.go/ntf/api"
 )
 
+// Sanity limits on how much a single request may ask for. A super-cluster
+// multiplies them, so an uncapped request for a thousand of each would try to
+// start a million servers and take the host down. They are guard rails against a
+// typo or a runaway generator, not a considered capacity limit.
+const (
+	// maxServersPerCluster caps the nodes in one cluster.
+	maxServersPerCluster = 20
+	// maxClusters caps the clusters in one super-cluster.
+	maxClusters = 10
+)
+
 // allowedSnippetKeys is the closed set of snippet extension points exposed by
 // the built-in main template. Keys map 1:1 to {{ if .Snippets.<key> }} guards
 // in serverConfigTemplate; passing any other key is rejected at request time.
@@ -697,7 +708,7 @@ func (s *Service) createServer(req micro.Request) {
 		s.log.Warn("Could not parse client port", "server", name, "err", err)
 	}
 
-	ms := &managedServer{srv: srv, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
+	ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
 
 	// Front the client port with a capture proxy when requested, before the server is
 	// published so its trace port and proxy are set atomically.
@@ -795,6 +806,11 @@ func (s *Service) createCluster(req micro.Request) {
 
 	if creq.Servers < 2 {
 		req.Error("002", "Invalid request: servers should be at least 2", nil)
+		return
+	}
+
+	if creq.Servers > maxServersPerCluster {
+		req.Error("002", fmt.Sprintf("Invalid request: servers should be at most %d", maxServersPerCluster), nil)
 		return
 	}
 
@@ -980,7 +996,7 @@ func (s *Service) createCluster(req micro.Request) {
 			s.log.Warn("Could not parse client port", "server", name, "err", err)
 		}
 
-		ms := &managedServer{srv: srv, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
+		ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
 
 		// A single capture proxy fronts the first node of the cluster.
 		if creq.Trace && i == 1 {
@@ -1034,8 +1050,18 @@ func (s *Service) createSuperCluster(req micro.Request) {
 		return
 	}
 
+	if creq.Servers > maxServersPerCluster {
+		req.Error("002", fmt.Sprintf("Invalid request: servers should be at most %d", maxServersPerCluster), nil)
+		return
+	}
+
 	if creq.Clusters < 2 {
 		req.Error("004", "Invalid request: clusters should be at least 2", nil)
+		return
+	}
+
+	if creq.Clusters > maxClusters {
+		req.Error("004", fmt.Sprintf("Invalid request: clusters should be at most %d", maxClusters), nil)
 		return
 	}
 
@@ -1266,7 +1292,7 @@ func (s *Service) createSuperCluster(req micro.Request) {
 				s.log.Warn("Could not parse client port", "server", name, "err", err)
 			}
 
-			ms := &managedServer{srv: srv, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
+			ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
 
 			// A single capture proxy fronts the first node of the first cluster.
 			if creq.Trace && c == 1 && i == 1 {
@@ -1380,6 +1406,14 @@ func (s *Service) startServer(req micro.Request) {
 		return
 	}
 
+	// Hold cfgMu across the whole start: it keeps a concurrent start from
+	// replacing ms.srv underneath the running check, keeps two callers from both
+	// passing that check and starting the same server twice, and keeps a
+	// concurrent update from being mid-write when ProcessConfigFile reads
+	// configPath.
+	ms.cfgMu.Lock()
+	defer ms.cfgMu.Unlock()
+
 	if ms.srv.Running() {
 		req.Error("003", "Server already running", nil)
 		return
@@ -1390,20 +1424,29 @@ func (s *Service) startServer(req micro.Request) {
 		return
 	}
 
-	// Hold cfgMu while reading configPath so a concurrent update can't be
-	// mid-write when ProcessConfigFile parses it.
-	ms.cfgMu.Lock()
 	srv, err := startFromConfig(s.log, ms.configPath)
 	if err != nil {
-		ms.cfgMu.Unlock()
 		req.Error("005", fmt.Sprintf("Server restart failed: %v", err), nil)
 		return
 	}
 
+	// A concurrent destroy or reset may have removed the instance while this
+	// server was starting. Its teardown has already shut down the old server and
+	// will never see this one, so shut it down here rather than leave it holding
+	// its port for the life of the process.
 	s.mu.Lock()
-	ms.srv = srv
+	_, alive := s.instances[ms.instanceID]
+	if alive {
+		ms.srv = srv
+	}
 	s.mu.Unlock()
-	ms.cfgMu.Unlock()
+
+	if !alive {
+		srv.Shutdown()
+		srv.WaitForShutdown()
+		req.Error("404", "Instance destroyed during start", nil)
+		return
+	}
 
 	req.RespondJSON(api.StartServerResponse{Started: true})
 }
@@ -1590,7 +1633,11 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
-	if err := validateListenerPortSet(creq.Snippets, ms.ports); err != nil {
+	// td.Ports is the listener set the running config was rendered with. ms.ports
+	// is the wire view, which also carries the capture proxy's port for a traced
+	// server; validating against that would reject every update of a traced
+	// server, since no snippet can ever produce a "trace" listener.
+	if err := validateListenerPortSet(creq.Snippets, ms.td.Ports); err != nil {
 		req.Error("008", err.Error(), nil)
 		return
 	}

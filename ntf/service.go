@@ -146,6 +146,12 @@ type managedServer struct {
 	configPath string
 	ports      map[string]int
 
+	// instanceID names the owning instance, so a handler holding only this
+	// server can ask whether that instance is still registered. A start that
+	// finished after a concurrent destroy would otherwise hand a running server
+	// to an instance nobody will ever tear down.
+	instanceID string
+
 	// clientPort is the server's reserved client listen port, captured at create
 	// time. Unlike the live server's address it survives a stop, so status can
 	// report the client port even for a stopped node.
