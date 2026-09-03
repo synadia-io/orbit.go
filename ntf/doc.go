@@ -31,7 +31,10 @@ state in a temporary directory it removes on Close:
 	}
 	defer svc.Close()
 
-	nc := ntfclient.WithJetStreamCluster(t, svc.ClientURL(), 3)
+	c := ntfclient.New(t, svc.ClientURL())
+	c.WithJetStreamCluster(t, 3, func(t testing.TB, nc *nats.Conn, inst *ntfclient.Instance) {
+		// run tests against the cluster
+	})
 
 Pass Options.Conn to host the service on a connection you already have. Close leaves
 that connection open, and ClientURL reports the URL it is connected to, so a client
