@@ -51,7 +51,7 @@ Multi-module Go repository. Each module is an independent Go module with:
 - `test/` subdirectory with separate `go.mod` for integration tests (isolates heavy deps like NATS server)
 - CI workflow in `.github/workflows/`
 
-Exception: `ntf-client` has no `go.work` or `test/` subdirectory — its tests live in the root package and run against a real `ntf-server` rather than an embedded one.
+Exception: `ntf-client` has no `go.work` or `test/` subdirectory — its tests live in the root package and run against a real `ntf-server` rather than an embedded one. `ntf` has neither either: it embeds nats-server at runtime, so isolating that dependency into a test module wins nothing.
 
 ### Modules
 
@@ -63,6 +63,7 @@ Exception: `ntf-client` has no `go.work` or `test/` subdirectory — its tests l
 - **counters** — Distributed counter using JetStream message counting
 - **pcgroups** — Partitioned consumer groups (elastic/static/base)
 - **ntf-client** — Client for the NATS Testing Framework service (`ntf-server`), which spins up NATS servers, clusters, and super-clusters on demand
+- **ntf** — The NATS Testing Framework service itself, as a library: runs NATS servers, clusters and super-clusters on demand, in-process or on a supplied connection
 
 ### Key Conventions
 

@@ -21,6 +21,7 @@ You can use the library as a whole, or pick just what you need.
 | Partitioned consumer groups | Client side implementation of partitioned 'consumer groups'  | [README.md](pcgroups/README.md)      | [![Go Reference][pcgroups-image]][pcgroups-url]           |
 | KV Codecs                   | Transparent encoding/decoding for JetStream KeyValue stores  | [README.md](kvcodec/README.md)       | [![Go Reference][kvcodec-image]][kvcodec-url]             |
 | Counters                    | Distributed counter functionality built on JetStream streams | [README.md](counters/README.md)      | [![Go Reference][counters-image]][counters-url]           |
+| NATS Testing Framework      | Runs NATS servers, clusters and super-clusters for tests     | [README.md](ntf/README.md)           | [![Go Reference][ntf-image]][ntf-url]                     |
 | NTF Client                  | Client for the NATS Testing Framework service                | [README.md](ntf-client/README.md)    | [![Go Reference][ntf-client-image]][ntf-client-url]       |
 
 [natsext-url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/natsext
@@ -39,3 +40,5 @@ You can use the library as a whole, or pick just what you need.
 [counters-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/counters.svg
 [ntf-client-url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/ntf-client
 [ntf-client-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/ntf-client.svg
+[ntf-url]: https://pkg.go.dev/github.com/synadia-io/orbit.go/ntf
+[ntf-image]: https://pkg.go.dev/badge/github.com/synadia-io/orbit.go/ntf.svg
