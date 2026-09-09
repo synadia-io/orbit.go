@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/nats-io/jwt/v2 v2.8.2
-	github.com/nats-io/nats.go v1.52.0
+	github.com/nats-io/nats.go v1.53.1
 	github.com/synadia-io/orbit.go/natsext v0.1.3
 )
 
