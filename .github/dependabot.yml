@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directories:
+      - "/*/"
+    schedule:
+      interval: "weekly"
+
+    # We accept the new default cooldown of 3 days; can change with:
+    #cooldown:
+    #  default-days: 3
+
+    # We would be happy with one PR for all dependencies, but this is the
+    # closest we can get: one PR for each dependency, updating multiple
+    # modules at once:
+    groups:
+      orbit-dependencies:
+        group-by: dependency-name
+
+
