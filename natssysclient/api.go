@@ -19,12 +19,21 @@ const (
 )
 
 const (
-	srvVarzSubj    = "$SYS.REQ.SERVER.%s.VARZ"
-	srvStatszSubj  = "$SYS.REQ.SERVER.%s.STATSZ"
-	srvConnzSubj   = "$SYS.REQ.SERVER.%s.CONNZ"
-	srvSubszSubj   = "$SYS.REQ.SERVER.%s.SUBSZ"
-	srvHealthzSubj = "$SYS.REQ.SERVER.%s.HEALTHZ"
-	srvJszSubj     = "$SYS.REQ.SERVER.%s.JSZ"
+	srvVarzSubj      = "$SYS.REQ.SERVER.%s.VARZ"
+	srvStatszSubj    = "$SYS.REQ.SERVER.%s.STATSZ"
+	srvConnzSubj     = "$SYS.REQ.SERVER.%s.CONNZ"
+	srvSubszSubj     = "$SYS.REQ.SERVER.%s.SUBSZ"
+	srvHealthzSubj   = "$SYS.REQ.SERVER.%s.HEALTHZ"
+	srvJszSubj       = "$SYS.REQ.SERVER.%s.JSZ"
+	srvIdzSubj       = "$SYS.REQ.SERVER.%s.IDZ"
+	srvRoutezSubj    = "$SYS.REQ.SERVER.%s.ROUTEZ"
+	srvGatewayzSubj  = "$SYS.REQ.SERVER.%s.GATEWAYZ"
+	srvLeafzSubj     = "$SYS.REQ.SERVER.%s.LEAFZ"
+	srvAccountzSubj  = "$SYS.REQ.SERVER.%s.ACCOUNTZ"
+	srvProfilezSubj  = "$SYS.REQ.SERVER.%s.PROFILEZ"
+	srvExpvarzSubj   = "$SYS.REQ.SERVER.%s.EXPVARZ"
+	srvIpqueueszSubj = "$SYS.REQ.SERVER.%s.IPQUEUESZ"
+	srvRaftzSubj     = "$SYS.REQ.SERVER.%s.RAFTZ"
 )
 
 var (
@@ -157,7 +166,10 @@ func (s *System) pingServers(ctx context.Context, subject string, data []byte) (
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrRequest, err)
 	}
-	msgs := make([]*nats.Msg, 0)
+	var msgs []*nats.Msg
+	if s.opts.serverCount > 0 {
+		msgs = make([]*nats.Msg, 0, s.opts.serverCount)
+	}
 	for msg, err := range iter {
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s", ErrPingResponse, err)
