@@ -27,6 +27,7 @@ const (
 	JSErrCodeBatchPublishUnsupportedHeader jetstream.ErrorCode = 10177
 	JSErrCodeBatchPublishInvalidID         jetstream.ErrorCode = 10179
 	JSErrCodeBatchPublishExceedsLimit      jetstream.ErrorCode = 10199
+	JSErrCodeBatchPublishInvalidCommit     jetstream.ErrorCode = 10200
 	JSErrCodeBatchPublishDuplicateMsgID    jetstream.ErrorCode = 10201
 	JSErrCodeBatchPublishInvalidGapMode    jetstream.ErrorCode = 10202
 
@@ -64,6 +65,10 @@ var (
 
 	// ErrBatchPublishDuplicateMsgID is returned when batch publish contains duplicate message id (Nats-Msg-Id).
 	ErrBatchPublishDuplicateMsgID jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeBatchPublishDuplicateMsgID, Description: "batch publish contains duplicate message id (Nats-Msg-Id)", Code: 400}}
+
+	// ErrBatchPublishInvalidCommit is returned when the batch commit header value
+	// is not recognized by the server.
+	ErrBatchPublishInvalidCommit jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeBatchPublishInvalidCommit, Description: "atomic publish batch commit is invalid", Code: 400}}
 
 	// ErrBatchPublishInvalidGapMode is returned when invalid batch gap mode is specified.
 	ErrBatchPublishInvalidGapMode jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeBatchPublishInvalidGapMode, Description: "invalid batch gap mode", Code: 400}}
