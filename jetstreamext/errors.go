@@ -90,6 +90,11 @@ var (
 	// only accepts it on the first message and rejects the whole batch otherwise.
 	ErrBatchExpectedLastSeqNotFirst = &jsError{message: "expected last sequence is only allowed on the first message of a batch"}
 
+	// ErrBatchCommitOnAdd is returned when a message passed to Add or AddMsg
+	// carries the Nats-Batch-Commit header. Adding does not commit a batch;
+	// use Commit, CommitMsg or Close.
+	ErrBatchCommitOnAdd = &jsError{message: "batch commit header is not allowed on add; use Commit, CommitMsg or Close"}
+
 	// Fast publish errors
 
 	// ErrFastBatchGapDetected is returned when the server detects a gap in a fast publish batch.
