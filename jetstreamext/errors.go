@@ -85,6 +85,11 @@ var (
 	// ErrBatchClosed is returned when attempting to use a batch that has been closed.
 	ErrBatchClosed = &jsError{message: "batch publisher closed"}
 
+	// ErrBatchExpectedLastSeqNotFirst is returned when Nats-Expected-Last-Sequence
+	// is set on a message that is not the first message of a batch. The server
+	// only accepts it on the first message and rejects the whole batch otherwise.
+	ErrBatchExpectedLastSeqNotFirst = &jsError{message: "expected last sequence is only allowed on the first message of a batch"}
+
 	// Fast publish errors
 
 	// ErrFastBatchGapDetected is returned when the server detects a gap in a fast publish batch.

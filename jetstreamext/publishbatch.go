@@ -198,6 +198,17 @@ func cloneHeader(hdr nats.Header) nats.Header {
 	return maps.Clone(hdr)
 }
 
+// validateBatchMsgHeaders rejects headers the server would refuse only at
+// commit time, after the whole batch has already been sent. first reports
+// whether this is the first message of the batch, add whether the message is
+// being added rather than used to commit.
+func validateBatchMsgHeaders(hdr nats.Header, first, add bool) error {
+	if !first && hdr.Get(jetstream.ExpectedLastSeqHeader) != "" {
+		return ErrBatchExpectedLastSeqNotFirst
+	}
+	return nil
+}
+
 const (
 	// BatchIDHeader contains the batch ID for a message in a batch publish.
 	BatchIDHeader = "Nats-Batch-Id"
@@ -258,6 +269,10 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	m := *msg
 	m.Header = cloneHeader(msg.Header)
 	if err := applyBatchMsgOpts(&m, opts); err != nil {
+		return err
+	}
+
+	if err := validateBatchMsgHeaders(m.Header, b.sequence == 0, true); err != nil {
 		return err
 	}
 
@@ -323,6 +338,10 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 	m := *msg
 	m.Header = cloneHeader(msg.Header)
 	if err := applyBatchMsgOpts(&m, opts); err != nil {
+		return nil, err
+	}
+
+	if err := validateBatchMsgHeaders(m.Header, b.sequence == 0, false); err != nil {
 		return nil, err
 	}
 
@@ -435,6 +454,12 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 
 	for _, opt := range opts {
 		if err := opt.configurePublishMsgBatch(&pubOpts); err != nil {
+			return nil, err
+		}
+	}
+
+	for i := range messages {
+		if err := validateBatchMsgHeaders(messages[i].Header, i == 0, false); err != nil {
 			return nil, err
 		}
 	}
