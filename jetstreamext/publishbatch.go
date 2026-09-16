@@ -29,7 +29,8 @@ import (
 type (
 	// BatchPublisher provides methods for publishing messages to a stream in batches.
 	// Messages are published immediately with batch headers, and the batch is committed
-	// with the final message which includes a commit header.
+	// either with a final stored message which includes a commit header (Commit and
+	// CommitMsg), or with an end-of-batch marker which is not stored (Close).
 	BatchPublisher interface {
 		// Add publishes a message to the batch with the given subject and data.
 		// It is an IO operation and the message will be published immediately
@@ -47,6 +48,19 @@ type (
 		// CommitMsg publishes the final message and commits the batch.
 		// Returns a BatchAck containing the acknowledgment from the server.
 		CommitMsg(ctx context.Context, msg *nats.Msg, opts ...BatchMsgOpt) (*BatchAck, error)
+
+		// Close commits the batch without storing a final message.
+		// It sends an end-of-batch marker to the server, which commits the
+		// messages already added. The marker itself is not persisted, and
+		// the server updates the last stored message to carry the regular
+		// commit header.
+		// Returns a BatchAck containing the acknowledgment from the server.
+		//
+		// Note that Close commits the batch. To abandon a batch without
+		// committing it, use Discard instead.
+		//
+		// Requires nats-server v2.14.0 or later.
+		Close(ctx context.Context) (*BatchAck, error)
 
 		// Discard cancels the batch without committing.
 		// The server will abandon the batch after a timeout.
@@ -116,7 +130,10 @@ type (
 		sequence uint64
 		closed   bool
 		opts     batchPublishOpts
-		mu       sync.Mutex
+		// batchSubject is the subject of the first message added to the
+		// batch, reused to publish the end-of-batch marker in Close.
+		batchSubject string
+		mu           sync.Mutex
 	}
 
 	apiResponse struct {
@@ -150,6 +167,11 @@ const (
 
 	// BatchCommitHeader signals the final message in a batch when set to "1".
 	BatchCommitHeader = "Nats-Batch-Commit"
+
+	// BatchCommitEOB is the value of BatchCommitHeader signaling an
+	// end-of-batch marker: the batch is committed and the marker message
+	// itself is not stored. Requires nats-server v2.14.0 or later.
+	BatchCommitEOB = "eob"
 )
 
 // NewBatchPublisher creates a new batch publisher for publishing messages in batches.
@@ -221,6 +243,9 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	}
 
 	b.sequence++
+	if b.batchSubject == "" {
+		b.batchSubject = msg.Subject
+	}
 	msg.Header.Set(BatchIDHeader, b.batchID)
 	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(b.sequence, 10))
 
@@ -309,11 +334,6 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(b.sequence, 10))
 	msg.Header.Set(BatchCommitHeader, "1")
 
-	ctx, cancel = wrapContextWithoutDeadline(ctx, b.js)
-	if cancel != nil {
-		defer cancel()
-	}
-
 	var resp *nats.Msg
 	var err error
 
@@ -325,19 +345,47 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 
 	b.closed = true
 
-	var batchResp batchAckResponse
-	if err := json.Unmarshal(resp.Data, &batchResp); err != nil {
-		return nil, jetstream.ErrInvalidJSAck
-	}
-	if batchResp.Error != nil {
-		return nil, batchResp.Error
-	}
-	if batchResp.BatchAck == nil || batchResp.Stream == "" ||
-		batchResp.BatchID != b.batchID || batchResp.BatchSize != b.sequence {
-		return nil, ErrInvalidBatchAck
+	return parseBatchAck(resp, b.batchID, b.sequence)
+}
+
+// Close commits the batch without storing a final message.
+// It sends an end-of-batch marker to the server, which commits the messages
+// already added to the batch. The marker itself is not persisted, and the
+// last stored message is updated by the server to carry the regular commit
+// header. Requires nats-server v2.14.0 or later.
+func (b *batchPublisher) Close(ctx context.Context) (*BatchAck, error) {
+	ctx, cancel := wrapContextWithoutDeadline(ctx, b.js)
+	if cancel != nil {
+		defer cancel()
 	}
 
-	return batchResp.BatchAck, nil
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.closed {
+		return nil, ErrBatchClosed
+	}
+	// Without a recorded subject there is no message the server accepted from
+	// this publisher, and no valid subject to send the marker to.
+	if b.sequence == 0 || b.batchSubject == "" {
+		return nil, ErrEmptyBatch
+	}
+
+	// The marker takes the next batch sequence, but is not stored and does
+	// not count towards the batch size reported in the ack.
+	msg := nats.NewMsg(b.batchSubject)
+	msg.Header.Set(BatchIDHeader, b.batchID)
+	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(b.sequence+1, 10))
+	msg.Header.Set(BatchCommitHeader, BatchCommitEOB)
+
+	resp, err := b.js.Conn().RequestMsgWithContext(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	b.closed = true
+
+	return parseBatchAck(resp, b.batchID, b.sequence)
 }
 
 // Discard cancels the batch without committing.
@@ -454,23 +502,31 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 			return nil, err
 		}
 
-		var batchResp batchAckResponse
-		if err := json.Unmarshal(resp.Data, &batchResp); err != nil {
-			return nil, jetstream.ErrInvalidJSAck
+		batchAck, err = parseBatchAck(resp, batchID, uint64(msgs))
+		if err != nil {
+			return nil, err
 		}
-		if batchResp.Error != nil {
-			return nil, batchResp.Error
-		}
-		if batchResp.BatchAck == nil || batchResp.Stream == "" ||
-			batchResp.BatchID != batchID || batchResp.BatchSize != uint64(msgs) {
-
-			return nil, ErrInvalidBatchAck
-		}
-
-		batchAck = batchResp.BatchAck
-
 	}
 	return batchAck, nil
+}
+
+// parseBatchAck unmarshals and validates a batch publish acknowledgement.
+// expectedSize is the number of messages the batch is expected to contain,
+// which excludes an end-of-batch marker if one was used to commit.
+func parseBatchAck(resp *nats.Msg, batchID string, expectedSize uint64) (*BatchAck, error) {
+	var batchResp batchAckResponse
+	if err := json.Unmarshal(resp.Data, &batchResp); err != nil {
+		return nil, jetstream.ErrInvalidJSAck
+	}
+	if batchResp.Error != nil {
+		return nil, batchResp.Error
+	}
+	if batchResp.BatchAck == nil || batchResp.Stream == "" ||
+		batchResp.BatchID != batchID || batchResp.BatchSize != expectedSize {
+		return nil, ErrInvalidBatchAck
+	}
+
+	return batchResp.BatchAck, nil
 }
 
 // wrapContextWithoutDeadline wraps context without deadline with default timeout.

@@ -144,7 +144,9 @@ A batch publish is an atomic operation - either all messages in the batch are pe
 
 In order to use this feature, stream has to be configured with `AllowAtomicPublish` enabled.
 
-> Note: This module requires nats-server v2.12.0 o later.
+> Note: Atomic batch publishing requires nats-server v2.12.0 or later.
+> Committing a batch without a final message (`BatchPublisher.Close`) requires
+> nats-server v2.14.0 or later.
 
 #### BatchPublisher
 
@@ -174,8 +176,8 @@ if err != nil {
 }
 
 // Add message to the batch
-err := batch.AddMsg("foo.A", &nats.Msg{
-    Subject: "test.A",
+err := batch.AddMsg(&nats.Msg{
+    Subject: "foo.A",
     Data:    []byte("hello"),
 })
 if err != nil {
@@ -183,7 +185,7 @@ if err != nil {
 }
 
 // Commit the batch
-ack, err := batch.Commit(ctx, "test.A", []byte("commit msg"))
+ack, err := batch.Commit(ctx, "foo.B", []byte("commit msg"))
 if err != nil {
     // handle error
 }
@@ -201,6 +203,33 @@ if err != nil {
     // handle error
 }
 ```
+
+##### Committing without a final message
+
+If you don't need to add a final message on commit, use `Close` to send an
+end-of-batch marker. The batch is committed, but the marker itself is not
+persisted to the stream:
+
+```go
+if err := batch.Add("test.A", []byte("hello")); err != nil {
+    // handle error
+}
+
+ack, err := batch.Close(ctx)
+if err != nil {
+    // handle error
+}
+// ack.BatchSize is 1 - the end-of-batch marker is not counted
+```
+
+The marker is published to the subject of the first message added to the
+batch. `Close` returns `ErrEmptyBatch` if no messages were added, and
+`ErrBatchClosed` if the batch was already committed or discarded.
+
+Note that `Close` *commits* the batch. To abandon a batch without committing
+it, use `Discard` instead.
+
+> Note: committing without a final message requires nats-server v2.14.0 or later.
 
 #### PublishMsgBatch
 
