@@ -512,6 +512,70 @@ func TestBatchPublisher(t *testing.T) {
 		}
 	})
 
+	t.Run("header guards", func(t *testing.T) {
+		s := RunBasicJetStreamServer()
+		defer shutdownJSServerAndRemoveStorage(t, s)
+		nc, js := jsClient(t, s)
+		defer nc.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		cfg := jetstream.StreamConfig{
+			Name:               "TEST",
+			Subjects:           []string{"test.>"},
+			AllowAtomicPublish: true,
+		}
+		if _, err := js.CreateStream(ctx, cfg); err != nil {
+			t.Fatalf("Unexpected error creating stream: %v", err)
+		}
+
+		batch, err := jetstreamext.NewBatchPublisher(js)
+		if err != nil {
+			t.Fatalf("Unexpected error creating batch publisher: %v", err)
+		}
+		if err := batch.Add("test.1", []byte("message 1")); err != nil {
+			t.Fatalf("Unexpected error adding message 1: %v", err)
+		}
+
+		// Expected last sequence is only allowed on the first message,
+		// whether set via option or directly as a header.
+		err = batch.Add("test.2", []byte("message 2"), jetstreamext.WithBatchExpectLastSequence(1))
+		if !errors.Is(err, jetstreamext.ErrBatchExpectedLastSeqNotFirst) {
+			t.Fatalf("Expected ErrBatchExpectedLastSeqNotFirst on add, got %v", err)
+		}
+		msg := nats.NewMsg("test.2")
+		msg.Header.Set(jetstream.ExpectedLastSeqHeader, "1")
+		if err := batch.AddMsg(msg); !errors.Is(err, jetstreamext.ErrBatchExpectedLastSeqNotFirst) {
+			t.Fatalf("Expected ErrBatchExpectedLastSeqNotFirst on add with header, got %v", err)
+		}
+		_, err = batch.Commit(ctx, "test.2", []byte("message 2"), jetstreamext.WithBatchExpectLastSequence(1))
+		if !errors.Is(err, jetstreamext.ErrBatchExpectedLastSeqNotFirst) {
+			t.Fatalf("Expected ErrBatchExpectedLastSeqNotFirst on commit, got %v", err)
+		}
+
+		// Rejected messages were never sent: the batch is still open and
+		// commits with only the messages that went through.
+		if size := batch.Size(); size != 1 || batch.IsClosed() {
+			t.Fatalf("Expected open batch of size 1, got size %d, closed %v", size, batch.IsClosed())
+		}
+		ack, err := batch.Commit(ctx, "test.2", []byte("message 2"))
+		if err != nil {
+			t.Fatalf("Unexpected error committing batch: %v", err)
+		}
+		if ack.BatchSize != 2 {
+			t.Fatalf("Expected BatchAck.BatchSize to be 2, got %d", ack.BatchSize)
+		}
+
+		// A commit on an empty batch is its first message, so the option is allowed.
+		batch, err = jetstreamext.NewBatchPublisher(js)
+		if err != nil {
+			t.Fatalf("Unexpected error creating batch publisher: %v", err)
+		}
+		if _, err := batch.Commit(ctx, "test.3", []byte("message 3"), jetstreamext.WithBatchExpectLastSequence(2)); err != nil {
+			t.Fatalf("Unexpected error committing single-message batch: %v", err)
+		}
+	})
+
 }
 
 func TestBatchPublisher_Discard(t *testing.T) {
@@ -973,6 +1037,37 @@ func TestPublishMsgBatch(t *testing.T) {
 		}
 		if len(messages[1].Header) != 1 || messages[1].Header.Get("X-User") != "value" {
 			t.Fatalf("Expected second message to be unmodified, got headers %v", messages[1].Header)
+		}
+	})
+
+	t.Run("expect last sequence on non-first message", func(t *testing.T) {
+		s := RunBasicJetStreamServer()
+		defer shutdownJSServerAndRemoveStorage(t, s)
+		nc, js := jsClient(t, s)
+		defer nc.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		cfg := jetstream.StreamConfig{
+			Name:               "TEST",
+			Subjects:           []string{"test.>"},
+			AllowAtomicPublish: true,
+		}
+		if _, err := js.CreateStream(ctx, cfg); err != nil {
+			t.Fatalf("Unexpected error creating stream: %v", err)
+		}
+
+		first := nats.NewMsg("test.1")
+		first.Header.Set(jetstream.ExpectedLastSeqHeader, "0")
+		if _, err := jetstreamext.PublishMsgBatch(ctx, js, []*nats.Msg{first, nats.NewMsg("test.2")}); err != nil {
+			t.Fatalf("Unexpected error publishing batch: %v", err)
+		}
+
+		second := nats.NewMsg("test.2")
+		second.Header.Set(jetstream.ExpectedLastSeqHeader, "2")
+		_, err := jetstreamext.PublishMsgBatch(ctx, js, []*nats.Msg{nats.NewMsg("test.1"), second})
+		if !errors.Is(err, jetstreamext.ErrBatchExpectedLastSeqNotFirst) {
+			t.Fatalf("Expected ErrBatchExpectedLastSeqNotFirst, got %v", err)
 		}
 	})
 
