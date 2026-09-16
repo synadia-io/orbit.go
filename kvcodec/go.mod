@@ -2,7 +2,7 @@ module github.com/synadia-io/orbit.go/kvcodec
 
 go 1.25.0
 
-require github.com/nats-io/nats.go v1.52.0
+require github.com/nats-io/nats.go v1.53.1
 
 require (
 	github.com/klauspost/compress v1.19.1 // indirect
