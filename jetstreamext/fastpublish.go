@@ -44,7 +44,8 @@ type (
 		// to accept messages, but the user will be notified via the error handler.
 		Add(subject string, data []byte, opts ...BatchMsgOpt) (*FastPubAck, error)
 
-		// AddMsg publishes a message to the batch.
+		// AddMsg publishes a message to the batch. The message is not modified;
+		// the reply subject and option headers are set on a copy.
 		AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck, error)
 
 		// Commit publishes the final message with the given subject and data,
@@ -54,6 +55,7 @@ type (
 
 		// CommitMsg publishes the final message and commits the batch.
 		// Returns a BatchAck containing the acknowledgment from the server.
+		// The message is not modified.
 		CommitMsg(ctx context.Context, msg *nats.Msg, opts ...BatchMsgOpt) (*BatchAck, error)
 
 		// Close closes the batch, signaling the server that no more messages will be added.
@@ -283,9 +285,16 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		return nil, ErrBatchClosed
 	}
 
-	if err := applyBatchMsgOpts(msg, opts); err != nil {
-		fp.mu.Unlock()
-		return nil, err
+	// Work on a copy so the caller's message is never modified. The header
+	// map is only cloned when there are options to apply, which keeps the
+	// common path free of allocations.
+	m := *msg
+	if len(opts) > 0 {
+		m.Header = cloneHeader(msg.Header)
+		if err := applyBatchMsgOpts(&m, opts); err != nil {
+			fp.mu.Unlock()
+			return nil, err
+		}
 	}
 
 	fp.sequence++
@@ -293,7 +302,7 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 	if fp.sequence == 1 {
 		operation = fastBatchStart
 	}
-	msg.Reply = fp.buildReplySubject(fp.sequence, operation)
+	m.Reply = fp.buildReplySubject(fp.sequence, operation)
 
 	// Create subscription and handle first message specially
 	if fp.sequence == 1 {
@@ -312,7 +321,7 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 		fp.stallCh = make(chan struct{}, 1)
 
 		// Publish with reply inbox already set (without holding lock)
-		if err := fp.js.Conn().PublishMsg(msg); err != nil {
+		if err := fp.js.Conn().PublishMsg(&m); err != nil {
 			fp.ackSub.Unsubscribe()
 			fp.ackSub = nil
 			fp.firstAckCh = nil
@@ -332,7 +341,7 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 			fp.mu.Lock()
 			defer fp.mu.Unlock()
 
-			fp.batchSubject = msg.Subject
+			fp.batchSubject = m.Subject
 			return &FastPubAck{
 				BatchSequence: fp.sequence,
 				AckSequence:   firstAck.Sequence,
@@ -364,7 +373,7 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 	// other than first message, we just publish and track pending acks.
 	// if we exceed max outstanding acks, we stall until we get a flow ack.
 	seq := fp.sequence
-	if err := fp.js.Conn().PublishMsg(msg); err != nil {
+	if err := fp.js.Conn().PublishMsg(&m); err != nil {
 		fp.mu.Unlock()
 		return nil, fmt.Errorf("batch message %d publish failed: %w", seq, err)
 	}
@@ -395,42 +404,6 @@ func (fp *fastPublisher) waitForAck() bool {
 	return fp.ackSequence+uint64(fp.flow)*uint64(fp.opts.maxOutstandingAcks) <= fp.sequence
 }
 
-// applyBatchMsgOpts processes batch message options and sets the appropriate
-// headers on the message. Only allocates a header map when opts require it.
-func applyBatchMsgOpts(msg *nats.Msg, opts []BatchMsgOpt) error {
-	if len(opts) == 0 {
-		return nil
-	}
-	var o batchMsgOpts
-	for _, opt := range opts {
-		if err := opt(&o); err != nil {
-			return err
-		}
-	}
-	if o.ttl == 0 && o.stream == "" && o.lastSubjectSeq == nil && o.lastSeq == nil {
-		return nil
-	}
-	if msg.Header == nil {
-		msg.Header = nats.Header{}
-	}
-	if o.ttl > 0 {
-		msg.Header.Set(jetstream.MsgTTLHeader, o.ttl.String())
-	}
-	if o.stream != "" {
-		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
-	}
-	if o.lastSubject != "" {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	} else if o.lastSubjectSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
-	if o.lastSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSeqHeader, strconv.FormatUint(*o.lastSeq, 10))
-	}
-	return nil
-}
-
 func (fp *fastPublisher) Commit(ctx context.Context, subject string, data []byte, opts ...BatchMsgOpt) (*BatchAck, error) {
 	return fp.CommitMsg(ctx, &nats.Msg{
 		Subject: subject,
@@ -446,13 +419,17 @@ func (fp *fastPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 		return nil, ErrBatchClosed
 	}
 
-	if err := applyBatchMsgOpts(msg, opts); err != nil {
-		fp.mu.Unlock()
-		return nil, err
-	}
-
 	fp.mu.Unlock()
-	return fp.commit(ctx, msg, false)
+
+	// Work on a copy so the caller's message is never modified.
+	m := *msg
+	if len(opts) > 0 {
+		m.Header = cloneHeader(msg.Header)
+		if err := applyBatchMsgOpts(&m, opts); err != nil {
+			return nil, err
+		}
+	}
+	return fp.commit(ctx, &m, false)
 }
 
 func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*BatchAck, error) {

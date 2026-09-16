@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strconv"
 	"sync"
 	"time"
@@ -37,7 +38,8 @@ type (
 		// and persisted upon commit.
 		Add(subject string, data []byte, opts ...BatchMsgOpt) error
 
-		// AddMsg publishes a message to the batch.
+		// AddMsg publishes a message to the batch. The message is not modified;
+		// batch and option headers are set on a copy.
 		AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error
 
 		// Commit publishes the final message with the given subject and data,
@@ -47,6 +49,7 @@ type (
 
 		// CommitMsg publishes the final message and commits the batch.
 		// Returns a BatchAck containing the acknowledgment from the server.
+		// The message is not modified.
 		CommitMsg(ctx context.Context, msg *nats.Msg, opts ...BatchMsgOpt) (*BatchAck, error)
 
 		// Close commits the batch without storing a final message.
@@ -158,6 +161,57 @@ type (
 	}
 )
 
+// applyBatchMsgOpts sets the headers requested by opts on m. m must be a
+// copy of the caller's message whose header map is safe to write to (see
+// cloneHeader), so the caller's message is never modified.
+func applyBatchMsgOpts(m *nats.Msg, opts []BatchMsgOpt) error {
+	var o batchMsgOpts
+	for _, opt := range opts {
+		if err := opt(&o); err != nil {
+			return err
+		}
+	}
+	if o.ttl > 0 {
+		m.Header.Set(jetstream.MsgTTLHeader, o.ttl.String())
+	}
+	if o.stream != "" {
+		m.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
+	}
+	if o.lastSubject != "" {
+		m.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
+		m.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
+	} else if o.lastSubjectSeq != nil {
+		m.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
+	}
+	if o.lastSeq != nil {
+		m.Header.Set(jetstream.ExpectedLastSeqHeader, strconv.FormatUint(*o.lastSeq, 10))
+	}
+	return nil
+}
+
+// cloneHeader returns a header that can be written to without touching the
+// caller's message. A nil header yields an empty one.
+func cloneHeader(hdr nats.Header) nats.Header {
+	if hdr == nil {
+		return nats.Header{}
+	}
+	return maps.Clone(hdr)
+}
+
+// validateBatchMsgHeaders rejects headers the server would refuse only at
+// commit time, after the whole batch has already been sent, or would silently
+// act on. first reports whether this is the first message of the batch, add
+// whether the message is being added rather than used to commit.
+func validateBatchMsgHeaders(hdr nats.Header, first, add bool) error {
+	if !first && hdr.Get(jetstream.ExpectedLastSeqHeader) != "" {
+		return ErrBatchExpectedLastSeqNotFirst
+	}
+	if add && hdr.Get(BatchCommitHeader) != "" {
+		return ErrBatchCommitOnAdd
+	}
+	return nil
+}
+
 const (
 	// BatchIDHeader contains the batch ID for a message in a batch publish.
 	BatchIDHeader = "Nats-Batch-Id"
@@ -205,7 +259,7 @@ func (b *batchPublisher) Add(subject string, data []byte, opts ...BatchMsgOpt) e
 	return b.AddMsg(&nats.Msg{Subject: subject, Data: data}, opts...)
 }
 
-// AddMsg publishes a message to the batch.
+// AddMsg publishes a message to the batch. The message is not modified.
 func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -214,40 +268,23 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 		return ErrBatchClosed
 	}
 
-	if msg.Header == nil {
-		msg.Header = nats.Header{}
+	// Work on a copy so the caller's message is never modified.
+	m := *msg
+	m.Header = cloneHeader(msg.Header)
+	if err := applyBatchMsgOpts(&m, opts); err != nil {
+		return err
 	}
 
-	// Process batch message options
-	o := batchMsgOpts{}
-	for _, opt := range opts {
-		if err := opt(&o); err != nil {
-			return err
-		}
-	}
-
-	if o.ttl > 0 {
-		msg.Header.Set(jetstream.MsgTTLHeader, o.ttl.String())
-	}
-	if o.stream != "" {
-		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
-	}
-	if o.lastSubject != "" {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	} else if o.lastSubjectSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
-	if o.lastSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSeqHeader, strconv.FormatUint(*o.lastSeq, 10))
+	if err := validateBatchMsgHeaders(m.Header, b.sequence == 0, true); err != nil {
+		return err
 	}
 
 	b.sequence++
 	if b.batchSubject == "" {
-		b.batchSubject = msg.Subject
+		b.batchSubject = m.Subject
 	}
-	msg.Header.Set(BatchIDHeader, b.batchID)
-	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(b.sequence, 10))
+	m.Header.Set(BatchIDHeader, b.batchID)
+	m.Header.Set(BatchSeqHeader, strconv.FormatUint(b.sequence, 10))
 
 	// Determine if we need flow control for this message
 	var needsAck bool
@@ -259,13 +296,10 @@ func (b *batchPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) error {
 
 	// If we don't need an ack, use core nats publish
 	if !needsAck {
-		return b.js.Conn().PublishMsg(msg)
+		return b.js.Conn().PublishMsg(&m)
 	}
 
-	inbox := b.js.Conn().NewRespInbox()
-	msg.Reply = inbox
-
-	resp, err := b.js.Conn().RequestMsg(msg, b.opts.flowControl.AckTimeout)
+	resp, err := b.js.Conn().RequestMsg(&m, b.opts.flowControl.AckTimeout)
 	if err != nil {
 		return fmt.Errorf("batch message %d ack failed: %w", b.sequence, err)
 	}
@@ -289,7 +323,8 @@ func (b *batchPublisher) Commit(ctx context.Context, subject string, data []byte
 	return b.CommitMsg(ctx, &nats.Msg{Subject: subject, Data: data}, opts...)
 }
 
-// CommitMsg publishes the final message and commits the batch.
+// CommitMsg publishes the final message and commits the batch. The message
+// is not modified.
 func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...BatchMsgOpt) (*BatchAck, error) {
 	ctx, cancel := wrapContextWithoutDeadline(ctx, b.js)
 	if cancel != nil {
@@ -301,44 +336,24 @@ func (b *batchPublisher) CommitMsg(ctx context.Context, msg *nats.Msg, opts ...B
 	if b.closed {
 		return nil, ErrBatchClosed
 	}
-	// Process batch message options and convert to PublishOpt
-	o := batchMsgOpts{}
-	for _, opt := range opts {
-		if err := opt(&o); err != nil {
-			return nil, err
-		}
+
+	// Work on a copy so the caller's message is never modified.
+	m := *msg
+	m.Header = cloneHeader(msg.Header)
+	if err := applyBatchMsgOpts(&m, opts); err != nil {
+		return nil, err
 	}
 
-	if msg.Header == nil {
-		msg.Header = nats.Header{}
-	}
-	if o.ttl > 0 {
-		msg.Header.Set(jetstream.MsgTTLHeader, o.ttl.String())
-	}
-	if o.stream != "" {
-		msg.Header.Set(jetstream.ExpectedStreamHeader, o.stream)
-	}
-	if o.lastSubject != "" {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqSubjHeader, o.lastSubject)
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	} else if o.lastSubjectSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSubjSeqHeader, strconv.FormatUint(*o.lastSubjectSeq, 10))
-	}
-	if o.lastSeq != nil {
-		msg.Header.Set(jetstream.ExpectedLastSeqHeader, strconv.FormatUint(*o.lastSeq, 10))
+	if err := validateBatchMsgHeaders(m.Header, b.sequence == 0, false); err != nil {
+		return nil, err
 	}
 
 	b.sequence++
+	m.Header.Set(BatchIDHeader, b.batchID)
+	m.Header.Set(BatchSeqHeader, strconv.FormatUint(b.sequence, 10))
+	m.Header.Set(BatchCommitHeader, "1")
 
-	msg.Header.Set(BatchIDHeader, b.batchID)
-	msg.Header.Set(BatchSeqHeader, strconv.FormatUint(b.sequence, 10))
-	msg.Header.Set(BatchCommitHeader, "1")
-
-	var resp *nats.Msg
-	var err error
-
-	resp, err = b.js.Conn().RequestMsgWithContext(ctx, msg)
-
+	resp, err := b.js.Conn().RequestMsgWithContext(ctx, &m)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +436,6 @@ func (b *batchPublisher) IsClosed() bool {
 // PublishMsgBatch publishes a batch of messages to a Stream and waits for an ack for the commit.
 func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*nats.Msg, opts ...PublishMsgBatchOpt) (*BatchAck, error) {
 	var batchAck *BatchAck
-	var err error
 	msgs := len(messages)
 
 	if msgs == 0 {
@@ -447,12 +461,21 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 		}
 	}
 
+	for i := range messages {
+		if err := validateBatchMsgHeaders(messages[i].Header, i == 0, false); err != nil {
+			return nil, err
+		}
+	}
+
 	batchID := nuid.Next()
 
 	for i := range messages {
-		messages[i].Header.Del(BatchCommitHeader)
-		messages[i].Header.Set(BatchIDHeader, batchID)
-		messages[i].Header.Set(BatchSeqHeader, strconv.Itoa(i+1))
+		// Work on a copy so the caller's messages are never modified.
+		m := *messages[i]
+		m.Header = cloneHeader(messages[i].Header)
+		m.Header.Del(BatchCommitHeader)
+		m.Header.Set(BatchIDHeader, batchID)
+		m.Header.Set(BatchSeqHeader, strconv.Itoa(i+1))
 
 		// add all but last message to the batch
 		if i < msgs-1 {
@@ -466,16 +489,13 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 			}
 
 			if !needsAck {
-				err = js.Conn().PublishMsg(messages[i])
-				if err != nil {
+				if err := js.Conn().PublishMsg(&m); err != nil {
 					return nil, fmt.Errorf("publishing message in the batch: %w", err)
 				}
 				continue
 			}
-			inbox := js.Conn().NewRespInbox()
-			messages[i].Reply = inbox
 
-			resp, err := js.Conn().RequestMsg(messages[i], pubOpts.flowControl.AckTimeout)
+			resp, err := js.Conn().RequestMsg(&m, pubOpts.flowControl.AckTimeout)
 			if err != nil {
 				return nil, fmt.Errorf("batch message %d ack failed: %w", seq, err)
 			}
@@ -491,13 +511,9 @@ func PublishMsgBatch(ctx context.Context, js jetstream.JetStream, messages []*na
 		}
 
 		// Commit the batch on the last message.
-		messages[i].Header.Set(BatchCommitHeader, "1")
+		m.Header.Set(BatchCommitHeader, "1")
 
-		var resp *nats.Msg
-		var err error
-
-		resp, err = js.Conn().RequestMsgWithContext(ctx, messages[i])
-
+		resp, err := js.Conn().RequestMsgWithContext(ctx, &m)
 		if err != nil {
 			return nil, err
 		}
