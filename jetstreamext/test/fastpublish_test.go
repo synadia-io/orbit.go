@@ -271,6 +271,37 @@ func TestFastPublisher(t *testing.T) {
 			t.Fatalf("Expected ErrBatchClosed adding to discarded batch, got %v", err)
 		}
 	})
+	t.Run("error on first message", func(t *testing.T) {
+		s := RunBasicJetStreamServer()
+		defer shutdownJSServerAndRemoveStorage(t, s)
+		nc, js := jsClient(t, s)
+		defer nc.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Batch publishing is not enabled on the stream, so the server
+		// answers the first message with an error pub ack instead of a
+		// flow ack. Add must return that error, not wait for the ack timeout.
+		cfg := jetstream.StreamConfig{
+			Name:     "TEST",
+			Subjects: []string{"test.>"},
+		}
+		if _, err := js.CreateStream(ctx, cfg); err != nil {
+			t.Fatalf("Unexpected error creating stream: %v", err)
+		}
+
+		batch, err := jetstreamext.NewFastPublisher(js)
+		if err != nil {
+			t.Fatalf("Unexpected error creating fast publisher: %v", err)
+		}
+		_, err = batch.Add("test.1", []byte("message 1"))
+		if !errors.Is(err, jetstreamext.ErrFastBatchNotEnabled) {
+			t.Fatalf("Expected ErrFastBatchNotEnabled, got %v", err)
+		}
+		if !batch.IsClosed() {
+			t.Fatal("Expected batch to be closed")
+		}
+	})
 }
 
 func TestFastPublisher_ReplyPrefixUnchangedOnFlowChange(t *testing.T) {
