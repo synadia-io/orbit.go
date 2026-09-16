@@ -199,12 +199,15 @@ func cloneHeader(hdr nats.Header) nats.Header {
 }
 
 // validateBatchMsgHeaders rejects headers the server would refuse only at
-// commit time, after the whole batch has already been sent. first reports
-// whether this is the first message of the batch, add whether the message is
-// being added rather than used to commit.
+// commit time, after the whole batch has already been sent, or would silently
+// act on. first reports whether this is the first message of the batch, add
+// whether the message is being added rather than used to commit.
 func validateBatchMsgHeaders(hdr nats.Header, first, add bool) error {
 	if !first && hdr.Get(jetstream.ExpectedLastSeqHeader) != "" {
 		return ErrBatchExpectedLastSeqNotFirst
+	}
+	if add && hdr.Get(BatchCommitHeader) != "" {
+		return ErrBatchCommitOnAdd
 	}
 	return nil
 }

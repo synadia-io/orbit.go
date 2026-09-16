@@ -553,6 +553,13 @@ func TestBatchPublisher(t *testing.T) {
 			t.Fatalf("Expected ErrBatchExpectedLastSeqNotFirst on commit, got %v", err)
 		}
 
+		// A commit header on Add is a mistake, not a commit.
+		msg = nats.NewMsg("test.2")
+		msg.Header.Set(jetstreamext.BatchCommitHeader, "1")
+		if err := batch.AddMsg(msg); !errors.Is(err, jetstreamext.ErrBatchCommitOnAdd) {
+			t.Fatalf("Expected ErrBatchCommitOnAdd, got %v", err)
+		}
+
 		// Rejected messages were never sent: the batch is still open and
 		// commits with only the messages that went through.
 		if size := batch.Size(); size != 1 || batch.IsClosed() {
