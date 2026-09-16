@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -284,6 +285,47 @@ func (fp *fastPublisher) abort(err error) {
 		fp.ackSub.Unsubscribe()
 		fp.ackSub = nil
 	}
+}
+
+// replyOperation returns the batch sequence and operation encoded in a
+// control-channel reply subject (<prefix>.<flow>.<gap>.<seq>.<op>.$FI).
+func replyOperation(subject string) (seq uint64, op int, ok bool) {
+	tokens := strings.Split(subject, ".")
+	if len(tokens) < 3 {
+		return 0, 0, false
+	}
+	seq, err := strconv.ParseUint(tokens[len(tokens)-3], 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	op, err = strconv.Atoi(tokens[len(tokens)-2])
+	if err != nil {
+		return 0, 0, false
+	}
+	return seq, op, true
+}
+
+// handleStatus deals with a status-only reply on the control channel,
+// such as the 503 the server sends when nothing captures the subject a
+// message was published to. Lock should be held.
+func (fp *fastPublisher) handleStatus(msg *nats.Msg) {
+	var err error
+	if status := msg.Header.Get("Status"); status == "503" {
+		err = nats.ErrNoResponders
+	} else {
+		err = fmt.Errorf("%w: status %s", ErrInvalidBatchAck, status)
+	}
+
+	// A lost start or commit ends the batch. A lost message in between is
+	// a gap; report it and let gap mode decide what happens next.
+	seq, op, ok := replyOperation(msg.Subject)
+	if ok && (op == fastBatchAddMsg || op == fastBatchPing) {
+		if fp.errHandler != nil {
+			fp.errHandler(fmt.Errorf("batch message %d: %w", seq, err))
+		}
+		return
+	}
+	fp.abort(err)
 }
 
 func (fp *fastPublisher) Add(subject string, data []byte, opts ...BatchMsgOpt) (*FastPubAck, error) {
@@ -592,6 +634,11 @@ func (fp *fastPublisher) IsClosed() bool {
 func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 	fp.mu.Lock()
 	defer fp.mu.Unlock()
+
+	if len(msg.Data) == 0 && msg.Header.Get("Status") != "" {
+		fp.handleStatus(msg)
+		return
+	}
 	var commitAck *batchAckResponse
 	var flowAck *batchFlowAck
 	var flowErr *batchFlowErr
