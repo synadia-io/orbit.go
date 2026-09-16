@@ -472,6 +472,46 @@ func TestBatchPublisher(t *testing.T) {
 		}
 	})
 
+	t.Run("does not modify message", func(t *testing.T) {
+		s := RunBasicJetStreamServer()
+		defer shutdownJSServerAndRemoveStorage(t, s)
+		nc, js := jsClient(t, s)
+		defer nc.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		cfg := jetstream.StreamConfig{
+			Name:               "TEST",
+			Subjects:           []string{"test.>"},
+			AllowAtomicPublish: true,
+		}
+		if _, err := js.CreateStream(ctx, cfg); err != nil {
+			t.Fatalf("Unexpected error creating stream: %v", err)
+		}
+
+		batch, err := jetstreamext.NewBatchPublisher(js)
+		if err != nil {
+			t.Fatalf("Unexpected error creating batch publisher: %v", err)
+		}
+
+		msg := nats.NewMsg("test.1")
+		msg.Header.Set("X-User", "value")
+		if err := batch.AddMsg(msg, jetstreamext.WithBatchExpectLastSequence(0)); err != nil {
+			t.Fatalf("Unexpected error adding message: %v", err)
+		}
+		commit := nats.NewMsg("test.2")
+		if _, err := batch.CommitMsg(ctx, commit, jetstreamext.WithBatchExpectStream("TEST")); err != nil {
+			t.Fatalf("Unexpected error committing batch: %v", err)
+		}
+
+		if msg.Reply != "" || len(msg.Header) != 1 || msg.Header.Get("X-User") != "value" {
+			t.Fatalf("Expected added message to be unmodified, got reply %q, headers %v", msg.Reply, msg.Header)
+		}
+		if commit.Reply != "" || len(commit.Header) != 0 {
+			t.Fatalf("Expected commit message to be unmodified, got reply %q, headers %v", commit.Reply, commit.Header)
+		}
+	})
+
 }
 
 func TestBatchPublisher_Discard(t *testing.T) {
@@ -901,6 +941,41 @@ func TestPublishMsgBatch(t *testing.T) {
 			t.Fatalf("Expected BatchAck.BatchSize to be %d, got %d", count, ack.BatchSize)
 		}
 	})
+	t.Run("does not modify messages", func(t *testing.T) {
+		s := RunBasicJetStreamServer()
+		defer shutdownJSServerAndRemoveStorage(t, s)
+		nc, js := jsClient(t, s)
+		defer nc.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		cfg := jetstream.StreamConfig{
+			Name:               "TEST",
+			Subjects:           []string{"test.>"},
+			AllowAtomicPublish: true,
+		}
+		if _, err := js.CreateStream(ctx, cfg); err != nil {
+			t.Fatalf("Unexpected error creating stream: %v", err)
+		}
+
+		// The first message has no header map at all, which used to panic.
+		messages := []*nats.Msg{
+			{Subject: "test.1", Data: []byte("message 1")},
+			nats.NewMsg("test.2"),
+		}
+		messages[1].Header.Set("X-User", "value")
+		if _, err := jetstreamext.PublishMsgBatch(ctx, js, messages); err != nil {
+			t.Fatalf("Unexpected error publishing batch: %v", err)
+		}
+
+		if messages[0].Header != nil || messages[0].Reply != "" {
+			t.Fatalf("Expected first message to be unmodified, got reply %q, headers %v", messages[0].Reply, messages[0].Header)
+		}
+		if len(messages[1].Header) != 1 || messages[1].Header.Get("X-User") != "value" {
+			t.Fatalf("Expected second message to be unmodified, got headers %v", messages[1].Header)
+		}
+	})
+
 	t.Run("too many messages", func(t *testing.T) {
 		s := RunBasicJetStreamServer()
 		defer shutdownJSServerAndRemoveStorage(t, s)
