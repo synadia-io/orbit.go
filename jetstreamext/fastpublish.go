@@ -150,6 +150,11 @@ type (
 		mu           sync.Mutex
 	}
 
+	// FastPublishErrHandler is called with errors the server reports
+	// asynchronously over the control channel: gaps, per-message errors,
+	// and a batch ending without a commit in flight. It runs on the
+	// subscription's goroutine while the publisher's lock is held, so it
+	// must return quickly and must not call back into the FastPublisher.
 	FastPublishErrHandler func(error)
 
 	fastPublisherOpts struct {
