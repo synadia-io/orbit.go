@@ -107,6 +107,9 @@ managed server's own, and is stopped by the service on teardown.
 | `tester.start.instance`       | Revives a previously-stopped instance.                                      |
 | `tester.update.server`        | Renders a new on-disk config for a server. Optional `snippets`, `template`. |
 | `tester.reload.server`        | Signals a running server to re-read its on-disk config.                     |
+| `tester.shape.set`            | Adds or replaces a traffic shaping set on a traced instance's proxy.        |
+| `tester.shape.clear`          | Removes one shaping set by id, or every set when `set` is empty.            |
+| `tester.shape.report`         | Reports the rule firings of one shaping set, or of every set.               |
 | `tester.status`               | Status of all instances; optional `instance_id` filter.                     |
 | `tester.list`                 | Lightweight summary of every instance (id, kind, servers count).            |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                              |

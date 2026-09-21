@@ -1843,6 +1843,129 @@ func (s *Service) list(req micro.Request) {
 	req.RespondJSON(resp)
 }
 
+// shaperFor finds the capture proxy fronting an instance and asserts it can shape
+// traffic. It answers the request itself on any failure and returns nil, so a
+// handler returns when it gets nil back.
+func (s *Service) shaperFor(req micro.Request, instanceID string) Shaper {
+	if instanceID == "" {
+		req.Error("002", "Invalid request: instance_id is required", nil)
+		return nil
+	}
+
+	s.mu.Lock()
+	inst, ok := s.instances[instanceID]
+	var servers []*managedServer
+	if ok {
+		servers = slices.Clone(inst.Servers)
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		req.Error("404", "Instance not found", nil)
+		return nil
+	}
+
+	// traceProxy is set before a server joins inst.Servers and never changes
+	// afterwards, so it is safe to read outside the lock.
+	var proxy CaptureProxy
+	for _, ms := range servers {
+		if ms.traceProxy != nil {
+			proxy = ms.traceProxy
+			break
+		}
+	}
+	if proxy == nil {
+		req.Error("015", "Instance has no trace proxy", nil)
+		return nil
+	}
+
+	shaper, ok := proxy.(Shaper)
+	if !ok {
+		req.Error("016", "Shaping not supported by the trace capturer", nil)
+		return nil
+	}
+
+	return shaper
+}
+
+func (s *Service) shapeSet(req micro.Request) {
+	s.log.Info("Handling shape set request")
+
+	creq := api.ShapeSetRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	shaper := s.shaperFor(req, creq.InstanceID)
+	if shaper == nil {
+		return
+	}
+
+	err = shaper.Shape(creq.Set)
+	if err != nil {
+		req.Error("017", err.Error(), nil)
+		return
+	}
+
+	req.RespondJSON(api.ShapeSetResponse{Set: creq.Set.ID})
+}
+
+func (s *Service) shapeClear(req micro.Request) {
+	s.log.Info("Handling shape clear request")
+
+	creq := api.ShapeClearRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	shaper := s.shaperFor(req, creq.InstanceID)
+	if shaper == nil {
+		return
+	}
+
+	cleared, err := shaper.ClearShaping(creq.Set)
+	if err != nil {
+		req.Error("017", err.Error(), nil)
+		return
+	}
+	if cleared == nil {
+		cleared = []string{}
+	}
+
+	req.RespondJSON(api.ShapeClearResponse{Cleared: cleared})
+}
+
+func (s *Service) shapeReport(req micro.Request) {
+	s.log.Info("Handling shape report request")
+
+	creq := api.ShapeReportRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	shaper := s.shaperFor(req, creq.InstanceID)
+	if shaper == nil {
+		return
+	}
+
+	sets, err := shaper.ShapingReport(creq.Set)
+	if err != nil {
+		req.Error("017", err.Error(), nil)
+		return
+	}
+	if sets == nil {
+		sets = []api.ShapingReport{}
+	}
+
+	req.RespondJSON(api.ShapeReportResponse{Sets: sets})
+}
+
 // instanceSnapshot is a lock-released view of an instance's metadata and the
 // reportable state of its servers, taken so a status response can be built
 // without holding s.mu.

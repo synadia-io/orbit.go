@@ -13,7 +13,11 @@
 
 package ntf
 
-import "context"
+import (
+	"context"
+
+	"github.com/synadia-io/orbit.go/ntf/api"
+)
 
 // NewCapturerFunc builds the trace capture implementation for a Service. It is
 // called once at the end of New, with the Service already usable, so an
@@ -62,4 +66,21 @@ type CaptureProxy interface {
 	Port() int
 	// Stop closes live connections and waits for their captures to flush.
 	Stop()
+}
+
+// Shaper is implemented by a CaptureProxy that can drop, stall, throttle or
+// disconnect the frames passing through it. The tester.shape.* endpoints
+// type-assert it on the traced instance's proxy and refuse the request when the
+// proxy does not implement it.
+type Shaper interface {
+	// Shape adds a set to the proxy, replacing one with the same id and resetting
+	// its counters. It compiles the set's rules and returns an error naming the
+	// rule and field it could not compile; the error text reaches the caller.
+	Shape(set api.ShapingSet) error
+	// ClearShaping removes the named set, or every set when set is empty, and
+	// returns the ids removed.
+	ClearShaping(set string) ([]string, error)
+	// ShapingReport returns the firings of the named set, or of every set when
+	// set is empty.
+	ShapingReport(set string) ([]api.ShapingReport, error)
 }
