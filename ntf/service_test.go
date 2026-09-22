@@ -269,9 +269,70 @@ func TestTraceUsesCapturer(t *testing.T) {
 	if _, err := os.Stat(req.TmpDir); err != nil {
 		t.Errorf("service did not create TmpDir: %v", err)
 	}
+	if !req.Store {
+		t.Error("Store = false, want true for a traced create")
+	}
 
 	if got := created.Servers[0].Ports["trace"]; got != 45001 {
 		t.Errorf("trace port = %d, want the capturer's 45001", got)
+	}
+}
+
+// TestProxyUsesCapturerWithoutStore proves a create with Proxy and no Trace starts
+// the proxy with Store false and still publishes the trace port.
+func TestProxyUsesCapturerWithoutStore(t *testing.T) {
+	capturer := &fakeCapturer{}
+	svc := startTestService(t, withCapturer(capturer))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Proxy: true}, &created)
+
+	reqs, _ := capturer.snapshot()
+	if len(reqs) != 1 {
+		t.Fatalf("capturer saw %d requests, want 1", len(reqs))
+	}
+	if reqs[0].Store {
+		t.Error("Store = true, want false for a proxy-only create")
+	}
+	if got := created.Servers[0].Ports["trace"]; got != 45001 {
+		t.Errorf("trace port = %d, want the capturer's 45001", got)
+	}
+}
+
+// TestStatusListsShapingSets proves tester.status reports the ids of the sets the
+// instance's proxy holds, in the proxy's order, and none for an instance without a
+// proxy.
+func TestStatusListsShapingSets(t *testing.T) {
+	proxy := &fakeShapingProxy{reports: []api.ShapingReport{{ID: "lost-ack-30"}, {ID: "slow-pub"}}}
+	svc := startTestService(t, withCapturer(&fakeCapturer{shaper: proxy}))
+
+	var shaped api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Proxy: true}, &shaped)
+	var plain api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{}, &plain)
+
+	var status api.StatusResponse
+	mustRequest(t, svc.nc, "tester.status", api.StatusRequest{InstanceID: shaped.ID}, &status)
+	if len(status.Instances) != 1 {
+		t.Fatalf("status returned %d instances, want 1", len(status.Instances))
+	}
+	if got := status.Instances[0].ShapingSets; !reflect.DeepEqual(got, []string{"lost-ack-30", "slow-pub"}) {
+		t.Errorf("shaping sets = %v, want [lost-ack-30 slow-pub]", got)
+	}
+	proxy.mu.Lock()
+	reported := append([]string(nil), proxy.reported...)
+	proxy.mu.Unlock()
+	if !reflect.DeepEqual(reported, []string{""}) {
+		t.Errorf("proxy was asked to report %q, want the empty set meaning all", reported)
+	}
+
+	var plainStatus api.StatusResponse
+	mustRequest(t, svc.nc, "tester.status", api.StatusRequest{InstanceID: plain.ID}, &plainStatus)
+	if len(plainStatus.Instances) != 1 {
+		t.Fatalf("status returned %d instances, want 1", len(plainStatus.Instances))
+	}
+	if got := plainStatus.Instances[0].ShapingSets; len(got) != 0 {
+		t.Errorf("shaping sets = %v for an instance without a proxy, want none", got)
 	}
 }
 

@@ -68,8 +68,13 @@ type CreateServerRequest struct {
 	Template    string            `json:"template,omitempty"`
 	TLS         *TLSOptions       `json:"tls,omitempty"`
 	// Trace opts the server into a capture proxy on a random port; every connection
-	// that reaches it has its trace stored in the TRACES object store.
+	// that reaches it has its trace stored in the TRACES object store. It implies
+	// Proxy.
 	Trace bool `json:"trace,omitempty"`
+	// Proxy fronts the server with the capture proxy and stores no captures, so
+	// shaping sets apply without filling the store. When Trace is set, Proxy has
+	// no effect.
+	Proxy bool `json:"proxy,omitempty"`
 }
 
 type CreateClusterRequest struct {
@@ -80,8 +85,12 @@ type CreateClusterRequest struct {
 	Template    string            `json:"template,omitempty"`
 	TLS         *TLSOptions       `json:"tls,omitempty"`
 	// Trace fronts the first node of the cluster with a single capture proxy that
-	// stores every connection's trace.
+	// stores every connection's trace. It implies Proxy.
 	Trace bool `json:"trace,omitempty"`
+	// Proxy fronts the first node with the capture proxy and stores no captures,
+	// so shaping sets apply without filling the store. When Trace is set, Proxy
+	// has no effect.
+	Proxy bool `json:"proxy,omitempty"`
 }
 
 type CreateSuperClusterRequest struct {
@@ -93,8 +102,12 @@ type CreateSuperClusterRequest struct {
 	Template    string            `json:"template,omitempty"`
 	TLS         *TLSOptions       `json:"tls,omitempty"`
 	// Trace fronts the first node of the first cluster with a single capture proxy
-	// that stores every connection's trace.
+	// that stores every connection's trace. It implies Proxy.
 	Trace bool `json:"trace,omitempty"`
+	// Proxy fronts the first node of the first cluster with the capture proxy and
+	// stores no captures, so shaping sets apply without filling the store. When
+	// Trace is set, Proxy has no effect.
+	Proxy bool `json:"proxy,omitempty"`
 }
 
 type ManagedServer struct {
@@ -200,6 +213,10 @@ type InstanceStatus struct {
 	Description string          `json:"description,omitempty"`
 	Kind        string          `json:"kind"`
 	Servers     []ManagedServer `json:"servers"`
+	// ShapingSets holds the ids of the shaping sets applied to the instance's
+	// capture proxy, in the order they were applied. Empty when the instance has
+	// no proxy or the capturer does not shape.
+	ShapingSets []string `json:"shaping_sets,omitempty"`
 }
 
 type StatusResponse struct {

@@ -32,8 +32,9 @@ type NewCapturerFunc func(context.Context, *Service) (Capturer, error)
 // traffic reaching them.
 type Capturer interface {
 	// Capture starts a proxy in front of one managed server's client port. It is
-	// called for a traced single server, and for the first node only of a traced
-	// cluster or super-cluster. The caller stops the returned proxy on teardown.
+	// called for a single server created with Trace or Proxy, and for the first
+	// node only of such a cluster or super-cluster. req.Store says whether to
+	// keep captures. The caller stops the returned proxy on teardown.
 	Capture(ctx context.Context, req CaptureRequest) (CaptureProxy, error)
 
 	// Close releases the capturer. Called by Service.Close after instances have
@@ -57,6 +58,11 @@ type CaptureRequest struct {
 	// instance directory and removes it with the instance, unless the service
 	// was created with Preserve. Every traced node of an instance shares it.
 	TmpDir string
+	// Store is true when the create request asked for Trace and false when it
+	// asked for Proxy alone. The capturer keeps captures only when Store is
+	// true; when it is false the proxy still forwards and shapes every
+	// connection.
+	Store bool
 }
 
 // CaptureProxy is a running capture proxy fronting one managed server.

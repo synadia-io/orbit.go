@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats-server/v2/conf"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
@@ -349,8 +350,45 @@ func TestRenderJetStreamNoSnippetHasNoInclude(t *testing.T) {
 	if strings.Contains(out, "snippets/jetstream.conf") {
 		t.Fatalf("unexpected jetstream include with no snippet:\n%s", out)
 	}
-	if !strings.Contains(out, "store_dir: /tmp/store") {
+	if !strings.Contains(out, `store_dir: "/tmp/store"`) {
 		t.Fatalf("expected built-in store_dir to remain:\n%s", out)
+	}
+}
+
+// TestRenderConfigQuotesNames renders the template with names the nats conf lexer
+// reads as numbers when unquoted (digits, a size suffix, a digit) and parses the
+// result with nats-server's own parser, so the quoting in the template holds.
+func TestRenderConfigQuotesNames(t *testing.T) {
+	td := defaultTemplateData()
+	td.ServerName = "1k2abcde-n1"
+	td.ClusterName = "C_1k2abcde"
+	td.ClientPort = 14222
+	td.ClusterPort = 14248
+	td.GatewayPort = 14260
+	td.StoreDir = "/tmp/1k2abcde/store"
+	td.LogFile = "/tmp/1k2abcde/n1.log"
+	td.JetStream = true
+	td.Routes = []string{"127.0.0.1:14249"}
+	td.Gateways = map[string][]string{"C_2m3abcde": {"127.0.0.1:14261"}}
+
+	out, err := renderConfig(td, serverConfigTemplate)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+
+	parsed, err := conf.Parse(string(out))
+	if err != nil {
+		t.Fatalf("nats-server conf parser rejected the rendered config: %v\n%s", err, out)
+	}
+	if got := parsed["server_name"]; got != td.ServerName {
+		t.Errorf("server_name = %v, want %q", got, td.ServerName)
+	}
+	cluster, ok := parsed["cluster"].(map[string]any)
+	if !ok {
+		t.Fatalf("cluster block = %T, want a map", parsed["cluster"])
+	}
+	if got := cluster["name"]; got != td.ClusterName {
+		t.Errorf("cluster name = %v, want %q", got, td.ClusterName)
 	}
 }
 
