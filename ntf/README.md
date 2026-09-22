@@ -36,7 +36,7 @@ Set `Conn` to host the service on a connection you already have. `Close` leaves 
 | `Logger`        | _(discard)_       | Receives a line per request and per managed server transition.                       |
 | `Name`          | `test-management` | The Micro service name.                                                              |
 | `Group`         | `tester`          | Subject group every endpoint hangs off. Changing it moves every subject.             |
-| `NewCapturer`   | _(nil)_           | Supplies [trace capture](#trace-capture). Without one, `trace` requests are refused. |
+| `NewCapturer`   | _(nil)_           | Supplies [trace capture](#trace-capture). Without one, `trace` or `proxy` requests are refused. |
 
 `EmbeddedOptions` carries `Port` (zero and `-1` both bind an OS-chosen port), `ServerName`, and `Log`, which writes
 the embedded server's own log to stdout. Managed servers are unaffected by `Log`: they always log to a file under
@@ -73,10 +73,11 @@ between concurrent instances.
 
 ## Trace capture
 
-`Create*` requests accept `trace` to front a server's client port with a capture proxy. The service does not
-implement capture itself: `Options.NewCapturer` supplies it, and without one those requests are refused with error
-code `014`. Only the first node of a cluster or super-cluster is fronted, and combining `trace` with generated TLS
-is rejected because the proxy forwards plaintext.
+`Create*` requests accept `trace` to front a server's client port with a capture proxy that stores every
+connection's capture, and `proxy` to front it with the same proxy and store nothing, for shaping without captures.
+`trace` implies `proxy`. The service does not implement capture itself: `Options.NewCapturer` supplies it, and
+without one those requests are refused with error code `014`. Only the first node of a cluster or super-cluster is
+fronted, and combining either flag with generated TLS is rejected because the proxy forwards plaintext.
 
 ```go
 type Capturer interface {
@@ -90,24 +91,28 @@ reach the management connection, the embedded server and the instance directory.
 expensive setup on the first `Capture`, so a service that never captures never pays for it.
 
 `CaptureRequest` names the instance and server being fronted, the backend address to forward to, the host to
-listen on (the node's `client_advertise`, which must name a local interface), and a temp directory the service
-creates under the instance. The `CaptureProxy` that comes back reports the port clients reach instead of the
+listen on (the node's `client_advertise`, which must name a local interface), a temp directory the service
+creates under the instance, and `Store`, which is true for `trace` and false for `proxy` alone; the capturer keeps
+captures only when it is true. The `CaptureProxy` that comes back reports the port clients reach instead of the
 managed server's own, and is stopped by the service on teardown.
 
 ## API
 
 | Subject                       | Description                                                                 |
 |-------------------------------|-----------------------------------------------------------------------------|
-| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`.                   |
-| `tester.create.cluster`       | Creates a cluster. Optional `snippets`, `template`.                         |
-| `tester.create.super-cluster` | Creates a super-cluster. Optional `snippets`, `template`.                   |
+| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `trace`, `proxy`. |
+| `tester.create.cluster`       | Creates a cluster. Optional `snippets`, `template`, `trace`, `proxy`.       |
+| `tester.create.super-cluster` | Creates a super-cluster. Optional `snippets`, `template`, `trace`, `proxy`. |
 | `tester.stop.server`          | Stops a running server by name (names are globally unique).                 |
 | `tester.start.server`         | Starts a previously-stopped server by name.                                 |
 | `tester.stop.instance`        | Stops every server in an instance, keeping config and storage.              |
 | `tester.start.instance`       | Revives a previously-stopped instance.                                      |
 | `tester.update.server`        | Renders a new on-disk config for a server. Optional `snippets`, `template`. |
 | `tester.reload.server`        | Signals a running server to re-read its on-disk config.                     |
-| `tester.status`               | Status of all instances; optional `instance_id` filter.                     |
+| `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxy of an instance with one. |
+| `tester.shape.clear`          | Removes one shaping set by id, or every set when `set` is empty.            |
+| `tester.shape.report`         | Reports the rule firings of one shaping set, or of every set.               |
+| `tester.status`               | Status of every instance and its `shaping_sets`; optional `instance_id`.    |
 | `tester.list`                 | Lightweight summary of every instance (id, kind, servers count).            |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                              |
 | `tester.reset`                | Tears down **every** instance — CI-style global wipe.                       |

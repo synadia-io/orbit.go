@@ -132,30 +132,30 @@ func validateListenerPortSet(newSnippets map[string]string, current map[string]i
 
 var serverConfigTemplate = `
 {{ if .Snippets.top }}include "{{ .Snippets.top }}"{{ end }}
-server_name: {{ .ServerName }}
+server_name: "{{ .ServerName }}"
 port: {{ .ClientPort }}
 {{ if .AdvertiseHost }}
 client_advertise: "{{ hostport .AdvertiseHost .ClientPort }}"
 {{ end }}
 {{ if .LogFile }}
-log_file: {{ .LogFile }}
+log_file: "{{ .LogFile }}"
 {{ end }}
 
 {{ if .JetStream }}
 jetstream {
 	enabled: true
-	store_dir: {{ .StoreDir }}
+	store_dir: "{{ .StoreDir }}"
 	{{ if .Snippets.jetstream }}include "{{ .Snippets.jetstream }}"{{ end }}
 }
 {{ end }}
 
 {{ if and .ClusterName .Routes}}
 cluster {
-	name: {{ .ClusterName }}
+	name: "{{ .ClusterName }}"
 	port: {{ .ClusterPort }}
 	routes: [
 {{ range .Routes }}
-nats://{{ . }}
+"nats://{{ . }}"
 {{ end }}
 	]
 }
@@ -163,7 +163,7 @@ nats://{{ . }}
 
 {{ if and .Gateways .GatewayPort .ClusterName }}
 gateway {
-	name: {{ .ClusterName }}
+	name: "{{ .ClusterName }}"
 	port: {{ .GatewayPort }}
 	gateways: [
 {{ range $cluster, $urls := .Gateways }}
@@ -592,13 +592,16 @@ func (s *Service) createServer(req micro.Request) {
 		mainTemplate = creq.Template
 	}
 
+	// Trace implies the proxy; Proxy alone fronts the server and stores nothing.
+	proxied := creq.Trace || creq.Proxy
+
 	// The capture proxy is a plaintext forwarder, so it cannot front a TLS client port.
-	if creq.Trace && creq.TLS != nil {
+	if proxied && creq.TLS != nil {
 		req.Error("013", "trace capture does not support TLS instances", nil)
 		return
 	}
 
-	if creq.Trace && s.capturer == nil {
+	if proxied && s.capturer == nil {
 		req.Error("014", "trace capture is not configured on this service", nil)
 		return
 	}
@@ -712,8 +715,8 @@ func (s *Service) createServer(req micro.Request) {
 
 	// Front the client port with a capture proxy when requested, before the server is
 	// published so its trace port and proxy are set atomically.
-	if creq.Trace {
-		proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost)
+	if proxied {
+		proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost, creq.Trace)
 		if terr != nil {
 			// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
 			// shut it down here to avoid leaking the started server on trace failure.
@@ -755,10 +758,11 @@ const traceSetupTimeout = 30 * time.Second
 //
 // advertiseHost becomes the proxy's listen host, so the advertised trace URL matches
 // the node's client_advertise. It must name a local interface or the capturer fails
-// to listen. Empty binds and advertises 0.0.0.0 (the no-advertise default). The
-// caller must shut down the backend server on failure: it is not yet tracked by the
-// instance.
-func (s *Service) startTraceProxy(inst *instance, serverName string, clientPort int, advertiseHost string) (CaptureProxy, int, error) {
+// to listen. Empty binds and advertises 0.0.0.0 (the no-advertise default). store
+// is passed to the capturer as CaptureRequest.Store: true keeps every connection's
+// capture, false forwards and shapes without keeping any. The caller must shut down
+// the backend server on failure: it is not yet tracked by the instance.
+func (s *Service) startTraceProxy(inst *instance, serverName string, clientPort int, advertiseHost string, store bool) (CaptureProxy, int, error) {
 	if s.capturer == nil {
 		return nil, 0, fmt.Errorf("trace capture is not configured on this service")
 	}
@@ -777,6 +781,7 @@ func (s *Service) startTraceProxy(inst *instance, serverName string, clientPort 
 		Backend:    fmt.Sprintf("127.0.0.1:%d", clientPort),
 		ListenHost: advertiseHost,
 		TmpDir:     tmpDir,
+		Store:      store,
 	})
 	if err != nil {
 		return nil, 0, err
@@ -834,12 +839,15 @@ func (s *Service) createCluster(req micro.Request) {
 		mainTemplate = creq.Template
 	}
 
-	if creq.Trace && creq.TLS != nil {
+	// Trace implies the proxy; Proxy alone fronts the first node and stores nothing.
+	proxied := creq.Trace || creq.Proxy
+
+	if proxied && creq.TLS != nil {
 		req.Error("013", "trace capture does not support TLS instances", nil)
 		return
 	}
 
-	if creq.Trace && s.capturer == nil {
+	if proxied && s.capturer == nil {
 		req.Error("014", "trace capture is not configured on this service", nil)
 		return
 	}
@@ -999,8 +1007,8 @@ func (s *Service) createCluster(req micro.Request) {
 		ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
 
 		// A single capture proxy fronts the first node of the cluster.
-		if creq.Trace && i == 1 {
-			proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost)
+		if proxied && i == 1 {
+			proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost, creq.Trace)
 			if terr != nil {
 				// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
 				// shut it down here to avoid leaking the started server on trace failure.
@@ -1085,12 +1093,15 @@ func (s *Service) createSuperCluster(req micro.Request) {
 		mainTemplate = creq.Template
 	}
 
-	if creq.Trace && creq.TLS != nil {
+	// Trace implies the proxy; Proxy alone fronts the first node and stores nothing.
+	proxied := creq.Trace || creq.Proxy
+
+	if proxied && creq.TLS != nil {
 		req.Error("013", "trace capture does not support TLS instances", nil)
 		return
 	}
 
-	if creq.Trace && s.capturer == nil {
+	if proxied && s.capturer == nil {
 		req.Error("014", "trace capture is not configured on this service", nil)
 		return
 	}
@@ -1295,8 +1306,8 @@ func (s *Service) createSuperCluster(req micro.Request) {
 			ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
 
 			// A single capture proxy fronts the first node of the first cluster.
-			if creq.Trace && c == 1 && i == 1 {
-				proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost)
+			if proxied && c == 1 && i == 1 {
+				proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost, creq.Trace)
 				if terr != nil {
 					// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
 					// shut it down here to avoid leaking the started server on trace failure.
@@ -1788,10 +1799,37 @@ func (s *Service) status(req micro.Request) {
 				Running:   ms.running,
 			})
 		}
+		ist.ShapingSets = s.shapingSetIDs(snap.id, snap.traceProxy)
 		resp.Instances = append(resp.Instances, ist)
 	}
 
 	req.RespondJSON(resp)
+}
+
+// shapingSetIDs returns the ids of the shaping sets applied to proxy, in the order
+// the proxy reports them. A nil proxy or one that does not implement Shaper has
+// none. On a report error it logs the error and returns none, so status never
+// fails on it.
+func (s *Service) shapingSetIDs(instanceID string, proxy CaptureProxy) []string {
+	if proxy == nil {
+		return nil
+	}
+	shaper, ok := proxy.(Shaper)
+	if !ok {
+		return nil
+	}
+
+	reports, err := shaper.ShapingReport("")
+	if err != nil {
+		s.log.Warn("Could not read shaping sets for status", "instance", instanceID, "err", err)
+		return nil
+	}
+
+	ids := make([]string, 0, len(reports))
+	for _, r := range reports {
+		ids = append(ids, r.ID)
+	}
+	return ids
 }
 
 func (s *Service) destroy(req micro.Request) {
@@ -1843,6 +1881,121 @@ func (s *Service) list(req micro.Request) {
 	req.RespondJSON(resp)
 }
 
+// shaperFor finds the capture proxy fronting an instance and asserts it can shape
+// traffic. It answers the request itself on any failure and returns nil, so a
+// handler returns when it gets nil back.
+func (s *Service) shaperFor(req micro.Request, instanceID string) Shaper {
+	if instanceID == "" {
+		req.Error("002", "Invalid request: instance_id is required", nil)
+		return nil
+	}
+
+	s.mu.Lock()
+	inst, ok := s.instances[instanceID]
+	var servers []*managedServer
+	if ok {
+		servers = slices.Clone(inst.Servers)
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		req.Error("404", "Instance not found", nil)
+		return nil
+	}
+
+	proxy := traceProxyOf(servers)
+	if proxy == nil {
+		req.Error("015", "Instance has no trace proxy", nil)
+		return nil
+	}
+
+	shaper, ok := proxy.(Shaper)
+	if !ok {
+		req.Error("016", "Shaping not supported by the trace capturer", nil)
+		return nil
+	}
+
+	return shaper
+}
+
+func (s *Service) shapeSet(req micro.Request) {
+	s.log.Info("Handling shape set request")
+
+	creq := api.ShapeSetRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	shaper := s.shaperFor(req, creq.InstanceID)
+	if shaper == nil {
+		return
+	}
+
+	err = shaper.Shape(creq.Set)
+	if err != nil {
+		req.Error("017", err.Error(), nil)
+		return
+	}
+
+	req.RespondJSON(api.ShapeSetResponse{Set: creq.Set.ID})
+}
+
+func (s *Service) shapeClear(req micro.Request) {
+	s.log.Info("Handling shape clear request")
+
+	creq := api.ShapeClearRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	shaper := s.shaperFor(req, creq.InstanceID)
+	if shaper == nil {
+		return
+	}
+
+	cleared, err := shaper.ClearShaping(creq.Set)
+	if err != nil {
+		req.Error("017", err.Error(), nil)
+		return
+	}
+	if cleared == nil {
+		cleared = []string{}
+	}
+
+	req.RespondJSON(api.ShapeClearResponse{Cleared: cleared})
+}
+
+func (s *Service) shapeReport(req micro.Request) {
+	s.log.Info("Handling shape report request")
+
+	creq := api.ShapeReportRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	shaper := s.shaperFor(req, creq.InstanceID)
+	if shaper == nil {
+		return
+	}
+
+	sets, err := shaper.ShapingReport(creq.Set)
+	if err != nil {
+		req.Error("017", err.Error(), nil)
+		return
+	}
+	if sets == nil {
+		sets = []api.ShapingReport{}
+	}
+
+	req.RespondJSON(api.ShapeReportResponse{Sets: sets})
+}
+
 // instanceSnapshot is a lock-released view of an instance's metadata and the
 // reportable state of its servers, taken so a status response can be built
 // without holding s.mu.
@@ -1851,6 +2004,10 @@ type instanceSnapshot struct {
 	kind        string
 	description string
 	servers     []serverSnapshot
+	// traceProxy is the capture proxy fronting the instance, or nil when it has
+	// none. The status handler asks it for the applied shaping sets after the
+	// lock is released.
+	traceProxy CaptureProxy
 }
 
 // serverSnapshot is a managed server's reportable state, read out while the
@@ -1894,7 +2051,20 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 		kind:        inst.Kind,
 		description: inst.Description,
 		servers:     srvs,
+		traceProxy:  traceProxyOf(inst.Servers),
 	}
+}
+
+// traceProxyOf returns the capture proxy fronting one of servers, or nil when none
+// is fronted. traceProxy is set before a server joins its instance and never
+// changes afterwards, so the caller may read the result without holding s.mu.
+func traceProxyOf(servers []*managedServer) CaptureProxy {
+	for _, ms := range servers {
+		if ms.traceProxy != nil {
+			return ms.traceProxy
+		}
+	}
+	return nil
 }
 
 // findServerByName scans every instance for a server whose runtime name matches.

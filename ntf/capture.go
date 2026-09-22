@@ -13,7 +13,11 @@
 
 package ntf
 
-import "context"
+import (
+	"context"
+
+	"github.com/synadia-io/orbit.go/ntf/api"
+)
 
 // NewCapturerFunc builds the trace capture implementation for a Service. It is
 // called once at the end of New, with the Service already usable, so an
@@ -28,8 +32,9 @@ type NewCapturerFunc func(context.Context, *Service) (Capturer, error)
 // traffic reaching them.
 type Capturer interface {
 	// Capture starts a proxy in front of one managed server's client port. It is
-	// called for a traced single server, and for the first node only of a traced
-	// cluster or super-cluster. The caller stops the returned proxy on teardown.
+	// called for a single server created with Trace or Proxy, and for the first
+	// node only of such a cluster or super-cluster. req.Store says whether to
+	// keep captures. The caller stops the returned proxy on teardown.
 	Capture(ctx context.Context, req CaptureRequest) (CaptureProxy, error)
 
 	// Close releases the capturer. Called by Service.Close after instances have
@@ -53,6 +58,11 @@ type CaptureRequest struct {
 	// instance directory and removes it with the instance, unless the service
 	// was created with Preserve. Every traced node of an instance shares it.
 	TmpDir string
+	// Store is true when the create request asked for Trace and false when it
+	// asked for Proxy alone. The capturer keeps captures only when Store is
+	// true; when it is false the proxy still forwards and shapes every
+	// connection.
+	Store bool
 }
 
 // CaptureProxy is a running capture proxy fronting one managed server.
@@ -62,4 +72,21 @@ type CaptureProxy interface {
 	Port() int
 	// Stop closes live connections and waits for their captures to flush.
 	Stop()
+}
+
+// Shaper is implemented by a CaptureProxy that can drop, stall, throttle or
+// disconnect the frames passing through it. The tester.shape.* endpoints
+// type-assert it on the traced instance's proxy and refuse the request when the
+// proxy does not implement it.
+type Shaper interface {
+	// Shape adds a set to the proxy, replacing one with the same id and resetting
+	// its counters. It compiles the set's rules and returns an error naming the
+	// rule and field it could not compile; the error text reaches the caller.
+	Shape(set api.ShapingSet) error
+	// ClearShaping removes the named set, or every set when set is empty, and
+	// returns the ids removed.
+	ClearShaping(set string) ([]string, error)
+	// ShapingReport returns the firings of the named set, or of every set when
+	// set is empty.
+	ShapingReport(set string) ([]api.ShapingReport, error)
 }

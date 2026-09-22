@@ -16,8 +16,10 @@ package ntf
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -130,11 +132,14 @@ func TestNewSuppliedConn(t *testing.T) {
 
 // fakeCapturer records the requests it is handed and hands back proxies that
 // forward nothing; it covers the injection path without a real capture backend.
+// When shaper is set every Capture hands back that proxy, so a test can drive the
+// tester.shape.* endpoints against a proxy that implements Shaper.
 type fakeCapturer struct {
 	mu       sync.Mutex
 	requests []CaptureRequest
 	closed   bool
 	err      error
+	shaper   *fakeShapingProxy
 }
 
 func (f *fakeCapturer) Capture(_ context.Context, req CaptureRequest) (CaptureProxy, error) {
@@ -145,6 +150,11 @@ func (f *fakeCapturer) Capture(_ context.Context, req CaptureRequest) (CapturePr
 		return nil, f.err
 	}
 	f.requests = append(f.requests, req)
+
+	if f.shaper != nil {
+		f.shaper.port = 45000 + len(f.requests)
+		return f.shaper, nil
+	}
 
 	return &fakeProxy{port: 45000 + len(f.requests)}, nil
 }
@@ -169,6 +179,61 @@ type fakeProxy struct {
 
 func (p *fakeProxy) Port() int { return p.port }
 func (p *fakeProxy) Stop()     { p.stopped = true }
+
+// fakeShapingProxy is a fakeProxy that implements Shaper, recording what each
+// method was handed and answering with canned values. err, when set, is returned
+// by every Shaper method.
+type fakeShapingProxy struct {
+	fakeProxy
+
+	mu       sync.Mutex
+	sets     []api.ShapingSet
+	cleared  []string
+	reported []string
+	err      error
+	reports  []api.ShapingReport
+}
+
+func (p *fakeShapingProxy) Shape(set api.ShapingSet) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.err != nil {
+		return p.err
+	}
+	p.sets = append(p.sets, set)
+	return nil
+}
+
+func (p *fakeShapingProxy) ClearShaping(set string) ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.err != nil {
+		return nil, p.err
+	}
+	p.cleared = append(p.cleared, set)
+	if set != "" {
+		return []string{set}, nil
+	}
+
+	var ids []string
+	for _, s := range p.sets {
+		ids = append(ids, s.ID)
+	}
+	return ids, nil
+}
+
+func (p *fakeShapingProxy) ShapingReport(set string) ([]api.ShapingReport, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.err != nil {
+		return nil, p.err
+	}
+	p.reported = append(p.reported, set)
+	return p.reports, nil
+}
 
 func withCapturer(c Capturer) func(*Options) {
 	return func(o *Options) {
@@ -204,9 +269,70 @@ func TestTraceUsesCapturer(t *testing.T) {
 	if _, err := os.Stat(req.TmpDir); err != nil {
 		t.Errorf("service did not create TmpDir: %v", err)
 	}
+	if !req.Store {
+		t.Error("Store = false, want true for a traced create")
+	}
 
 	if got := created.Servers[0].Ports["trace"]; got != 45001 {
 		t.Errorf("trace port = %d, want the capturer's 45001", got)
+	}
+}
+
+// TestProxyUsesCapturerWithoutStore proves a create with Proxy and no Trace starts
+// the proxy with Store false and still publishes the trace port.
+func TestProxyUsesCapturerWithoutStore(t *testing.T) {
+	capturer := &fakeCapturer{}
+	svc := startTestService(t, withCapturer(capturer))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Proxy: true}, &created)
+
+	reqs, _ := capturer.snapshot()
+	if len(reqs) != 1 {
+		t.Fatalf("capturer saw %d requests, want 1", len(reqs))
+	}
+	if reqs[0].Store {
+		t.Error("Store = true, want false for a proxy-only create")
+	}
+	if got := created.Servers[0].Ports["trace"]; got != 45001 {
+		t.Errorf("trace port = %d, want the capturer's 45001", got)
+	}
+}
+
+// TestStatusListsShapingSets proves tester.status reports the ids of the sets the
+// instance's proxy holds, in the proxy's order, and none for an instance without a
+// proxy.
+func TestStatusListsShapingSets(t *testing.T) {
+	proxy := &fakeShapingProxy{reports: []api.ShapingReport{{ID: "lost-ack-30"}, {ID: "slow-pub"}}}
+	svc := startTestService(t, withCapturer(&fakeCapturer{shaper: proxy}))
+
+	var shaped api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Proxy: true}, &shaped)
+	var plain api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{}, &plain)
+
+	var status api.StatusResponse
+	mustRequest(t, svc.nc, "tester.status", api.StatusRequest{InstanceID: shaped.ID}, &status)
+	if len(status.Instances) != 1 {
+		t.Fatalf("status returned %d instances, want 1", len(status.Instances))
+	}
+	if got := status.Instances[0].ShapingSets; !reflect.DeepEqual(got, []string{"lost-ack-30", "slow-pub"}) {
+		t.Errorf("shaping sets = %v, want [lost-ack-30 slow-pub]", got)
+	}
+	proxy.mu.Lock()
+	reported := append([]string(nil), proxy.reported...)
+	proxy.mu.Unlock()
+	if !reflect.DeepEqual(reported, []string{""}) {
+		t.Errorf("proxy was asked to report %q, want the empty set meaning all", reported)
+	}
+
+	var plainStatus api.StatusResponse
+	mustRequest(t, svc.nc, "tester.status", api.StatusRequest{InstanceID: plain.ID}, &plainStatus)
+	if len(plainStatus.Instances) != 1 {
+		t.Fatalf("status returned %d instances, want 1", len(plainStatus.Instances))
+	}
+	if got := plainStatus.Instances[0].ShapingSets; len(got) != 0 {
+		t.Errorf("shaping sets = %v for an instance without a proxy, want none", got)
 	}
 }
 
@@ -245,5 +371,151 @@ func TestCloseClosesCapturer(t *testing.T) {
 
 	if _, closed := capturer.snapshot(); !closed {
 		t.Error("Close did not close the capturer")
+	}
+}
+
+// exampleShapingSet is the design's lost-ack rule file as a typed set.
+func exampleShapingSet() api.ShapingSet {
+	return api.ShapingSet{
+		ID:             "lost-ack-30",
+		ConnectionName: "^adr50-fast-lostack$",
+		Rules: []api.ShapingRule{{
+			ID: "drop-ack-30",
+			Match: api.ShapingMatch{
+				Direction: "from_server",
+				Verb:      []string{"MSG"},
+				Subject: &api.SubjectMatch{
+					Grammar: "{prefix:rest}.{flow:int}.{gap}.{seq:int}.{op:int}.$FI",
+					Where:   map[string]any{"seq": float64(30)},
+				},
+				Payload: &api.PayloadMatch{JSON: map[string]any{"type": "ack"}},
+			},
+			Action: api.ShapingAction{Kind: api.ShapingDrop},
+			Limit:  1,
+		}},
+	}
+}
+
+// TestShapeEndpointsReachShaper proves set, clear and report reach the traced
+// instance's proxy with the request's arguments and return what it answers.
+func TestShapeEndpointsReachShaper(t *testing.T) {
+	proxy := &fakeShapingProxy{reports: []api.ShapingReport{{
+		ID: "lost-ack-30",
+		Firings: []api.ShapingFiring{{
+			ConnectionUUID: "conn-1",
+			ClientName:     "adr50-fast-lostack",
+			FrameID:        "conn-1-7",
+			Rule:           "drop-ack-30",
+			Action:         api.ShapingDrop,
+			Time:           time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC),
+		}},
+	}}}
+	svc := startTestService(t, withCapturer(&fakeCapturer{shaper: proxy}))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
+
+	set := exampleShapingSet()
+	var setResp api.ShapeSetResponse
+	mustRequest(t, svc.nc, "tester.shape.set", api.ShapeSetRequest{InstanceID: created.ID, Set: set}, &setResp)
+	if setResp.Set != set.ID {
+		t.Errorf("set response = %q, want %q", setResp.Set, set.ID)
+	}
+	proxy.mu.Lock()
+	sets := append([]api.ShapingSet(nil), proxy.sets...)
+	proxy.mu.Unlock()
+	if len(sets) != 1 {
+		t.Fatalf("proxy saw %d sets, want 1", len(sets))
+	}
+	if !reflect.DeepEqual(sets[0], set) {
+		t.Errorf("proxy got set %+v, want %+v", sets[0], set)
+	}
+
+	var report api.ShapeReportResponse
+	mustRequest(t, svc.nc, "tester.shape.report", api.ShapeReportRequest{InstanceID: created.ID, Set: set.ID}, &report)
+	if !reflect.DeepEqual(report.Sets, proxy.reports) {
+		t.Errorf("report = %+v, want %+v", report.Sets, proxy.reports)
+	}
+	proxy.mu.Lock()
+	reported := append([]string(nil), proxy.reported...)
+	proxy.mu.Unlock()
+	if !reflect.DeepEqual(reported, []string{set.ID}) {
+		t.Errorf("proxy was asked to report %v, want [%s]", reported, set.ID)
+	}
+
+	var cleared api.ShapeClearResponse
+	mustRequest(t, svc.nc, "tester.shape.clear", api.ShapeClearRequest{InstanceID: created.ID}, &cleared)
+	if !reflect.DeepEqual(cleared.Cleared, []string{set.ID}) {
+		t.Errorf("cleared = %v, want [%s]", cleared.Cleared, set.ID)
+	}
+	proxy.mu.Lock()
+	clearedArgs := append([]string(nil), proxy.cleared...)
+	proxy.mu.Unlock()
+	if !reflect.DeepEqual(clearedArgs, []string{""}) {
+		t.Errorf("proxy was asked to clear %q, want the empty set meaning all", clearedArgs)
+	}
+}
+
+// TestShapeRefusals proves an unknown instance, an instance without a trace proxy
+// and a proxy that does not implement Shaper are each refused with their own code.
+func TestShapeRefusals(t *testing.T) {
+	svc := startTestService(t, withCapturer(&fakeCapturer{shaper: &fakeShapingProxy{}}))
+
+	var untraced api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{}, &untraced)
+
+	plain := startTestService(t, withCapturer(&fakeCapturer{}))
+	var traced api.CreateResponse
+	mustRequest(t, plain.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &traced)
+
+	cases := []struct {
+		name string
+		svc  *Service
+		id   string
+		code string
+	}{
+		{"unknown instance", svc, "does-not-exist", "404"},
+		{"untraced instance", svc, untraced.ID, "015"},
+		{"proxy without shaping", plain, traced.ID, "016"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			set := exampleShapingSet()
+			if got := errorCodeFor(t, tc.svc.nc, "tester.shape.set", api.ShapeSetRequest{InstanceID: tc.id, Set: set}); got != tc.code {
+				t.Errorf("shape.set code = %q, want %s", got, tc.code)
+			}
+			if got := errorCodeFor(t, tc.svc.nc, "tester.shape.clear", api.ShapeClearRequest{InstanceID: tc.id}); got != tc.code {
+				t.Errorf("shape.clear code = %q, want %s", got, tc.code)
+			}
+			if got := errorCodeFor(t, tc.svc.nc, "tester.shape.report", api.ShapeReportRequest{InstanceID: tc.id}); got != tc.code {
+				t.Errorf("shape.report code = %q, want %s", got, tc.code)
+			}
+		})
+	}
+}
+
+// TestShapeErrorReachesCaller proves the text of a Shaper error is returned to the
+// caller, so a compile error naming the rule and field is readable at the client.
+func TestShapeErrorReachesCaller(t *testing.T) {
+	proxy := &fakeShapingProxy{err: errors.New("rule drop-ack-30: subject grammar: unknown type")}
+	svc := startTestService(t, withCapturer(&fakeCapturer{shaper: proxy}))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
+
+	payload, err := json.Marshal(api.ShapeSetRequest{InstanceID: created.ID, Set: exampleShapingSet()})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := svc.nc.Request("tester.shape.set", payload, 10*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if got := msg.Header.Get("Nats-Service-Error-Code"); got != "017" {
+		t.Errorf("error code = %q, want 017", got)
+	}
+	if got := msg.Header.Get("Nats-Service-Error"); got != proxy.err.Error() {
+		t.Errorf("error = %q, want %q", got, proxy.err.Error())
 	}
 }

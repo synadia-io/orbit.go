@@ -377,6 +377,20 @@ func (s *Service) startServices(name, group string) error {
 		return err
 	}
 
+	shape := srv.AddGroup("shape")
+	err = shape.AddEndpoint("set", micro.HandlerFunc(s.shapeSet))
+	if err != nil {
+		return err
+	}
+	err = shape.AddEndpoint("clear", micro.HandlerFunc(s.shapeClear))
+	if err != nil {
+		return err
+	}
+	err = shape.AddEndpoint("report", micro.HandlerFunc(s.shapeReport))
+	if err != nil {
+		return err
+	}
+
 	err = srv.AddEndpoint("status", micro.HandlerFunc(s.status))
 	if err != nil {
 		return err
