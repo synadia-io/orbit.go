@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/synadia-io/orbit.go/ntf-client/api"
+	"github.com/synadia-io/orbit.go/ntf/api"
 )
 
 func TestCreateServer(t *testing.T) {
@@ -1452,21 +1452,21 @@ func TestWithTLSTimeoutOption(t *testing.T) {
 // TestTLSTimeoutOption pins that TLSTimeout sets the seconds value on the TLS
 // options and ignores non-positive durations.
 func TestTLSTimeoutOption(t *testing.T) {
-	co := resolveCreateOptions(t, []CreateOption{
+	co := resolveCreateOptions([]CreateOption{
 		WithGeneratedTLS(TLSTimeout(500 * time.Millisecond)),
 	})
 	if co.tls == nil || co.tls.Timeout != 0.5 {
 		t.Fatalf("Timeout = %#v, want 0.5", co.tls)
 	}
 
-	co0 := resolveCreateOptions(t, []CreateOption{
+	co0 := resolveCreateOptions([]CreateOption{
 		WithGeneratedTLS(TLSTimeout(0)),
 	})
 	if co0.tls.Timeout != 0 {
 		t.Fatalf("TLSTimeout(0) should be a no-op, got %v", co0.tls.Timeout)
 	}
 
-	coNeg := resolveCreateOptions(t, []CreateOption{
+	coNeg := resolveCreateOptions([]CreateOption{
 		WithGeneratedTLS(TLSTimeout(-1 * time.Millisecond)),
 	})
 	if coNeg.tls.Timeout != 0 {
