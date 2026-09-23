@@ -49,7 +49,7 @@ jobs:
     services:
       # the ntf-server service, reachable from this job as host "nats".
       nats:
-        image: synadia/ntf-server:2.14
+        image: synadia/ntf-server:nightly-main-nats-main
         # --advertise nats makes discovered cluster servers (and the generated
         # TLS cert SANs) resolve as "nats" from inside the job container.
         command: serve --advertise nats
