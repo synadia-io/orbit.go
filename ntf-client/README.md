@@ -136,6 +136,31 @@ client := ntf.New(t, "nats://localhost:4222")
 Every method takes a `testing.TB` rather than a `*testing.T`, so the same helpers work from tests and benchmarks — see
 [Benchmarks](#benchmarks).
 
+Outside a test, use `ntf.Connect`, which returns a `*ntf.Manager`. Its methods take a `context.Context` and return an
+error instead of failing a test; the `testing.TB` methods on `Client` and `Instance` are thin wrappers over them. A
+context without a deadline gets the same default timeout the wrapper uses. Instance operations take the instance ID,
+and server operations the server name:
+
+```go
+m, err := ntf.Connect(ctx, "nats://localhost:4222")
+if err != nil {
+    return err
+}
+defer m.Close()
+
+inst, err := m.CreateServer(ctx, true, ntf.WithDescription("harness"))
+if err != nil {
+    return err
+}
+defer m.Destroy(ctx, inst.ID)
+```
+
+Errors wrap the sentinels in `errors.go`, such as `ntf.ErrService` when the service refuses a request, so check them
+with `errors.Is`.
+
+The request and response types, including `ManagedServer` and the shaping types, come from
+`github.com/synadia-io/orbit.go/ntf/api`, the package the service itself serializes with.
+
 ### Creating a topology
 
 The `WithX` convenience helpers create the instance, connect a NATS client to it, run your callback, and destroy the
@@ -411,6 +436,39 @@ for _, info := range infos {
 }
 ```
 
+`inst.Captures(t, name, want, wait)` does that filtering for one CONNECT name: it returns the instance's captures whose
+`client_name` is `name`, each with its object info and `CapturedAt` time, ordered by `CapturedAt`, which is when the
+connection closed. A capture is stored only after the proxy sees its connection close, so the call waits up to `wait`
+for at least `want` captures to land; a client that reconnected has one capture per connection. Read one with
+`Capture.Read`:
+
+```go
+nc.Close()
+
+captures := inst.Captures(t, "my-client", 1, 5*time.Second)
+data, err := captures[0].Read(ctx)
+```
+
+`Manager.Captures(ctx, instanceID, name, want)` is the same call bounded by `ctx` instead, returning
+`ntf.ErrCaptureWait` when fewer than `want` captures land in time.
+
+The proxy of a trace-capture instance also shapes traffic: `inst.SetShaping(t, set)` applies an `api.ShapingSet` to the
+connections whose CONNECT name matches the set's `ConnectionName` regular expression, `inst.ShapingReport(t, setID)`
+lists every time its rules fired, and `inst.ClearShaping(t, setID)` removes it (an empty `setID` means every set):
+
+```go
+inst.SetShaping(t, api.ShapingSet{
+    ID:             "drop-first-msg",
+    ConnectionName: "^my-client$",
+    Rules: []api.ShapingRule{{
+        ID:     "drop-msg",
+        Match:  api.ShapingMatch{Direction: "from_server", Verb: []string{"MSG"}},
+        Action: api.ShapingAction{Kind: api.ShapingDrop},
+        Limit:  1,
+    }},
+})
+```
+
 Trace capture is plaintext-only and is rejected in combination with `WithGeneratedTLS`. On a cluster or super-cluster
 only the first node carries a `TraceURL`. The management server enables JetStream lazily — the first time any instance
 requests trace capture — so runs that never trace pay no JetStream cost. Captures hold full payloads and headers,
@@ -463,3 +521,6 @@ debugging):
 | `tester.list`                 | Lightweight summary of every instance.                                    |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                            |
 | `tester.reset`                | Tears down **every** instance — CI-style global wipe.                     |
+| `tester.shape.set`            | Applies a shaping set to a trace-capture instance's proxy.                |
+| `tester.shape.clear`          | Removes one shaping set, or every set, from an instance's proxy.          |
+| `tester.shape.report`         | Reports the firings of one shaping set, or of every set.                  |

@@ -4,16 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"fmt"
 	"math/rand"
-	"net/url"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/synadia-io/orbit.go/ntf-client/api"
+	"github.com/synadia-io/orbit.go/ntf/api"
 )
 
 // Client is a handle to the management service of the test cluster manager.
@@ -41,9 +39,13 @@ import (
 //			}
 //		})
 //	}
+//
+// Each testing.TB method calls the matching Manager method and fails the test
+// on error; use a Manager directly to handle errors yourself.
 type Client struct {
 	address string
 	nc      *nats.Conn
+	m       *Manager
 }
 
 // Instance is a client-side handle to a single managed instance (server,
@@ -60,7 +62,7 @@ type Instance struct {
 	// Nil otherwise. Use TLSConfig(inst) to build a *tls.Config from it.
 	TLS *api.TLSMaterial
 
-	c *Client
+	m *Manager
 }
 
 // CreateOption customizes a Create* call.
@@ -238,7 +240,8 @@ func WithConnectOptions(opts ...nats.Option) createOpt {
 // To capture, dial the proxy yourself via ManagedServer.TraceURL (or Ports["trace"]), e.g.
 // nats.Connect(inst.Servers[0].TraceURL). Every connection that reaches the proxy has its
 // trace stored, in the expanded format, as an object in the management server's TRACES
-// object store; read them back with Instance.TraceStore.
+// object store; read them back with Instance.Captures or Instance.TraceStore. The proxy
+// also applies the shaping sets given to Instance.SetShaping.
 //
 // For a cluster or super-cluster a single proxy fronts the first node, so only that server
 // carries a TraceURL.
@@ -357,8 +360,8 @@ func WithTLSTimeout(d time.Duration) UpdateOption {
 	})
 }
 
-func resolveCreateOptions(t testing.TB, opts []CreateOption) createOptions {
-	co := createOptions{description: t.Name()}
+func resolveCreateOptions(opts []CreateOption) createOptions {
+	co := createOptions{}
 	for _, o := range opts {
 		o.applyCreate(&co)
 	}
@@ -399,22 +402,18 @@ func helperConnectOptions(t testing.TB, co createOptions, inst *Instance) []nats
 func New(t testing.TB, server string, opts ...nats.Option) *Client {
 	t.Helper()
 
-	u, err := url.Parse(server)
+	m, err := Connect(context.Background(), server, opts...)
 	if err != nil {
-		t.Fatalf("could not parse server URL: %v", err)
+		t.Fatalf("%v", err)
 	}
 
-	nopts := []nats.Option{
-		nats.Timeout(10 * time.Second),
-		nats.MaxReconnects(-1),
-	}
+	return &Client{nc: m.nc, address: m.address, m: m}
+}
 
-	nc, err := nats.Connect(server, append(nopts, opts...)...)
-	if err != nil {
-		t.Fatalf("failed to connect to NATS: %v", err)
-	}
-
-	return &Client{nc: nc, address: u.Hostname()}
+// withTestDescription puts t.Name() ahead of opts as the instance description,
+// so a WithDescription in opts still wins.
+func withTestDescription(t testing.TB, opts []CreateOption) []CreateOption {
+	return append([]CreateOption{WithDescription(t.Name())}, opts...)
 }
 
 // WithJetStreamServer creates a server running JetStream and connects to it.
@@ -442,7 +441,7 @@ func (c *Client) WithServer(t testing.TB, h func(testing.TB, *nats.Conn, *Instan
 func (c *Client) withServer(t testing.TB, js bool, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
-	co := resolveCreateOptions(t, opts)
+	co := resolveCreateOptions(opts)
 	inst := c.CreateServer(t, js, opts...)
 	defer inst.Destroy(t)
 
@@ -480,7 +479,7 @@ func (c *Client) WithCluster(t testing.TB, servers int, h func(testing.TB, *nats
 func (c *Client) withCluster(t testing.TB, servers int, js bool, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
-	co := resolveCreateOptions(t, opts)
+	co := resolveCreateOptions(opts)
 	inst := c.CreateCluster(t, servers, js, opts...)
 	defer inst.Destroy(t)
 
@@ -545,7 +544,7 @@ func (c *Client) WithSuperCluster(t testing.TB, clusters int, servers int, h fun
 func (c *Client) withSuperCluster(t testing.TB, clusters int, servers int, js bool, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
 	t.Helper()
 
-	co := resolveCreateOptions(t, opts)
+	co := resolveCreateOptions(opts)
 	inst := c.CreateSuperCluster(t, clusters, servers, js, opts...)
 	defer inst.Destroy(t)
 
@@ -570,96 +569,33 @@ func (c *Client) withSuperCluster(t testing.TB, clusters int, servers int, js bo
 func (c *Client) CreateSuperCluster(t testing.TB, clusters int, servers int, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
-	co := resolveCreateOptions(t, opts)
-	jreq, err := json.Marshal(api.CreateSuperClusterRequest{
-		JetStream:   js,
-		Clusters:    clusters,
-		Servers:     servers,
-		Description: co.description,
-		Snippets:    co.snippets,
-		Template:    co.template,
-		TLS:         co.tls,
-		Trace:       co.trace,
-	})
+	inst, err := c.m.CreateSuperCluster(context.Background(), clusters, servers, js, withTestDescription(t, opts)...)
 	if err != nil {
-		t.Fatalf("could not marshal CreateSuperClusterRequest: %v", err)
+		t.Fatalf("could not create super-cluster: %v", err)
 	}
-
-	return c.doCreate(t, "tester.create.super-cluster", jreq)
+	return inst
 }
 
 // CreateCluster creates a cluster
 func (c *Client) CreateCluster(t testing.TB, servers int, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
-	co := resolveCreateOptions(t, opts)
-	jreq, err := json.Marshal(api.CreateClusterRequest{
-		JetStream:   js,
-		Servers:     servers,
-		Description: co.description,
-		Snippets:    co.snippets,
-		Template:    co.template,
-		TLS:         co.tls,
-		Trace:       co.trace,
-	})
+	inst, err := c.m.CreateCluster(context.Background(), servers, js, withTestDescription(t, opts)...)
 	if err != nil {
-		t.Fatalf("could not marshal CreateClusterRequest: %v", err)
+		t.Fatalf("could not create cluster: %v", err)
 	}
-
-	return c.doCreate(t, "tester.create.cluster", jreq)
+	return inst
 }
 
 // CreateServer creates a server
 func (c *Client) CreateServer(t testing.TB, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
-	co := resolveCreateOptions(t, opts)
-	jreq, err := json.Marshal(api.CreateServerRequest{
-		JetStream:   js,
-		Description: co.description,
-		Snippets:    co.snippets,
-		Template:    co.template,
-		TLS:         co.tls,
-		Trace:       co.trace,
-	})
+	inst, err := c.m.CreateServer(context.Background(), js, withTestDescription(t, opts)...)
 	if err != nil {
-		t.Fatalf("could not marshal CreateServerRequest: %v", err)
+		t.Fatalf("could not create server: %v", err)
 	}
-
-	return c.doCreate(t, "tester.create.server", jreq)
-}
-
-func (c *Client) doCreate(t testing.TB, subject string, jreq []byte) *Instance {
-	t.Helper()
-
-	msg, err := c.nc.Request(subject, jreq, 30*time.Second)
-	if err != nil {
-		t.Fatalf("could not send create request to %s: %v", subject, err)
-	}
-	if e := msg.Header.Get("Nats-Service-Error"); e != "" {
-		t.Fatalf("Request to %s failed: %v", subject, e)
-	}
-
-	resp := api.CreateResponse{}
-	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		t.Fatalf("could not unmarshal CreateResponse: %v: %v", string(msg.Data), err)
-	}
-
-	for _, srv := range resp.Servers {
-		srv.URL = fmt.Sprintf("nats://%s:%d", c.address, srv.Port)
-		if tp, ok := srv.Ports["trace"]; ok && tp != 0 {
-			srv.TraceURL = fmt.Sprintf("nats://%s:%d", c.address, tp)
-		}
-	}
-
-	return &Instance{
-		ID:          resp.ID,
-		Description: resp.Description,
-		Kind:        resp.Kind,
-		Servers:     resp.Servers,
-		TLS:         resp.TLS,
-		c:           c,
-	}
+	return inst
 }
 
 // List returns a lightweight summary of every instance currently held by the
@@ -667,19 +603,11 @@ func (c *Client) doCreate(t testing.TB, subject string, jreq []byte) *Instance {
 func (c *Client) List(t testing.TB) *api.ListResponse {
 	t.Helper()
 
-	msg, err := c.nc.Request("tester.list", nil, 10*time.Second)
+	resp, err := c.m.List(context.Background())
 	if err != nil {
-		t.Fatalf("could not send ListRequest: %v", err)
+		t.Fatalf("could not list instances: %v", err)
 	}
-	if e := msg.Header.Get("Nats-Service-Error"); e != "" {
-		t.Fatalf("Request failed: %v", e)
-	}
-
-	resp := api.ListResponse{}
-	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		t.Fatalf("could not unmarshal ListResponse: %v: %v", string(msg.Data), err)
-	}
-	return &resp
+	return resp
 }
 
 // Reset shuts down and removes all servers across every instance. Use sparingly
@@ -688,22 +616,11 @@ func (c *Client) List(t testing.TB) *api.ListResponse {
 func (c *Client) Reset(t testing.TB) api.ResetResponse {
 	t.Helper()
 
-	msg, err := c.nc.Request("tester.reset", nil, 10*time.Second)
+	resp, err := c.m.Reset(context.Background())
 	if err != nil {
-		t.Fatalf("could not send ResetRequest: %v", err)
+		t.Fatalf("could not reset: %v", err)
 	}
-
-	if err := msg.Header.Get("Nats-Service-Error"); err != "" {
-		t.Fatalf("Request failed: %v", err)
-	}
-
-	resp := api.ResetResponse{}
-	err = json.Unmarshal(msg.Data, &resp)
-	if err != nil {
-		t.Fatalf("could not unmarshal ResetResponse: %v: %v", string(msg.Data), err)
-	}
-
-	return resp
+	return *resp
 }
 
 // Status returns status of all instances managed by the tester. Use
@@ -711,29 +628,18 @@ func (c *Client) Reset(t testing.TB) api.ResetResponse {
 func (c *Client) Status(t testing.TB) *api.StatusResponse {
 	t.Helper()
 
-	msg, err := c.nc.Request("tester.status", nil, 10*time.Second)
+	resp, err := c.m.Status(context.Background())
 	if err != nil {
-		t.Fatalf("could not send StatusRequest: %v", err)
+		t.Fatalf("could not get status: %v", err)
 	}
-
-	if err := msg.Header.Get("Nats-Service-Error"); err != "" {
-		t.Fatalf("Request failed: %v", err)
-	}
-
-	resp := api.StatusResponse{}
-	err = json.Unmarshal(msg.Data, &resp)
-	if err != nil {
-		t.Fatalf("could not unmarshal StatusResponse: %v: %v", string(msg.Data), err)
-	}
-
-	return &resp
+	return resp
 }
 
 // Close closes the connection to the management service
 func (c *Client) Close(t testing.TB) {
 	t.Helper()
 
-	c.nc.Close()
+	c.m.Close()
 }
 
 // Destroy tears down this instance — shuts down its servers and removes its
@@ -741,55 +647,31 @@ func (c *Client) Close(t testing.TB) {
 func (i *Instance) Destroy(t testing.TB) *api.DestroyResponse {
 	t.Helper()
 
-	jreq, err := json.Marshal(api.DestroyRequest{InstanceID: i.ID})
+	resp, err := i.m.Destroy(context.Background(), i.ID)
 	if err != nil {
-		t.Fatalf("could not marshal DestroyRequest: %v", err)
+		t.Fatalf("could not destroy instance %s: %v", i.ID, err)
 	}
+	return resp
+}
 
-	msg, err := i.c.nc.Request("tester.destroy", jreq, 30*time.Second)
-	if err != nil {
-		t.Fatalf("could not send DestroyRequest: %v", err)
+// serverName returns the name of server, or "" for a nil server so the Manager
+// reports ErrServerRequired.
+func serverName(server *api.ManagedServer) string {
+	if server == nil {
+		return ""
 	}
-	if e := msg.Header.Get("Nats-Service-Error"); e != "" {
-		t.Fatalf("Request failed: %v", e)
-	}
-
-	resp := api.DestroyResponse{}
-	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		t.Fatalf("could not unmarshal DestroyResponse: %v: %v", string(msg.Data), err)
-	}
-	return &resp
+	return server.Name
 }
 
 // StopServer stops a single server within this instance.
 func (i *Instance) StopServer(t testing.TB, server *api.ManagedServer) *api.StopServerResponse {
 	t.Helper()
 
-	if server == nil || server.Name == "" {
-		t.Fatal("server is required")
-	}
-
-	req, err := json.Marshal(api.StopServerRequest{Name: server.Name})
+	resp, err := i.m.StopServer(context.Background(), serverName(server))
 	if err != nil {
-		t.Fatalf("could not marshal StopServerRequest: %v", err)
+		t.Fatalf("could not stop server: %v", err)
 	}
-
-	msg, err := i.c.nc.Request("tester.stop.server", req, 10*time.Second)
-	if err != nil {
-		t.Fatalf("could not send StopServerRequest: %v", err)
-	}
-
-	if err := msg.Header.Get("Nats-Service-Error"); err != "" {
-		t.Fatalf("Request failed: %v", err)
-	}
-
-	resp := api.StopServerResponse{}
-	err = json.Unmarshal(msg.Data, &resp)
-	if err != nil {
-		t.Fatalf("could not unmarshal StopServerResponse: %v: %v", string(msg.Data), err)
-	}
-
-	return &resp
+	return resp
 }
 
 // StartServer starts a single server within this instance that was previously
@@ -797,31 +679,11 @@ func (i *Instance) StopServer(t testing.TB, server *api.ManagedServer) *api.Stop
 func (i *Instance) StartServer(t testing.TB, server *api.ManagedServer) *api.StartServerResponse {
 	t.Helper()
 
-	if server == nil || server.Name == "" {
-		t.Fatal("server is required")
-	}
-
-	req, err := json.Marshal(api.StartServerRequest{Name: server.Name})
+	resp, err := i.m.StartServer(context.Background(), serverName(server))
 	if err != nil {
-		t.Fatalf("could not marshal StartServerRequest: %v", err)
+		t.Fatalf("could not start server: %v", err)
 	}
-
-	msg, err := i.c.nc.Request("tester.start.server", req, 10*time.Second)
-	if err != nil {
-		t.Fatalf("could not send StartServerRequest: %v", err)
-	}
-
-	if err := msg.Header.Get("Nats-Service-Error"); err != "" {
-		t.Fatalf("Request failed: %v", err)
-	}
-
-	resp := api.StartServerResponse{}
-	err = json.Unmarshal(msg.Data, &resp)
-	if err != nil {
-		t.Fatalf("could not unmarshal StartServerResponse: %v: %v", string(msg.Data), err)
-	}
-
-	return &resp
+	return resp
 }
 
 // UpdateServer re-renders the server's config from the supplied snippets /
@@ -835,37 +697,11 @@ func (i *Instance) StartServer(t testing.TB, server *api.ManagedServer) *api.Sta
 func (i *Instance) UpdateServer(t testing.TB, server *api.ManagedServer, opts ...UpdateOption) *api.UpdateServerResponse {
 	t.Helper()
 
-	if server == nil || server.Name == "" {
-		t.Fatal("server is required")
-	}
-
-	uo := resolveUpdateOptions(opts)
-
-	req, err := json.Marshal(api.UpdateServerRequest{
-		Name:       server.Name,
-		Snippets:   uo.snippets,
-		Template:   uo.template,
-		TLSTimeout: uo.tlsTimeout,
-	})
+	resp, err := i.m.UpdateServer(context.Background(), serverName(server), opts...)
 	if err != nil {
-		t.Fatalf("could not marshal UpdateServerRequest: %v", err)
+		t.Fatalf("could not update server: %v", err)
 	}
-
-	msg, err := i.c.nc.Request("tester.update.server", req, 30*time.Second)
-	if err != nil {
-		t.Fatalf("could not send UpdateServerRequest: %v", err)
-	}
-
-	if e := msg.Header.Get("Nats-Service-Error"); e != "" {
-		t.Fatalf("Request failed: %v", e)
-	}
-
-	resp := api.UpdateServerResponse{}
-	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		t.Fatalf("could not unmarshal UpdateServerResponse: %v: %v", string(msg.Data), err)
-	}
-
-	return &resp
+	return resp
 }
 
 // ReloadServer signals the running server to re-read its on-disk config
@@ -874,78 +710,95 @@ func (i *Instance) UpdateServer(t testing.TB, server *api.ManagedServer, opts ..
 func (i *Instance) ReloadServer(t testing.TB, server *api.ManagedServer) *api.ReloadServerResponse {
 	t.Helper()
 
-	if server == nil || server.Name == "" {
-		t.Fatal("server is required")
-	}
-
-	req, err := json.Marshal(api.ReloadServerRequest{Name: server.Name})
+	resp, err := i.m.ReloadServer(context.Background(), serverName(server))
 	if err != nil {
-		t.Fatalf("could not marshal ReloadServerRequest: %v", err)
+		t.Fatalf("could not reload server: %v", err)
 	}
-
-	msg, err := i.c.nc.Request("tester.reload.server", req, 30*time.Second)
-	if err != nil {
-		t.Fatalf("could not send ReloadServerRequest: %v", err)
-	}
-
-	if e := msg.Header.Get("Nats-Service-Error"); e != "" {
-		t.Fatalf("Request failed: %v", e)
-	}
-
-	resp := api.ReloadServerResponse{}
-	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		t.Fatalf("could not unmarshal ReloadServerResponse: %v: %v", string(msg.Data), err)
-	}
-
-	return &resp
+	return resp
 }
 
 // Status returns the current status of just this instance.
 func (i *Instance) Status(t testing.TB) *api.InstanceStatus {
 	t.Helper()
 
-	jreq, err := json.Marshal(api.StatusRequest{InstanceID: i.ID})
+	resp, err := i.m.InstanceStatus(context.Background(), i.ID)
 	if err != nil {
-		t.Fatalf("could not marshal StatusRequest: %v", err)
+		t.Fatalf("could not get status of instance %s: %v", i.ID, err)
 	}
-
-	msg, err := i.c.nc.Request("tester.status", jreq, 10*time.Second)
-	if err != nil {
-		t.Fatalf("could not send StatusRequest: %v", err)
-	}
-	if e := msg.Header.Get("Nats-Service-Error"); e != "" {
-		t.Fatalf("Request failed: %v", e)
-	}
-
-	resp := api.StatusResponse{}
-	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		t.Fatalf("could not unmarshal StatusResponse: %v: %v", string(msg.Data), err)
-	}
-	if len(resp.Instances) == 0 {
-		t.Fatalf("instance %q not found in status response", i.ID)
-	}
-	return &resp.Instances[0]
+	return resp
 }
 
 // TraceStore returns the management server's TRACES object store, where traces captured
 // via WithTraceCapture are stored. Use the standard jetstream.ObjectStore API to list and
 // fetch objects; each object's metadata carries instance_id, server_name, and client_name
-// so the captures for this instance can be found.
+// so the captures for this instance can be found. Captures does that filtering for one
+// CONNECT name.
 func (i *Instance) TraceStore(t testing.TB) jetstream.ObjectStore {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	js, err := jetstream.New(i.c.nc)
+	store, err := i.m.TraceStore(context.Background())
 	if err != nil {
-		t.Fatalf("could not create jetstream context: %v", err)
-	}
-	store, err := js.ObjectStore(ctx, "TRACES")
-	if err != nil {
-		t.Fatalf("could not open TRACES object store: %v", err)
+		t.Fatalf("%v", err)
 	}
 	return store
+}
+
+// SetShaping applies set to this instance's capture proxy, replacing a set with the
+// same ID and resetting its counters. The instance must have been created with
+// WithTraceCapture.
+func (i *Instance) SetShaping(t testing.TB, set api.ShapingSet) *api.ShapeSetResponse {
+	t.Helper()
+
+	resp, err := i.m.SetShaping(context.Background(), i.ID, set)
+	if err != nil {
+		t.Fatalf("could not set shaping set %s: %v", set.ID, err)
+	}
+	return resp
+}
+
+// ClearShaping removes the shaping set with ID setID from this instance's capture
+// proxy, or every set when setID is empty.
+func (i *Instance) ClearShaping(t testing.TB, setID string) *api.ShapeClearResponse {
+	t.Helper()
+
+	resp, err := i.m.ClearShaping(context.Background(), i.ID, setID)
+	if err != nil {
+		t.Fatalf("could not clear shaping: %v", err)
+	}
+	return resp
+}
+
+// ShapingReport reports every firing of the shaping set with ID setID on this
+// instance's capture proxy, or of every set when setID is empty.
+func (i *Instance) ShapingReport(t testing.TB, setID string) *api.ShapeReportResponse {
+	t.Helper()
+
+	resp, err := i.m.ShapingReport(context.Background(), i.ID, setID)
+	if err != nil {
+		t.Fatalf("could not report shaping: %v", err)
+	}
+	return resp
+}
+
+// Captures returns this instance's captures whose CONNECT name is clientName,
+// ordered by when their connection closed. It waits up to wait for at least want
+// captures to land and fails the test if they do not; a wait of zero or less uses
+// Manager.Captures' default. See Manager.Captures.
+func (i *Instance) Captures(t testing.TB, clientName string, want int, wait time.Duration) []*Capture {
+	t.Helper()
+
+	ctx := context.Background()
+	if wait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wait)
+		defer cancel()
+	}
+
+	captures, err := i.m.Captures(ctx, i.ID, clientName, want)
+	if err != nil {
+		t.Fatalf("could not get captures: %v", err)
+	}
+	return captures
 }
 
 // RandomServer picks a random server from this instance.
