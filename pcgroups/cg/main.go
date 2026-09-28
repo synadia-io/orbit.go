@@ -481,6 +481,26 @@ func messageHandler(processingTime time.Duration) func(msg jetstream.Msg) {
 	}
 }
 
+// connectAction connects to NATS using the nats CLI context passed with --context (or the selected one if none is passed)
+// it is an action (rather than being done in main) such that it runs after the flags have been parsed
+func (cg *cgStruct) connectAction(_ *fisk.ParseContext) error {
+	nc, natsContextSettings, err := natscontext.Connect(cg.natsContext)
+	if err != nil {
+		return fmt.Errorf("can't connect using nats CLI context %q: %w", cg.natsContext, err)
+	}
+
+	if natsContextSettings.JSDomain == "" {
+		cg.js, err = jetstream.New(nc)
+	} else {
+		cg.js, err = jetstream.NewWithDomain(nc, natsContextSettings.JSDomain)
+	}
+	if err != nil {
+		return fmt.Errorf("can't create jetstream context: %w", err)
+	}
+
+	return nil
+}
+
 func (cg *cgStruct) promptAction(_ *fisk.ParseContext) error {
 	cg.prompt = true
 	return nil
@@ -509,8 +529,9 @@ func main() {
 	// So commenting out for the moment
 	//fisk.Command("prompt", "interactive prompt").Action(cg.promptAction).Default()
 
-	staticCommand := app.Command("static", "static consumer groups mode")
-	elasticCommand := app.Command("elastic", "elastic consumer groups mode")
+	// the connection is established by an action on the parent commands, which runs before the sub-command's action
+	staticCommand := app.Command("static", "static consumer groups mode").Action(cg.connectAction)
+	elasticCommand := app.Command("elastic", "elastic consumer groups mode").Action(cg.connectAction)
 
 	staticCommand.Command("prompt", "interactive prompt").Action(cg.promptStaticAction)
 	staticCommand.Flag("sleep", "sleep to simulate processing time").Default("20ms").DurationVar(&cg.processingDuration)
@@ -609,29 +630,12 @@ func main() {
 	addCommonArgs(elasticConsumeCommand)
 	elasticConsumeCommand.Arg("member", "member name").Required().StringVar(&cg.memberName)
 
-	nc, natsContextSettings, err := natscontext.Connect(cg.natsContext)
-	if err != nil {
-		log.Fatalf("can't connect using nats CLI context %s %v", cg.natsContext, err)
-	}
-
-	if natsContextSettings.JSDomain == "" {
-		cg.js, err = jetstream.New(nc)
-		if err != nil {
-			log.Fatalf("can't create jetstream context: %v", err)
-		}
-	} else {
-		cg.js, err = jetstream.NewWithDomain(nc, natsContextSettings.JSDomain)
-		if err != nil {
-			log.Fatalf("can't create jetstream context: %v", err)
-		}
-	}
-
 	// auto start consuming if all required flags are set
 	app.MustParseWithUsage(os.Args[1:])
 
 	if cg.consuming {
 		fmt.Println("consuming...")
-		err = <-cg.cgContext.Done()
+		err := <-cg.cgContext.Done()
 		if err != nil {
 			log.Printf("instanced returned with an error: %v\n", err)
 		} else {
