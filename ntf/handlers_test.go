@@ -14,10 +14,16 @@
 package ntf
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -909,5 +915,186 @@ func TestStopInstanceNotFound(t *testing.T) {
 	}
 	if msg.Header.Get("Nats-Service-Error") == "" {
 		t.Fatal("expected a service error for an unknown instance ID")
+	}
+}
+
+// takePortHook sets beforeServerStart to bind the starting server's client port
+// on the calls take selects, the way another program takes the port between the
+// service releasing its reservation and the server binding it. It returns the
+// number of servers started so far, and undoes everything when the test ends.
+func takePortHook(t *testing.T, take func(call int) bool) *atomic.Int32 {
+	t.Helper()
+
+	var calls atomic.Int32
+	var mu sync.Mutex
+	var held []net.Listener
+
+	beforeServerStart = func(opts *server.Options) {
+		call := int(calls.Add(1))
+		if !take(call) {
+			return
+		}
+
+		ln, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(opts.Port)))
+		if err != nil {
+			t.Errorf("hook could not take port %d: %v", opts.Port, err)
+			return
+		}
+
+		mu.Lock()
+		held = append(held, ln)
+		mu.Unlock()
+	}
+
+	t.Cleanup(func() {
+		beforeServerStart = nil
+
+		mu.Lock()
+		defer mu.Unlock()
+		for _, ln := range held {
+			ln.Close()
+		}
+	})
+
+	return &calls
+}
+
+// trackedPorts reports how many ports the service's allocator holds reserved.
+func trackedPorts(svc *Service) int {
+	svc.ports.mu.Lock()
+	defer svc.ports.mu.Unlock()
+
+	return len(svc.ports.inUse)
+}
+
+// lockedBuffer is a bytes.Buffer safe to write from the service's handlers while
+// a test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
+}
+
+// TestCreateFailsWhenPortStaysTaken takes the client port of every attempt's
+// server before it binds. The failed bind is a fatal error in nats-server, which
+// used to exit the whole process. The create must instead fail with an error
+// response after its retries, leave nothing reserved or registered, and the
+// service must keep answering requests.
+func TestCreateFailsWhenPortStaysTaken(t *testing.T) {
+	logs := &lockedBuffer{}
+	ms := startTestService(t, func(o *Options) {
+		o.Logger = slog.New(slog.NewTextHandler(logs, nil))
+	})
+	calls := takePortHook(t, func(int) bool { return true })
+
+	payload, err := json.Marshal(api.CreateServerRequest{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := ms.nc.Request("tester.create.server", payload, 30*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	code := msg.Header.Get("Nats-Service-Error-Code")
+	if code != "003" {
+		t.Fatalf("error code = %q, want 003", code)
+	}
+	desc := msg.Header.Get("Nats-Service-Error")
+	if !strings.Contains(desc, ErrServerListen.Error()) {
+		t.Errorf("error %q does not report the listen failure", desc)
+	}
+	started := calls.Load()
+	if started != createAttempts {
+		t.Errorf("started %d servers, want one per attempt (%d)", started, createAttempts)
+	}
+	reserved := trackedPorts(ms)
+	if reserved != 0 {
+		t.Errorf("%d ports still reserved after the failed create", reserved)
+	}
+	if !strings.Contains(logs.String(), "level=ERROR msg=\"Managed server reported a fatal error\" server=") {
+		t.Errorf("service log does not report the fatal error:\n%s", logs.String())
+	}
+
+	var list api.ListResponse
+	mustRequest(t, ms.nc, "tester.list", nil, &list)
+	if len(list.Instances) != 0 {
+		t.Errorf("failed create left %d instances registered", len(list.Instances))
+	}
+
+	beforeServerStart = nil
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{}, &created)
+	if len(created.Servers) != 1 || !created.Servers[0].Running {
+		t.Fatalf("create after the failure did not start a server: %+v", created.Servers)
+	}
+}
+
+// TestCreateRetriesAfterPortTaken takes a server's client port once per create
+// and proves each create kind retries with fresh ports and succeeds. For clusters
+// the port is taken from a later node, so the retry also has to shut down the
+// nodes the failed attempt started and release their ports.
+func TestCreateRetriesAfterPortTaken(t *testing.T) {
+	tests := []struct {
+		name    string
+		subject string
+		req     any
+		// take is the start call whose client port is taken.
+		take int
+		// servers is the number of servers the create starts.
+		servers int
+		// ports is the number of ports each server reserves.
+		ports int
+	}{
+		{"server", "tester.create.server", api.CreateServerRequest{}, 1, 1, 1},
+		{"cluster", "tester.create.cluster", api.CreateClusterRequest{Servers: 3}, 2, 3, 2},
+		{"super-cluster", "tester.create.super-cluster", api.CreateSuperClusterRequest{Clusters: 2, Servers: 2}, 3, 4, 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := startTestService(t)
+			calls := takePortHook(t, func(call int) bool { return call == tt.take })
+
+			var created api.CreateResponse
+			mustRequest(t, ms.nc, tt.subject, tt.req, &created)
+
+			if len(created.Servers) != tt.servers {
+				t.Fatalf("created %d servers, want %d", len(created.Servers), tt.servers)
+			}
+			for _, srv := range created.Servers {
+				if !srv.Running {
+					t.Errorf("server %q is not running", srv.Name)
+				}
+			}
+			started := int(calls.Load())
+			if started != tt.take+tt.servers {
+				t.Errorf("started %d servers, want %d across both attempts", started, tt.take+tt.servers)
+			}
+			reserved := trackedPorts(ms)
+			if reserved != tt.servers*tt.ports {
+				t.Errorf("%d ports reserved, want %d: the failed attempt's ports were not released", reserved, tt.servers*tt.ports)
+			}
+
+			var list api.ListResponse
+			mustRequest(t, ms.nc, "tester.list", nil, &list)
+			if len(list.Instances) != 1 {
+				t.Errorf("%d instances registered, want 1", len(list.Instances))
+			}
+		})
 	}
 }
