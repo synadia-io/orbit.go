@@ -48,6 +48,11 @@ const (
 	// readyTimeout is how long New waits for the embedded server to accept
 	// connections when the context carries no earlier deadline.
 	readyTimeout = 10 * time.Second
+
+	// defaultPortLow and defaultPortHigh bound the managed server port range when
+	// Options.PortRange is not set.
+	defaultPortLow  = 20000
+	defaultPortHigh = 40000
 )
 
 // Options configures a Service. The zero value is usable: it starts an embedded
@@ -76,6 +81,16 @@ type Options struct {
 	// AdvertiseHost is the host managed servers advertise to clients as
 	// client_advertise. Empty advertises nothing.
 	AdvertiseHost string
+
+	// PortRange bounds the ports the service hands to managed servers: client,
+	// route, gateway and snippet listener ports. The zero value uses 20000 to
+	// 40000, trimmed to end below the OS ephemeral port range when that range
+	// starts inside it; New fails on any other overlap with the default. A range
+	// set here must not overlap the ephemeral range or New fails:
+	// outgoing connections of any process on the host draw ports from it, and one
+	// can take a port between the service reserving it and a server binding it.
+	// The overlap is checked on macOS and Linux only.
+	PortRange PortRange
 
 	// Logger receives a line per request and per managed server transition.
 	// Nil discards.
@@ -107,6 +122,12 @@ type EmbeddedOptions struct {
 	Log bool
 }
 
+// PortRange is an inclusive range of TCP ports.
+type PortRange struct {
+	Low  int
+	High int
+}
+
 // Service hosts the management API on a NATS connection: it creates, inspects and
 // tears down managed nats-server instances on request.
 type Service struct {
@@ -126,6 +147,9 @@ type Service struct {
 	preserve      bool
 	advertiseHost string
 
+	// ports hands out every port a managed server listens on.
+	ports *portAllocator
+
 	mu        sync.Mutex
 	instances map[string]*instance
 }
@@ -138,6 +162,11 @@ type instance struct {
 	RootDir     string
 	Servers     []*managedServer
 	Created     time.Time
+
+	// ports lists every port reserved for the instance's servers. They stay
+	// reserved while a server is stopped, so it restarts on the same ports, and
+	// return to the range when the instance is torn down. Guarded by Service.mu.
+	ports []int
 }
 
 type managedServer struct {
@@ -202,6 +231,12 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		advertiseHost: opts.AdvertiseHost,
 		instances:     map[string]*instance{},
 	}
+
+	portRange, err := resolvePortRange(opts.PortRange, ephemeralPortRange, log)
+	if err != nil {
+		return nil, err
+	}
+	s.ports = newPortAllocator(portRange)
 
 	// Anything started below is registered here so a later failure can undo it
 	// in reverse order.
@@ -555,6 +590,12 @@ func (s *Service) tearDownInstance(inst *instance) {
 			s.log.Info("Stopped server", "server", ms.srv.Name())
 		}
 	}
+
+	s.mu.Lock()
+	ports := inst.ports
+	inst.ports = nil
+	s.mu.Unlock()
+	s.ports.release(ports...)
 
 	if inst.RootDir == "" {
 		return

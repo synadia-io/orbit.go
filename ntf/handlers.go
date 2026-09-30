@@ -310,9 +310,9 @@ func populateTemplateData(inst *instance, plan serverPlan) *templateData {
 }
 
 // reserveListenerPorts reserves one TCP port per caller-declared listener
-// name. The returned listeners stay open; the caller must add them to its
-// heldListeners slice so the close-on-handover race fix still applies.
-func (s *Service) reserveListenerPorts(names []string) (map[string]int, []*net.TCPListener, error) {
+// name for inst. The returned listeners stay open; the caller must add them to
+// its heldListeners slice so the close-on-handover race fix still applies.
+func (s *Service) reserveListenerPorts(inst *instance, names []string) (map[string]int, []*net.TCPListener, error) {
 	if len(names) == 0 {
 		return nil, nil, nil
 	}
@@ -327,7 +327,7 @@ func (s *Service) reserveListenerPorts(names []string) (map[string]int, []*net.T
 			closeListeners(held)
 			return nil, nil, fmt.Errorf("duplicate listener name %q", name)
 		}
-		p, ln, err := s.reservePort()
+		p, ln, err := s.reservePort(inst)
 		if err != nil {
 			closeListeners(held)
 			return nil, nil, fmt.Errorf("listener %q: %w", name, err)
@@ -560,9 +560,45 @@ func writeServerTLSSnippet(snippetsDir string, files *tlsInstanceFiles) (string,
 	return filepath.Join(filepath.Base(snippetsDir), "_tls_managed.conf"), nil
 }
 
+// createAttempts is how many times a create runs when one of its servers could not
+// bind a port. The service reserves every port and hands it over just before the
+// server binds it; another program can take the port in that gap, and a retry with
+// freshly reserved ports gets past it.
+const createAttempts = 3
+
+// createAttempt runs one attempt at a create request. It answers req itself,
+// unless a server could not listen and final is false: it then rolls back
+// everything the attempt started and returns true to have the create run again.
+type createAttempt func(req micro.Request, final bool) (retry bool)
+
+// retryCreate runs create until it answers req, at most createAttempts times.
+func retryCreate(req micro.Request, create createAttempt) {
+	for attempt := range createAttempts {
+		if !create(req, attempt == createAttempts-1) {
+			return
+		}
+	}
+}
+
+// retryAfter reports whether a create attempt that failed to start a server with
+// err should run again: only a server that could not listen, and not on the final
+// attempt. The caller must have rolled the attempt back.
+func (s *Service) retryAfter(err error, final bool, instanceID string) bool {
+	if final || !errors.Is(err, ErrServerListen) {
+		return false
+	}
+
+	s.log.Warn("Retrying create with fresh ports after a server could not listen", "instance", instanceID, "err", err)
+
+	return true
+}
+
 func (s *Service) createServer(req micro.Request) {
 	s.log.Info("Handling create server request")
+	retryCreate(req, s.createServerAttempt)
+}
 
+func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool) {
 	creq := api.CreateServerRequest{}
 	err := json.Unmarshal(req.Data(), &creq)
 	if err != nil {
@@ -647,7 +683,7 @@ func (s *Service) createServer(req micro.Request) {
 		return
 	}
 
-	clientPort, clientLn, err := s.reservePort()
+	clientPort, clientLn, err := s.reservePort(inst)
 	if err != nil {
 		rollback()
 		req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
@@ -655,7 +691,7 @@ func (s *Service) createServer(req micro.Request) {
 	}
 	heldListeners = append(heldListeners, clientLn)
 
-	listenerPorts, listenerLns, err := s.reserveListenerPorts(listenersForSnippets(creq.Snippets))
+	listenerPorts, listenerLns, err := s.reserveListenerPorts(inst, listenersForSnippets(creq.Snippets))
 	if err != nil {
 		rollback()
 		req.Error("006", err.Error(), nil)
@@ -702,6 +738,9 @@ func (s *Service) createServer(req micro.Request) {
 	heldListeners = nil // listeners are closed inside runServerWithConfig
 	if err != nil {
 		rollback()
+		if s.retryAfter(err, final, inst.ID) {
+			return true
+		}
 		req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
 		return
 	}
@@ -747,6 +786,8 @@ func (s *Service) createServer(req micro.Request) {
 		},
 		TLS: tlsResp,
 	})
+
+	return false
 }
 
 // traceSetupTimeout limits a Capturer's setup for one server, which may include
@@ -802,6 +843,10 @@ func (s *Service) createCluster(req micro.Request) {
 	start := time.Now()
 	defer func() { s.log.Info("Handled create cluster request", "duration", time.Since(start)) }()
 
+	retryCreate(req, s.createClusterAttempt)
+}
+
+func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry bool) {
 	creq := api.CreateClusterRequest{}
 	err := json.Unmarshal(req.Data(), &creq)
 	if err != nil {
@@ -893,7 +938,7 @@ func (s *Service) createCluster(req micro.Request) {
 	clusterPorts := make([]int, creq.Servers)
 	clusterUrls := make([]string, creq.Servers)
 	for i := 0; i < creq.Servers; i++ {
-		p, ln, err := s.reservePort()
+		p, ln, err := s.reservePort(inst)
 		if err != nil {
 			rollback()
 			req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
@@ -930,7 +975,7 @@ func (s *Service) createCluster(req micro.Request) {
 			return
 		}
 
-		clientPort, clientLn, err := s.reservePort()
+		clientPort, clientLn, err := s.reservePort(inst)
 		if err != nil {
 			closeListeners(nodeLns)
 			rollback()
@@ -939,7 +984,7 @@ func (s *Service) createCluster(req micro.Request) {
 		}
 		nodeLns = append(nodeLns, clientLn)
 
-		listenerPorts, listenerLns, err := s.reserveListenerPorts(listenersForSnippets(creq.Snippets))
+		listenerPorts, listenerLns, err := s.reserveListenerPorts(inst, listenersForSnippets(creq.Snippets))
 		if err != nil {
 			closeListeners(nodeLns)
 			rollback()
@@ -995,6 +1040,9 @@ func (s *Service) createCluster(req micro.Request) {
 		srv, cfgPath, err := runServerWithConfig(s.log, serverConfig, sd, nodeLns)
 		if err != nil {
 			rollback()
+			if s.retryAfter(err, final, inst.ID) {
+				return true
+			}
 			req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
 			return
 		}
@@ -1041,11 +1089,16 @@ func (s *Service) createCluster(req micro.Request) {
 	}
 
 	req.RespondJSON(resp)
+
+	return false
 }
 
 func (s *Service) createSuperCluster(req micro.Request) {
 	s.log.Info("Handling create super cluster request")
+	retryCreate(req, s.createSuperClusterAttempt)
+}
 
+func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retry bool) {
 	creq := api.CreateSuperClusterRequest{}
 	err := json.Unmarshal(req.Data(), &creq)
 	if err != nil {
@@ -1172,7 +1225,7 @@ func (s *Service) createSuperCluster(req micro.Request) {
 		gatewayLns[ci] = make([]*net.TCPListener, creq.Servers)
 
 		for i := 0; i < creq.Servers; i++ {
-			p, ln, err := s.reservePort()
+			p, ln, err := s.reservePort(inst)
 			if err != nil {
 				rollback()
 				req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
@@ -1194,7 +1247,7 @@ func (s *Service) createSuperCluster(req micro.Request) {
 		clusterUrls := make([]string, creq.Servers)
 		routeLns[c-1] = make([]*net.TCPListener, creq.Servers)
 		for i := 0; i < creq.Servers; i++ {
-			p, ln, err := s.reservePort()
+			p, ln, err := s.reservePort(inst)
 			if err != nil {
 				rollback()
 				req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
@@ -1224,7 +1277,7 @@ func (s *Service) createSuperCluster(req micro.Request) {
 				return
 			}
 
-			clientPort, clientLn, err := s.reservePort()
+			clientPort, clientLn, err := s.reservePort(inst)
 			if err != nil {
 				closeListeners(nodeLns)
 				rollback()
@@ -1233,7 +1286,7 @@ func (s *Service) createSuperCluster(req micro.Request) {
 			}
 			nodeLns = append(nodeLns, clientLn)
 
-			listenerPorts, listenerLns, err := s.reserveListenerPorts(listenersForSnippets(creq.Snippets))
+			listenerPorts, listenerLns, err := s.reserveListenerPorts(inst, listenersForSnippets(creq.Snippets))
 			if err != nil {
 				closeListeners(nodeLns)
 				rollback()
@@ -1294,6 +1347,9 @@ func (s *Service) createSuperCluster(req micro.Request) {
 			srv, cfgPath, err := runServerWithConfig(s.log, serverConfig, sd, nodeLns)
 			if err != nil {
 				rollback()
+				if s.retryAfter(err, final, inst.ID) {
+					return true
+				}
 				req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
 				return
 			}
@@ -1341,6 +1397,8 @@ func (s *Service) createSuperCluster(req micro.Request) {
 	}
 
 	req.RespondJSON(resp)
+
+	return false
 }
 
 func (s *Service) reset(req micro.Request) {
@@ -2084,22 +2142,31 @@ func (s *Service) findServerByName(name string) *managedServer {
 	return nil
 }
 
-// reservePort allocates a free TCP port on the wildcard address (0.0.0.0) and
-// returns the port plus the still-open listener holding it. Reserving on the
-// same wildcard address the embedded nats-server binds on avoids handing back a
-// port that is already live on 0.0.0.0. The caller must close the listener
-// immediately before binding the port for real (typically by passing it through
-// runServerWithConfig).
-func (s *Service) reservePort() (int, *net.TCPListener, error) {
-	a, err := net.ResolveTCPAddr("tcp", "0.0.0.0:0")
+// reservePort takes a free TCP port for one of inst's servers from the service's
+// port range and returns the port plus the still-open listener holding it on the
+// wildcard address (0.0.0.0). The port stays reserved until inst is torn down.
+// The caller must close the listener immediately before binding the port for
+// real (typically by passing it through runServerWithConfig).
+func (s *Service) reservePort(inst *instance) (int, *net.TCPListener, error) {
+	port, ln, err := s.ports.reserve()
 	if err != nil {
 		return 0, nil, err
 	}
-	l, err := net.ListenTCP("tcp", a)
-	if err != nil {
-		return 0, nil, err
+
+	s.mu.Lock()
+	_, alive := s.instances[inst.ID]
+	if alive {
+		inst.ports = append(inst.ports, port)
 	}
-	return l.Addr().(*net.TCPAddr).Port, l, nil
+	s.mu.Unlock()
+
+	// A concurrent destroy or reset has already torn inst down and will not
+	// release this port, so do not keep it out of the range.
+	if !alive {
+		s.ports.release(port)
+	}
+
+	return port, ln, nil
 }
 
 func clientPortOf(srv *server.Server) (int, error) {
@@ -2114,10 +2181,17 @@ func clientPortOf(srv *server.Server) (int, error) {
 	return port, nil
 }
 
+// beforeServerStart, when set, runs in runServerWithConfig after the server's
+// port reservations are closed and before it starts. Tests use it to take a port
+// in that gap. Nil outside tests.
+var beforeServerStart func(opts *server.Options)
+
 // runServerWithConfig writes the rendered NATS config to a file under rootDir,
 // closes the held port-reservation listeners, and starts the server. The
 // listeners must remain open through config write and server construction so
-// that concurrent create calls cannot grab the same ports.
+// that concurrent create calls cannot grab the same ports. A server that fails
+// to start is shut down; the error wraps ErrServerListen when it could not bind
+// one of its ports.
 func runServerWithConfig(log *slog.Logger, config []byte, rootDir string, listeners []*net.TCPListener) (*server.Server, string, error) {
 	tf, err := os.CreateTemp(rootDir, "*.cfg")
 	if err != nil {
@@ -2146,18 +2220,25 @@ func runServerWithConfig(log *slog.Logger, config []byte, rootDir string, listen
 		return nil, "", err
 	}
 
-	srv.ConfigureLogger()
+	guard := guardServerLogger(srv, opts, log)
 
 	// Hand over the reserved ports to the server: close the listeners
 	// immediately before Start() to minimize the window where a concurrent
 	// create call could win the same port.
 	closeListeners(listeners)
 
+	if beforeServerStart != nil {
+		beforeServerStart(opts)
+	}
+
 	log.Info("Starting server", "server", srv.Name(), "dir", rootDir)
 	srv.Start()
 
-	if !srv.ReadyForConnections(10 * time.Second) {
-		return nil, "", errors.New("server failed to start")
+	err = waitForStart(srv, guard)
+	if err != nil {
+		srv.Shutdown()
+		srv.WaitForShutdown()
+		return nil, "", fmt.Errorf("server %s failed to start: %w", srv.Name(), err)
 	}
 
 	log.Info("Started server", "server", srv.Name(), "url", srv.ClientURL())
@@ -2167,7 +2248,9 @@ func runServerWithConfig(log *slog.Logger, config []byte, rootDir string, listen
 
 // startFromConfig rebuilds and starts a server from a previously-written config
 // file. Used by tester.start.server to bring a stopped server back online; the
-// underlying *server.Server cannot be restarted in place after Shutdown.
+// underlying *server.Server cannot be restarted in place after Shutdown. A
+// server that fails to start is shut down and not retried: its ports are fixed
+// in the config its peers know.
 func startFromConfig(log *slog.Logger, configPath string) (*server.Server, error) {
 	opts, err := server.ProcessConfigFile(configPath)
 	if err != nil {
@@ -2180,13 +2263,16 @@ func startFromConfig(log *slog.Logger, configPath string) (*server.Server, error
 		return nil, err
 	}
 
-	srv.ConfigureLogger()
+	guard := guardServerLogger(srv, opts, log)
 
 	log.Info("Restarting server", "server", srv.Name())
 	srv.Start()
 
-	if !srv.ReadyForConnections(10 * time.Second) {
-		return nil, errors.New("server failed to restart")
+	err = waitForStart(srv, guard)
+	if err != nil {
+		srv.Shutdown()
+		srv.WaitForShutdown()
+		return nil, fmt.Errorf("server %s failed to restart: %w", srv.Name(), err)
 	}
 
 	log.Info("Restarted server", "server", srv.Name(), "url", srv.ClientURL())
