@@ -1,6 +1,6 @@
 module github.com/synadia-io/orbit.go/counters
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/nats-io/nats.go v1.52.0
@@ -13,5 +13,5 @@ require (
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/synadia-io/orbit.go/natsext v0.1.3 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
