@@ -34,12 +34,8 @@ import (
 	"github.com/synadia-io/orbit.go/ntf/api"
 )
 
-func TestPopulateTemplateData(t *testing.T) {
-	inst := &instance{
-		ID:          "abcdef0123456789abcdef0123456789",
-		Description: "test",
-		Kind:        "server",
-	}
+func TestPlanInstanceTemplateDataAdvertiseHost(t *testing.T) {
+	id := "abcdef0123456789abcdef0123456789"
 
 	tests := []struct {
 		name          string
@@ -51,15 +47,19 @@ func TestPopulateTemplateData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plan := serverPlan{
-				name:          "test-n1",
-				serverDir:     "/tmp/test",
-				serverIndex:   1,
-				clientPort:    4222,
-				advertiseHost: tt.advertiseHost,
+			spec := instanceSpec{
+				Kind:          "server",
+				Servers:       1,
+				Description:   "test",
+				MainTemplate:  serverConfigTemplate,
+				AdvertiseHost: tt.advertiseHost,
 			}
 
-			td := populateTemplateData(inst, plan)
+			plan, err := planInstance(spec, id, newFakePlacement(id))
+			if err != nil {
+				t.Fatalf("planInstance: %v", err)
+			}
+			td := plan.Nodes[0].TemplateData
 
 			if td.AdvertiseHost != tt.advertiseHost {
 				t.Fatalf("AdvertiseHost: got %q, want %q", td.AdvertiseHost, tt.advertiseHost)

@@ -17,13 +17,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
-	"log/slog"
-	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
-
-	"github.com/synadia-io/orbit.go/ntf/api"
 )
 
 func TestEffectiveSANs(t *testing.T) {
@@ -64,23 +61,29 @@ func TestEffectiveSANs(t *testing.T) {
 	})
 }
 
-// TestSetupInstanceTLSAddsAdvertiseHostToSANs proves the resolved advertise
+// TestPlanInstanceTLSAddsAdvertiseHostToSANs proves the resolved advertise
 // host lands in the minted server cert SANs (so cross-server TLS discovery to
 // the advertised address verifies) while the built-in defaults are retained.
-func TestSetupInstanceTLSAddsAdvertiseHostToSANs(t *testing.T) {
-	s := &Service{log: slog.New(slog.DiscardHandler)}
-	inst := &instance{ID: "tls-advertise-test", RootDir: t.TempDir()}
-
-	files, _, err := s.setupInstanceTLS(inst, &api.TLSOptions{Mode: api.TLSModeServer}, "ci-host.example")
-	if err != nil {
-		t.Fatalf("setupInstanceTLS: %v", err)
+func TestPlanInstanceTLSAddsAdvertiseHostToSANs(t *testing.T) {
+	id := "tls-advertise-test"
+	spec := instanceSpec{
+		Kind:          "server",
+		Servers:       1,
+		MainTemplate:  serverConfigTemplate,
+		AdvertiseHost: "ci-host.example",
+		TLS:           true,
 	}
 
-	pemBytes, err := os.ReadFile(files.serverCert)
+	plan, err := planInstance(spec, id, newFakePlacement(id))
 	if err != nil {
-		t.Fatalf("read server cert: %v", err)
+		t.Fatalf("planInstance: %v", err)
 	}
-	cert := parseFirstCert(t, pemBytes)
+
+	i := slices.IndexFunc(plan.Files, func(f file) bool { return f.Path == filepath.Join("tls", "server.crt") })
+	if i < 0 {
+		t.Fatalf("plan has no tls/server.crt: %v", plan.Files)
+	}
+	cert := parseFirstCert(t, plan.Files[i].Data)
 
 	if !slices.Contains(cert.DNSNames, "ci-host.example") {
 		t.Fatalf("advertise host missing from cert DNS SANs: %v", cert.DNSNames)

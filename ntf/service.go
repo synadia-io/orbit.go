@@ -167,6 +167,11 @@ type instance struct {
 	// reserved while a server is stopped, so it restarts on the same ports, and
 	// return to the range when the instance is torn down. Guarded by Service.mu.
 	ports []int
+
+	// plan is the plan the instance was created from, set once the create has
+	// answered. It holds no file contents and no TLS material. Guarded by
+	// Service.mu.
+	plan *instancePlan
 }
 
 type managedServer struct {

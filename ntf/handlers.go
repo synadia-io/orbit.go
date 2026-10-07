@@ -233,111 +233,6 @@ func renderConfig(td *templateData, mainTemplate string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// serverPlan bundles the per-server inputs each create handler computes
-// (allocated ports, server directory, optional cluster/gateway wiring) so the
-// three handlers can hand off to populateTemplateData uniformly.
-type serverPlan struct {
-	name          string
-	serverDir     string
-	serverIndex   int
-	clusterIndex  int
-	clientPort    int
-	advertiseHost string
-	jetStream     bool
-
-	clusterName string
-	clusterPort int
-	routes      []string
-	clusterSize int
-
-	clusters    []string
-	gatewayPort int
-	gateways    map[string][]string
-
-	listenerPorts map[string]int
-
-	tlsInclude string
-	tlsFiles   *tlsInstanceFiles
-}
-
-// populateTemplateData builds the template env for one server. Cluster and
-// gateway fields stay at their zero values for non-cluster / non-super-cluster
-// instances.
-func populateTemplateData(inst *instance, plan serverPlan) *templateData {
-	td := defaultTemplateData()
-
-	td.ServerName = plan.name
-	td.ShortID = shortID(inst.ID)
-	td.InstanceID = inst.ID
-	td.ServerIndex = plan.serverIndex
-	td.ServerDir = plan.serverDir
-	td.StoreDir = plan.serverDir
-	td.LogFile = filepath.Join(plan.serverDir, "server.log")
-	td.Host = "localhost"
-	td.AdvertiseHost = plan.advertiseHost
-	td.ClientPort = plan.clientPort
-	td.JetStream = plan.jetStream
-
-	td.Description = inst.Description
-	td.Kind = inst.Kind
-
-	if plan.clusterName != "" {
-		td.ClusterName = plan.clusterName
-		td.ClusterIndex = plan.clusterIndex
-		td.ClusterPort = plan.clusterPort
-		td.Routes = plan.routes
-		td.ClusterSize = plan.clusterSize
-	}
-
-	if plan.gatewayPort != 0 {
-		td.GatewayPort = plan.gatewayPort
-		td.Gateways = plan.gateways
-		td.Clusters = plan.clusters
-	}
-
-	maps.Copy(td.Ports, plan.listenerPorts)
-
-	td.TLSInclude = plan.tlsInclude
-	if plan.tlsFiles != nil {
-		td.TLS = &templateTLS{
-			CAFile:   plan.tlsFiles.caPath,
-			CertFile: plan.tlsFiles.serverCert,
-			KeyFile:  plan.tlsFiles.serverKey,
-		}
-	}
-
-	return td
-}
-
-// reserveListenerPorts reserves one TCP port per caller-declared listener
-// name for inst. The returned listeners stay open; the caller must add them to
-// its heldListeners slice so the close-on-handover race fix still applies.
-func (s *Service) reserveListenerPorts(inst *instance, names []string) (map[string]int, []*net.TCPListener, error) {
-	if len(names) == 0 {
-		return nil, nil, nil
-	}
-	ports := map[string]int{}
-	held := make([]*net.TCPListener, 0, len(names))
-	for _, name := range names {
-		if name == "" {
-			closeListeners(held)
-			return nil, nil, fmt.Errorf("listener name must not be empty")
-		}
-		if _, dup := ports[name]; dup {
-			closeListeners(held)
-			return nil, nil, fmt.Errorf("duplicate listener name %q", name)
-		}
-		p, ln, err := s.reservePort(inst)
-		if err != nil {
-			closeListeners(held)
-			return nil, nil, fmt.Errorf("listener %q: %w", name, err)
-		}
-		ports[name] = p
-		held = append(held, ln)
-	}
-	return ports, held, nil
-}
-
 // renderAndWriteSnippets renders each user-supplied snippet body through
 // text/template against td, writes the result to <snippetsDir>/<name>.conf
 // (mode 0600), and sets td.Snippets[name] to the path used inside the main
@@ -468,58 +363,6 @@ func effectiveSANs(requested []string, advertiseHost string) []string {
 	return sans
 }
 
-// setupInstanceTLS generates cert material, writes the shared CA + server
-// cert + server key under <inst.RootDir>/tls/, and returns the on-disk paths
-// (used by per-server managed snippets) plus the api.TLSMaterial that goes
-// into the create response. advertiseHost is the host the servers advertise to
-// clients (the resolved --advertise value); it is added to the server cert SANs
-// so cross-server TLS discovery to the advertised address verifies. Because it
-// derives from the service-wide --advertise flag, every instance minted while
-// that flag is set carries the host in its SANs.
-func (s *Service) setupInstanceTLS(inst *instance, opts *api.TLSOptions, advertiseHost string) (*tlsInstanceFiles, *api.TLSMaterial, error) {
-	mutual := opts.Mode != api.TLSModeServer
-
-	sans := effectiveSANs(opts.SANs, advertiseHost)
-	s.log.Info("Issuing TLS server cert", "instance", inst.ID, "sans", sans)
-
-	mat, err := generateTLSMaterial(sans, mutual)
-	if err != nil {
-		return nil, nil, fmt.Errorf("tls material: %w", err)
-	}
-
-	tlsDir := filepath.Join(inst.RootDir, "tls")
-	if err := os.MkdirAll(tlsDir, 0700); err != nil {
-		return nil, nil, fmt.Errorf("tls dir: %w", err)
-	}
-
-	files := &tlsInstanceFiles{
-		caPath:         filepath.Join(tlsDir, "ca.pem"),
-		serverCert:     filepath.Join(tlsDir, "server.crt"),
-		serverKey:      filepath.Join(tlsDir, "server.key"),
-		mutual:         mutual,
-		handshakeFirst: opts.HandshakeFirst,
-		timeoutSeconds: opts.Timeout,
-	}
-
-	if err := os.WriteFile(files.caPath, mat.CAPEM, 0644); err != nil {
-		return nil, nil, fmt.Errorf("write ca: %w", err)
-	}
-	if err := os.WriteFile(files.serverCert, mat.ServerCertPEM, 0644); err != nil {
-		return nil, nil, fmt.Errorf("write server cert: %w", err)
-	}
-	if err := os.WriteFile(files.serverKey, mat.ServerKeyPEM, 0600); err != nil {
-		return nil, nil, fmt.Errorf("write server key: %w", err)
-	}
-
-	apiMat := &api.TLSMaterial{CAPEM: string(mat.CAPEM)}
-	if mutual {
-		apiMat.ClientCertPEM = string(mat.ClientCertPEM)
-		apiMat.ClientKeyPEM = string(mat.ClientKeyPEM)
-	}
-
-	return files, apiMat, nil
-}
-
 // writeServerTLSSnippet renders the per-server managed TLS snippet — a tls{}
 // block with absolute cert paths — into the server's snippets dir. Returns the
 // path relative to <serverDir>, matching the convention used by
@@ -643,151 +486,249 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 	}
 
 	inst := s.newInstance("server", creq.Description)
-	short := shortID(inst.ID)
 
-	// Listeners reserved for the lifetime of this create call. Closed right
-	// before server.Start() so that concurrent create calls cannot race onto
-	// the same ports.
-	var heldListeners []*net.TCPListener
+	spec := instanceSpec{
+		Kind:          "server",
+		Servers:       1,
+		JetStream:     creq.JetStream,
+		Description:   creq.Description,
+		Snippets:      creq.Snippets,
+		MainTemplate:  mainTemplate,
+		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
+		Proxy:         proxied,
+		StoreCaptures: creq.Trace,
+	}
+	setSpecTLS(&spec, creq.TLS)
+
+	return s.createFromSpec(req, final, inst, spec)
+}
+
+// setSpecTLS copies a create request's TLS options into spec. A nil opts leaves
+// generated TLS off. An empty mode means mutual TLS.
+func setSpecTLS(spec *instanceSpec, opts *api.TLSOptions) {
+	if opts == nil {
+		return
+	}
+
+	spec.TLS = true
+	spec.TLSMutual = opts.Mode != api.TLSModeServer
+	spec.TLSSANs = opts.SANs
+	spec.TLSHandshakeFirst = opts.HandshakeFirst
+	spec.TLSTimeout = opts.Timeout
+}
+
+// createFromSpec runs the part of a create attempt every kind of instance
+// shares, once the request is validated and inst is registered. It plans inst
+// from spec, writes the plan's files, starts the nodes in plan order and answers
+// req with the create response.
+//
+// It answers req itself, unless a node could not listen and final is false: it
+// then rolls back everything the attempt started and returns true to have the
+// create run again, which plans the instance again from the spec with fresh
+// ports.
+func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, spec instanceSpec) (retry bool) {
+	if spec.TLS {
+		s.log.Info("Issuing TLS server cert", "instance", inst.ID, "sans", effectiveSANs(spec.TLSSANs, spec.AdvertiseHost))
+	}
+
+	place := s.newInProcessPlacement(inst)
+
+	// The planner closes every listener it reserved when it fails.
+	plan, err := planInstance(spec, inst.ID, place)
+	if err != nil {
+		s.dropInstance(inst.ID)
+		req.Error(planErrorCode(err), err.Error(), nil)
+		return false
+	}
+
+	// Each node's held listeners are closed inside runServerWithConfig and
+	// cleared from the plan as it starts, so the plan holds only the listeners
+	// of nodes that have not started. rollback closes those and drops the
+	// instance, which stops the nodes already added to it.
 	rollback := func() {
-		closeListeners(heldListeners)
+		for _, n := range plan.Nodes {
+			closeListeners(n.Held)
+			n.Held = nil
+		}
 		s.dropInstance(inst.ID)
 	}
 
-	if err := os.MkdirAll(inst.RootDir, 0700); err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Failed to create instance dir: %v", err), nil)
-		return
+	if !s.writePlan(req, plan, place, rollback) {
+		return false
 	}
 
-	advertiseHost := effectiveAdvertiseHost(s.advertiseHost, creq.TLS)
-
-	var tlsFiles *tlsInstanceFiles
-	var tlsResp *api.TLSMaterial
-	if creq.TLS != nil {
-		var err error
-		tlsFiles, tlsResp, err = s.setupInstanceTLS(inst, creq.TLS, advertiseHost)
-		if err != nil {
-			rollback()
-			req.Error("008", fmt.Sprintf("TLS setup failed: %v", err), nil)
-			return
-		}
-	}
-
-	name := short + "-n1"
-	sd := filepath.Join(inst.RootDir, "n1")
-	snippetsDir := filepath.Join(sd, "snippets")
-	if err := os.MkdirAll(snippetsDir, 0700); err != nil {
-		rollback()
-		req.Error("002", "Failed to create server directory", nil)
-		return
-	}
-
-	clientPort, clientLn, err := s.reservePort(inst)
-	if err != nil {
-		rollback()
-		req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-		return
-	}
-	heldListeners = append(heldListeners, clientLn)
-
-	listenerPorts, listenerLns, err := s.reserveListenerPorts(inst, listenersForSnippets(creq.Snippets))
-	if err != nil {
-		rollback()
-		req.Error("006", err.Error(), nil)
-		return
-	}
-	heldListeners = append(heldListeners, listenerLns...)
-
-	var tlsInclude string
-	if tlsFiles != nil {
-		tlsInclude, err = writeServerTLSSnippet(snippetsDir, tlsFiles)
-		if err != nil {
-			rollback()
-			req.Error("008", fmt.Sprintf("TLS snippet failed: %v", err), nil)
-			return
-		}
-	}
-
-	td := populateTemplateData(inst, serverPlan{
-		name:          name,
-		serverDir:     sd,
-		serverIndex:   1,
-		clientPort:    clientPort,
-		advertiseHost: advertiseHost,
-		jetStream:     creq.JetStream,
-		listenerPorts: listenerPorts,
-		tlsInclude:    tlsInclude,
-		tlsFiles:      tlsFiles,
-	})
-
-	if err := renderAndWriteSnippets(td, creq.Snippets, snippetsDir); err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Snippet failure: %v", err), nil)
-		return
-	}
-
-	serverConfig, err := renderConfig(td, mainTemplate)
-	if err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Template parse failure: %v", err), nil)
-		return
-	}
-
-	srv, cfgPath, err := runServerWithConfig(s.log, serverConfig, sd, heldListeners)
-	heldListeners = nil // listeners are closed inside runServerWithConfig
-	if err != nil {
-		rollback()
-		if s.retryAfter(err, final, inst.ID) {
-			return true
-		}
-		req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
-		return
-	}
-
-	port, err := clientPortOf(srv)
-	if err != nil {
-		s.log.Warn("Could not parse client port", "server", name, "err", err)
-	}
-
-	ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
-
-	// Front the client port with a capture proxy when requested, before the server is
-	// published so its trace port and proxy are set atomically.
-	if proxied {
-		proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost, creq.Trace)
-		if terr != nil {
-			// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
-			// shut it down here to avoid leaking the started server on trace failure.
-			srv.Shutdown()
-			srv.WaitForShutdown()
-			rollback()
-			req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
-			return
-		}
-		ms.traceProxy = proxy
-		if listenerPorts == nil {
-			listenerPorts = map[string]int{}
-		}
-		listenerPorts["trace"] = tracePort
-		ms.ports = listenerPorts
-	}
-
-	s.mu.Lock()
-	inst.Servers = append(inst.Servers, ms)
-	s.mu.Unlock()
-
-	req.RespondJSON(api.CreateResponse{
+	resp := api.CreateResponse{
 		ID:          inst.ID,
 		Description: inst.Description,
 		Kind:        inst.Kind,
-		Servers: []*api.ManagedServer{
-			{Name: name, Port: port, Ports: listenerPorts, Advertise: advertiseHost, Running: srv.Running()},
-		},
-		TLS: tlsResp,
-	})
+		Servers:     []*api.ManagedServer{},
+		TLS:         plan.TLS,
+	}
+
+	for _, n := range plan.Nodes {
+		dir := place.nodeDir(n.Name)
+
+		srv, cfgPath, err := runServerWithConfig(s.log, n.Config, dir, n.Held)
+		n.Held = nil
+		if err != nil {
+			rollback()
+			if s.retryAfter(err, final, inst.ID) {
+				return true
+			}
+			req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
+			return false
+		}
+
+		port, err := clientPortOf(srv)
+		if err != nil {
+			s.log.Warn("Could not parse client port", "server", n.Name, "err", err)
+		}
+
+		// The wire view of the node's listener ports. It is a map of its own, so
+		// the trace port added below never reaches the template data update
+		// validates against.
+		var ports map[string]int
+		if len(n.TemplateData.Ports) > 0 {
+			ports = maps.Clone(n.TemplateData.Ports)
+		}
+
+		ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: dir, configPath: cfgPath, ports: ports, clientPort: port, advertiseHost: spec.AdvertiseHost, td: n.TemplateData, tlsFiles: n.TLS}
+
+		// Front the node's client port with the capture proxy when the plan asks for
+		// it, before the node is published so its trace port and proxy are set
+		// atomically.
+		if n.Name == plan.ProxyNode {
+			proxy, tracePort, terr := s.startTraceProxy(inst, n.Name, port, spec.AdvertiseHost, spec.StoreCaptures)
+			if terr != nil {
+				// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
+				// shut it down here to avoid leaking the started server on trace failure.
+				srv.Shutdown()
+				srv.WaitForShutdown()
+				rollback()
+				req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
+				return false
+			}
+			ms.traceProxy = proxy
+			if ports == nil {
+				ports = map[string]int{}
+			}
+			ports["trace"] = tracePort
+			ms.ports = ports
+		}
+
+		s.mu.Lock()
+		inst.Servers = append(inst.Servers, ms)
+		s.mu.Unlock()
+
+		resp.Servers = append(resp.Servers, &api.ManagedServer{
+			Name:      n.Name,
+			Port:      port,
+			Ports:     ports,
+			Cluster:   n.Cluster,
+			Advertise: spec.AdvertiseHost,
+			Running:   srv.Running(),
+		})
+	}
+
+	req.RespondJSON(resp)
+
+	plan.dropContents()
+
+	s.mu.Lock()
+	inst.plan = plan
+	s.mu.Unlock()
 
 	return false
+}
+
+// planErrorCode returns the response code a create answers a planning failure
+// with.
+func planErrorCode(err error) string {
+	var perr *planError
+	if !errors.As(err, &perr) {
+		return "002"
+	}
+
+	switch perr.Kind {
+	case planErrTLSSetup, planErrTLSSnippet:
+		return "008"
+	case planErrPort:
+		return "006"
+	default:
+		return "002"
+	}
+}
+
+// tlsFileLabels names each of an instance's TLS files, by its path in the plan,
+// in the message of a failed write.
+var tlsFileLabels = map[string]string{
+	filepath.Join("tls", "ca.pem"):     "ca",
+	filepath.Join("tls", "server.crt"): "server cert",
+	filepath.Join("tls", "server.key"): "server key",
+}
+
+// writePlan creates the instance directory, its tls directory when the plan
+// has TLS material, and each node's directory and snippets directory, all with
+// mode 0700, then writes every instance and node file with its mode.
+//
+// It reports whether every write succeeded. On a failure it calls rollback and
+// answers req itself: 008 for a TLS file or the managed TLS snippet, 002 for
+// anything else.
+func (s *Service) writePlan(req micro.Request, plan *instancePlan, place placement, rollback func()) bool {
+	instDir := place.instanceDir()
+
+	err := os.MkdirAll(instDir, 0700)
+	if err != nil {
+		rollback()
+		req.Error("002", fmt.Sprintf("Failed to create instance dir: %v", err), nil)
+		return false
+	}
+
+	if plan.TLS != nil {
+		err := os.MkdirAll(filepath.Join(instDir, "tls"), 0700)
+		if err != nil {
+			rollback()
+			req.Error("008", fmt.Sprintf("TLS setup failed: tls dir: %v", err), nil)
+			return false
+		}
+	}
+
+	for _, n := range plan.Nodes {
+		err := os.MkdirAll(filepath.Join(place.nodeDir(n.Name), "snippets"), 0700)
+		if err != nil {
+			rollback()
+			req.Error("002", "Failed to create server directory", nil)
+			return false
+		}
+	}
+
+	for _, f := range plan.Files {
+		err := os.WriteFile(filepath.Join(instDir, f.Path), f.Data, f.Mode)
+		if err != nil {
+			rollback()
+			req.Error("008", fmt.Sprintf("TLS setup failed: write %s: %v", tlsFileLabels[f.Path], err), nil)
+			return false
+		}
+	}
+
+	for _, n := range plan.Nodes {
+		for _, f := range n.Files {
+			err := os.WriteFile(filepath.Join(instDir, f.Path), f.Data, f.Mode)
+			if err != nil {
+				rollback()
+				name := filepath.Base(f.Path)
+				if name == "_tls_managed.conf" {
+					perr := &planError{Kind: planErrTLSSnippet, Err: err}
+					req.Error(planErrorCode(perr), perr.Error(), nil)
+					return false
+				}
+				req.Error("002", fmt.Sprintf("Snippet failure: snippet %q write: %v", strings.TrimSuffix(name, ".conf"), err), nil)
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // traceSetupTimeout limits a Capturer's setup for one server, which may include
@@ -898,199 +839,22 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 	}
 
 	inst := s.newInstance("cluster", creq.Description)
-	short := shortID(inst.ID)
-	clusterName := "C_" + short
-	inst.Cluster = clusterName
+	inst.Cluster = "C_" + shortID(inst.ID)
 
-	// One route listener per node, reserved up front because every node's config
-	// lists the full set of route URLs. Each entry stays held until ITS node
-	// starts: it is moved into that node's hand-off set (and cleared here) right
-	// before that node's runServerWithConfig closes it. Closing them all on the
-	// first node's start — the previous behavior — freed the later nodes' route
-	// ports into the hand-over gap, where another spawn could grab the port and
-	// crash the binding node.
-	routeLns := make([]*net.TCPListener, creq.Servers)
-	rollback := func() {
-		closeListeners(routeLns) // route listeners for nodes that have not started
-		s.dropInstance(inst.ID)
+	spec := instanceSpec{
+		Kind:          "cluster",
+		Servers:       creq.Servers,
+		JetStream:     creq.JetStream,
+		Description:   creq.Description,
+		Snippets:      creq.Snippets,
+		MainTemplate:  mainTemplate,
+		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
+		Proxy:         proxied,
+		StoreCaptures: creq.Trace,
 	}
+	setSpecTLS(&spec, creq.TLS)
 
-	if err := os.MkdirAll(inst.RootDir, 0700); err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Failed to create instance dir: %v", err), nil)
-		return
-	}
-
-	advertiseHost := effectiveAdvertiseHost(s.advertiseHost, creq.TLS)
-
-	var tlsFiles *tlsInstanceFiles
-	var tlsResp *api.TLSMaterial
-	if creq.TLS != nil {
-		var err error
-		tlsFiles, tlsResp, err = s.setupInstanceTLS(inst, creq.TLS, advertiseHost)
-		if err != nil {
-			rollback()
-			req.Error("008", fmt.Sprintf("TLS setup failed: %v", err), nil)
-			return
-		}
-	}
-
-	clusterPorts := make([]int, creq.Servers)
-	clusterUrls := make([]string, creq.Servers)
-	for i := 0; i < creq.Servers; i++ {
-		p, ln, err := s.reservePort(inst)
-		if err != nil {
-			rollback()
-			req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-			return
-		}
-		clusterPorts[i] = p
-		clusterUrls[i] = fmt.Sprintf("localhost:%d", p)
-		routeLns[i] = ln
-	}
-
-	resp := api.CreateResponse{
-		ID:          inst.ID,
-		Description: inst.Description,
-		Kind:        inst.Kind,
-		Servers:     []*api.ManagedServer{},
-		TLS:         tlsResp,
-	}
-
-	for i := 1; i <= creq.Servers; i++ {
-		// Hand-off set for this node: its own route listener plus the client
-		// (and snippet) listeners reserved below. runServerWithConfig closes
-		// exactly these right before Start(); the other nodes' route listeners
-		// stay held until their own iteration.
-		nodeLns := []*net.TCPListener{routeLns[i-1]}
-		routeLns[i-1] = nil // ownership moved into nodeLns
-
-		name := fmt.Sprintf("%s-n%d", short, i)
-		sd := filepath.Join(inst.RootDir, fmt.Sprintf("n%d", i))
-		snippetsDir := filepath.Join(sd, "snippets")
-		if err := os.MkdirAll(snippetsDir, 0700); err != nil {
-			closeListeners(nodeLns)
-			rollback()
-			req.Error("002", "Failed to create server directory", nil)
-			return
-		}
-
-		clientPort, clientLn, err := s.reservePort(inst)
-		if err != nil {
-			closeListeners(nodeLns)
-			rollback()
-			req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-			return
-		}
-		nodeLns = append(nodeLns, clientLn)
-
-		listenerPorts, listenerLns, err := s.reserveListenerPorts(inst, listenersForSnippets(creq.Snippets))
-		if err != nil {
-			closeListeners(nodeLns)
-			rollback()
-			req.Error("006", err.Error(), nil)
-			return
-		}
-		nodeLns = append(nodeLns, listenerLns...)
-
-		var tlsInclude string
-		if tlsFiles != nil {
-			tlsInclude, err = writeServerTLSSnippet(snippetsDir, tlsFiles)
-			if err != nil {
-				rollback()
-				req.Error("008", fmt.Sprintf("TLS snippet failed: %v", err), nil)
-				return
-			}
-		}
-
-		td := populateTemplateData(inst, serverPlan{
-			name:          name,
-			serverDir:     sd,
-			serverIndex:   i,
-			clientPort:    clientPort,
-			advertiseHost: advertiseHost,
-			jetStream:     creq.JetStream,
-			clusterName:   clusterName,
-			clusterPort:   clusterPorts[i-1],
-			routes:        clusterUrls,
-			clusterSize:   creq.Servers,
-			listenerPorts: listenerPorts,
-			tlsInclude:    tlsInclude,
-			tlsFiles:      tlsFiles,
-		})
-
-		if err := renderAndWriteSnippets(td, creq.Snippets, snippetsDir); err != nil {
-			closeListeners(nodeLns)
-			rollback()
-			req.Error("002", fmt.Sprintf("Snippet failure: %v", err), nil)
-			return
-		}
-
-		serverConfig, err := renderConfig(td, mainTemplate)
-		if err != nil {
-			closeListeners(nodeLns)
-			rollback()
-			req.Error("002", fmt.Sprintf("Template parse failure: %v", err), nil)
-			return
-		}
-
-		// nodeLns (incl. this node's route listener) are closed inside
-		// runServerWithConfig on every path; routeLns then holds only the route
-		// listeners of nodes that have not started yet.
-		srv, cfgPath, err := runServerWithConfig(s.log, serverConfig, sd, nodeLns)
-		if err != nil {
-			rollback()
-			if s.retryAfter(err, final, inst.ID) {
-				return true
-			}
-			req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
-			return
-		}
-
-		port, err := clientPortOf(srv)
-		if err != nil {
-			s.log.Warn("Could not parse client port", "server", name, "err", err)
-		}
-
-		ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
-
-		// A single capture proxy fronts the first node of the cluster.
-		if proxied && i == 1 {
-			proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost, creq.Trace)
-			if terr != nil {
-				// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
-				// shut it down here to avoid leaking the started server on trace failure.
-				srv.Shutdown()
-				srv.WaitForShutdown()
-				rollback()
-				req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
-				return
-			}
-			ms.traceProxy = proxy
-			if listenerPorts == nil {
-				listenerPorts = map[string]int{}
-			}
-			listenerPorts["trace"] = tracePort
-			ms.ports = listenerPorts
-		}
-
-		s.mu.Lock()
-		inst.Servers = append(inst.Servers, ms)
-		s.mu.Unlock()
-
-		resp.Servers = append(resp.Servers, &api.ManagedServer{
-			Name:      name,
-			Port:      port,
-			Ports:     listenerPorts,
-			Cluster:   clusterName,
-			Advertise: advertiseHost,
-			Running:   srv.Running(),
-		})
-	}
-
-	req.RespondJSON(resp)
-
-	return false
+	return s.createFromSpec(req, final, inst, spec)
 }
 
 func (s *Service) createSuperCluster(req micro.Request) {
@@ -1160,245 +924,22 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 	}
 
 	inst := s.newInstance("super-cluster", creq.Description)
-	short := shortID(inst.ID)
 
-	// One gateway listener per node in every cluster, and one route listener per
-	// node within each cluster. Both are reserved before the nodes that bind them
-	// exist, because every node's config lists the full set of route and gateway
-	// URLs. Each entry stays held until ITS node starts: the node moves it into
-	// its own hand-off set (clearing the slot here) right before that node's
-	// runServerWithConfig closes it. Closing them all on the first node's start
-	// would free every later node's route and gateway port into the hand-over
-	// gap, where another spawn could grab the port and crash the binding node.
-	gatewayLns := make([][]*net.TCPListener, creq.Clusters)
-	routeLns := make([][]*net.TCPListener, creq.Clusters)
-	rollback := func() {
-		for _, lns := range gatewayLns {
-			closeListeners(lns) // gateway listeners for nodes that have not started
-		}
-		for _, lns := range routeLns {
-			closeListeners(lns) // route listeners for nodes that have not started
-		}
-		s.dropInstance(inst.ID)
+	spec := instanceSpec{
+		Kind:          "super-cluster",
+		Servers:       creq.Servers,
+		Clusters:      creq.Clusters,
+		JetStream:     creq.JetStream,
+		Description:   creq.Description,
+		Snippets:      creq.Snippets,
+		MainTemplate:  mainTemplate,
+		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
+		Proxy:         proxied,
+		StoreCaptures: creq.Trace,
 	}
+	setSpecTLS(&spec, creq.TLS)
 
-	if err := os.MkdirAll(inst.RootDir, 0700); err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Failed to create instance dir: %v", err), nil)
-		return
-	}
-
-	advertiseHost := effectiveAdvertiseHost(s.advertiseHost, creq.TLS)
-
-	var tlsFiles *tlsInstanceFiles
-	var tlsResp *api.TLSMaterial
-	if creq.TLS != nil {
-		var err error
-		tlsFiles, tlsResp, err = s.setupInstanceTLS(inst, creq.TLS, advertiseHost)
-		if err != nil {
-			rollback()
-			req.Error("008", fmt.Sprintf("TLS setup failed: %v", err), nil)
-			return
-		}
-	}
-
-	resp := api.CreateResponse{
-		ID:          inst.ID,
-		Description: inst.Description,
-		Kind:        inst.Kind,
-		Servers:     []*api.ManagedServer{},
-		TLS:         tlsResp,
-	}
-
-	clusterNames := make([]string, creq.Clusters)
-	for c := 1; c <= creq.Clusters; c++ {
-		clusterNames[c-1] = fmt.Sprintf("SC_%s_%d", short, c)
-	}
-
-	// Allocate gateway ports for every cluster up front so each cluster's
-	// configuration can reference all the others' gateway URLs.
-	superClusterPorts := map[string][]int{}
-	superClusterUrls := map[string][]string{}
-	for ci, name := range clusterNames {
-		ports := make([]int, creq.Servers)
-		urls := make([]string, creq.Servers)
-		gatewayLns[ci] = make([]*net.TCPListener, creq.Servers)
-
-		for i := 0; i < creq.Servers; i++ {
-			p, ln, err := s.reservePort(inst)
-			if err != nil {
-				rollback()
-				req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-				return
-			}
-			ports[i] = p
-			urls[i] = fmt.Sprintf("localhost:%d", p)
-			gatewayLns[ci][i] = ln
-		}
-
-		superClusterPorts[name] = ports
-		superClusterUrls[name] = urls
-	}
-
-	for c := 1; c <= creq.Clusters; c++ {
-		clusterName := clusterNames[c-1]
-
-		clusterPorts := make([]int, creq.Servers)
-		clusterUrls := make([]string, creq.Servers)
-		routeLns[c-1] = make([]*net.TCPListener, creq.Servers)
-		for i := 0; i < creq.Servers; i++ {
-			p, ln, err := s.reservePort(inst)
-			if err != nil {
-				rollback()
-				req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-				return
-			}
-			clusterPorts[i] = p
-			clusterUrls[i] = fmt.Sprintf("localhost:%d", p)
-			routeLns[c-1][i] = ln
-		}
-
-		for i := 1; i <= creq.Servers; i++ {
-			// Hand-off set for this node: its own route and gateway listeners plus
-			// the client (and snippet) listeners reserved below. runServerWithConfig
-			// closes exactly these right before Start(); the other nodes' listeners
-			// stay held until their own iteration.
-			nodeLns := []*net.TCPListener{routeLns[c-1][i-1], gatewayLns[c-1][i-1]}
-			routeLns[c-1][i-1] = nil   // ownership moved into nodeLns
-			gatewayLns[c-1][i-1] = nil // ownership moved into nodeLns
-
-			name := fmt.Sprintf("%s-c%d_s%d", short, c, i)
-			sd := filepath.Join(inst.RootDir, fmt.Sprintf("c%d_s%d", c, i))
-			snippetsDir := filepath.Join(sd, "snippets")
-			if err := os.MkdirAll(snippetsDir, 0700); err != nil {
-				closeListeners(nodeLns)
-				rollback()
-				req.Error("002", "Failed to create server directory", nil)
-				return
-			}
-
-			clientPort, clientLn, err := s.reservePort(inst)
-			if err != nil {
-				closeListeners(nodeLns)
-				rollback()
-				req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-				return
-			}
-			nodeLns = append(nodeLns, clientLn)
-
-			listenerPorts, listenerLns, err := s.reserveListenerPorts(inst, listenersForSnippets(creq.Snippets))
-			if err != nil {
-				closeListeners(nodeLns)
-				rollback()
-				req.Error("006", err.Error(), nil)
-				return
-			}
-			nodeLns = append(nodeLns, listenerLns...)
-
-			var tlsInclude string
-			if tlsFiles != nil {
-				tlsInclude, err = writeServerTLSSnippet(snippetsDir, tlsFiles)
-				if err != nil {
-					closeListeners(nodeLns)
-					rollback()
-					req.Error("008", fmt.Sprintf("TLS snippet failed: %v", err), nil)
-					return
-				}
-			}
-
-			td := populateTemplateData(inst, serverPlan{
-				name:          name,
-				serverDir:     sd,
-				serverIndex:   i,
-				clusterIndex:  c,
-				clientPort:    clientPort,
-				advertiseHost: advertiseHost,
-				jetStream:     creq.JetStream,
-				clusterName:   clusterName,
-				clusterPort:   clusterPorts[i-1],
-				routes:        clusterUrls,
-				clusterSize:   creq.Servers,
-				clusters:      clusterNames,
-				gatewayPort:   superClusterPorts[clusterName][i-1],
-				gateways:      superClusterUrls,
-				listenerPorts: listenerPorts,
-				tlsInclude:    tlsInclude,
-				tlsFiles:      tlsFiles,
-			})
-
-			if err := renderAndWriteSnippets(td, creq.Snippets, snippetsDir); err != nil {
-				closeListeners(nodeLns)
-				rollback()
-				req.Error("002", fmt.Sprintf("Snippet failure: %v", err), nil)
-				return
-			}
-
-			serverConfig, err := renderConfig(td, mainTemplate)
-			if err != nil {
-				closeListeners(nodeLns)
-				rollback()
-				req.Error("002", fmt.Sprintf("Template parse failure: %v", err), nil)
-				return
-			}
-
-			// nodeLns (incl. this node's route and gateway listeners) are closed
-			// inside runServerWithConfig on every path; routeLns and gatewayLns then
-			// hold only the listeners of nodes that have not started yet.
-			srv, cfgPath, err := runServerWithConfig(s.log, serverConfig, sd, nodeLns)
-			if err != nil {
-				rollback()
-				if s.retryAfter(err, final, inst.ID) {
-					return true
-				}
-				req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
-				return
-			}
-
-			port, err := clientPortOf(srv)
-			if err != nil {
-				s.log.Warn("Could not parse client port", "server", name, "err", err)
-			}
-
-			ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
-
-			// A single capture proxy fronts the first node of the first cluster.
-			if proxied && c == 1 && i == 1 {
-				proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost, creq.Trace)
-				if terr != nil {
-					// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
-					// shut it down here to avoid leaking the started server on trace failure.
-					srv.Shutdown()
-					srv.WaitForShutdown()
-					rollback()
-					req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
-					return
-				}
-				ms.traceProxy = proxy
-				if listenerPorts == nil {
-					listenerPorts = map[string]int{}
-				}
-				listenerPorts["trace"] = tracePort
-				ms.ports = listenerPorts
-			}
-
-			s.mu.Lock()
-			inst.Servers = append(inst.Servers, ms)
-			s.mu.Unlock()
-
-			resp.Servers = append(resp.Servers, &api.ManagedServer{
-				Name:      name,
-				Port:      port,
-				Ports:     listenerPorts,
-				Cluster:   clusterName,
-				Advertise: advertiseHost,
-				Running:   srv.Running(),
-			})
-		}
-	}
-
-	req.RespondJSON(resp)
-
-	return false
+	return s.createFromSpec(req, final, inst, spec)
 }
 
 func (s *Service) reset(req micro.Request) {
