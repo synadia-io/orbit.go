@@ -233,35 +233,6 @@ func renderConfig(td *templateData, mainTemplate string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// renderAndWriteSnippets renders each user-supplied snippet body through
-// text/template against td, writes the result to <snippetsDir>/<name>.conf
-// (mode 0600), and sets td.Snippets[name] to the path used inside the main
-// template's include directive — relative to the rendered config file's
-// directory, since the NATS conf parser always joins includes onto the
-// config-file dir (filepath.Join in conf/parse.go strips the leading slash
-// from absolute paths). The config file lands in <serverDir> and snippets
-// live at <serverDir>/snippets/<name>.conf, so the include path is
-// snippets/<name>.conf.
-func renderAndWriteSnippets(td *templateData, snippets map[string]string, snippetsDir string) error {
-	snippetsBase := filepath.Base(snippetsDir)
-	for name, body := range snippets {
-		out := bytes.NewBuffer(nil)
-		t, err := template.New("snippet-" + name).Parse(body)
-		if err != nil {
-			return fmt.Errorf("snippet %q parse: %w", name, err)
-		}
-		if err := t.Execute(out, td); err != nil {
-			return fmt.Errorf("snippet %q render: %w", name, err)
-		}
-		path := filepath.Join(snippetsDir, name+".conf")
-		if err := os.WriteFile(path, out.Bytes(), 0600); err != nil {
-			return fmt.Errorf("snippet %q write: %w", name, err)
-		}
-		td.Snippets[name] = filepath.Join(snippetsBase, name+".conf")
-	}
-	return nil
-}
-
 // closeListeners safely closes any still-open listeners and clears the slice.
 // Used both right before binding the server (handing the port over) and on
 // rollback paths.
@@ -361,46 +332,6 @@ func effectiveSANs(requested []string, advertiseHost string) []string {
 		sans = append(sans, advertiseHost)
 	}
 	return sans
-}
-
-// writeServerTLSSnippet renders the per-server managed TLS snippet — a tls{}
-// block with absolute cert paths — into the server's snippets dir. Returns the
-// path relative to <serverDir>, matching the convention used by
-// renderAndWriteSnippets for the user-supplied slots. Absolute cert paths
-// sidestep any ambiguity about how the NATS conf parser resolves relative paths
-// inside an included file. client_advertise is owned by the main template
-// (driven by --advertise), so the managed snippet does not emit it.
-func writeServerTLSSnippet(snippetsDir string, files *tlsInstanceFiles) (string, error) {
-	verify := "false"
-	if files.mutual {
-		verify = "true"
-	}
-	handshakeFirst := ""
-	if files.handshakeFirst {
-		handshakeFirst = "\n    handshake_first: true"
-	}
-	// timeoutSeconds <= 0 means "unset": fall back to the managed default of 2
-	// seconds (also nats-server's own default). NaN/Inf can't reach here — the
-	// JSON decoder rejects them before the request is handled.
-	secs := files.timeoutSeconds
-	if secs <= 0 {
-		secs = 2
-	}
-	timeout := strconv.FormatFloat(secs, 'f', -1, 64)
-	body := fmt.Sprintf(`tls {
-    cert_file: "%s"
-    key_file:  "%s"
-    ca_file:   "%s"
-    verify:    %s
-    timeout:   %s%s
-}
-`, files.serverCert, files.serverKey, files.caPath, verify, timeout, handshakeFirst)
-
-	path := filepath.Join(snippetsDir, "_tls_managed.conf")
-	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
-		return "", err
-	}
-	return filepath.Join(filepath.Base(snippetsDir), "_tls_managed.conf"), nil
 }
 
 // createAttempts is how many times a create runs when one of its servers could not
@@ -541,14 +472,22 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		return false
 	}
 
+	// The nodes in start order. Once the plan is kept on the instance, an update
+	// may replace entries of plan.Nodes under s.mu, so this function works from
+	// its own copy of the slice.
+	nodes := slices.Clone(plan.Nodes)
+
 	// Each node's held listeners are closed inside runServerWithConfig and
-	// cleared from the plan as it starts, so the plan holds only the listeners
-	// of nodes that have not started. rollback closes those and drops the
-	// instance, which stops the nodes already added to it.
+	// cleared from its plan as it starts, before it is published, so only the
+	// nodes that have not started still hold listeners. rollback closes those
+	// and drops the instance, which stops the nodes already added to it. It
+	// leaves published node plans alone, since an update may be reading them.
 	rollback := func() {
-		for _, n := range plan.Nodes {
-			closeListeners(n.Held)
-			n.Held = nil
+		for _, n := range nodes {
+			if n.Held != nil {
+				closeListeners(n.Held)
+				n.Held = nil
+			}
 		}
 		s.dropInstance(inst.ID)
 	}
@@ -565,7 +504,16 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		TLS:         plan.TLS,
 	}
 
-	for _, n := range plan.Nodes {
+	// The instance's own files are written and resp holds the TLS material, so
+	// both can go before the plan is kept. The plan is kept before any node is
+	// published, so an update of a published node always finds it.
+	plan.dropContents()
+
+	s.mu.Lock()
+	inst.plan = plan
+	s.mu.Unlock()
+
+	for _, n := range nodes {
 		dir := place.nodeDir(n.Name)
 
 		srv, cfgPath, err := runServerWithConfig(s.log, n.Config, dir, n.Held)
@@ -592,7 +540,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 			ports = maps.Clone(n.TemplateData.Ports)
 		}
 
-		ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: dir, configPath: cfgPath, ports: ports, clientPort: port, advertiseHost: spec.AdvertiseHost, td: n.TemplateData, tlsFiles: n.TLS}
+		ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: dir, configPath: cfgPath, ports: ports, clientPort: port, advertiseHost: spec.AdvertiseHost, node: n}
 
 		// Front the node's client port with the capture proxy when the plan asks for
 		// it, before the node is published so its trace port and proxy are set
@@ -616,6 +564,10 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 			ms.ports = ports
 		}
 
+		// The node's files are written and its config is running, so its plan is
+		// complete. It never changes once published; an update replaces it.
+		n.dropContents()
+
 		s.mu.Lock()
 		inst.Servers = append(inst.Servers, ms)
 		s.mu.Unlock()
@@ -631,12 +583,6 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	}
 
 	req.RespondJSON(resp)
-
-	plan.dropContents()
-
-	s.mu.Lock()
-	inst.plan = plan
-	s.mu.Unlock()
 
 	return false
 }
@@ -1233,47 +1179,68 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
-	if err := validateTLSSnippetRefs(creq.Snippets, ms.td.TLS != nil); err != nil {
+	node := ms.node
+
+	if err := validateTLSSnippetRefs(creq.Snippets, node.TemplateData.TLS != nil); err != nil {
 		req.Error("007", err.Error(), nil)
 		return
 	}
 
-	if err := validateJetStreamSnippet(creq.Snippets, ms.td.JetStream); err != nil {
+	if err := validateJetStreamSnippet(creq.Snippets, node.TemplateData.JetStream); err != nil {
 		req.Error("011", err.Error(), nil)
 		return
 	}
 
-	// td.Ports is the listener set the running config was rendered with. ms.ports
-	// is the wire view, which also carries the capture proxy's port for a traced
-	// server; validating against that would reject every update of a traced
-	// server, since no snippet can ever produce a "trace" listener.
-	if err := validateListenerPortSet(creq.Snippets, ms.td.Ports); err != nil {
+	// The template data's Ports is the listener set the running config was
+	// rendered with. ms.ports is the wire view, which also carries the capture
+	// proxy's port for a traced server; validating against that would reject
+	// every update of a traced server, since no snippet can ever produce a
+	// "trace" listener.
+	if err := validateListenerPortSet(creq.Snippets, node.TemplateData.Ports); err != nil {
 		req.Error("008", err.Error(), nil)
 		return
 	}
 
-	if creq.TLSTimeout != nil && ms.tlsFiles == nil {
+	if creq.TLSTimeout != nil && node.TLS == nil {
 		req.Error("007", "server was not created with WithGeneratedTLS; cannot set tls_timeout", nil)
 		return
 	}
 
-	tdNew := cloneTemplateData(ms.td)
-	snippetsDir := filepath.Join(ms.rootDir, "snippets")
+	// The node's files are rendered with paths relative to the instance
+	// directory, as the planner renders them.
+	instDir := filepath.Dir(ms.rootDir)
+	snippetsDir := filepath.Join(filepath.Base(ms.rootDir), "snippets")
 
-	if err := renderAndWriteSnippets(tdNew, creq.Snippets, snippetsDir); err != nil {
+	tdNew := cloneTemplateData(node.TemplateData)
+
+	snippets, err := renderSnippets(tdNew, creq.Snippets, snippetsDir)
+	if err != nil {
 		req.Error("009", fmt.Sprintf("snippet render failed: %v", err), nil)
 		return
 	}
 
-	var newTLS *tlsInstanceFiles
+	for _, f := range snippets {
+		err = os.WriteFile(filepath.Join(instDir, f.Path), f.Data, f.Mode)
+		if err != nil {
+			name := strings.TrimSuffix(filepath.Base(f.Path), ".conf")
+			req.Error("009", fmt.Sprintf("snippet render failed: snippet %q write: %v", name, err), nil)
+			return
+		}
+	}
+
+	// The TLS settings are shared by every node of the instance, so a new
+	// timeout goes into a copy.
+	tlsNew := node.TLS
 	if creq.TLSTimeout != nil {
-		cow := *ms.tlsFiles
+		cow := *node.TLS
 		cow.timeoutSeconds = *creq.TLSTimeout
-		if _, err := writeServerTLSSnippet(snippetsDir, &cow); err != nil {
+		tlsNew = &cow
+
+		err = os.WriteFile(filepath.Join(instDir, snippetsDir, "_tls_managed.conf"), renderTLSSnippet(tlsNew), 0600)
+		if err != nil {
 			req.Error("009", fmt.Sprintf("TLS snippet rewrite failed: %v", err), nil)
 			return
 		}
-		newTLS = &cow
 	}
 
 	mainTmpl := serverConfigTemplate
@@ -1286,16 +1253,29 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
-	if err := os.WriteFile(ms.configPath, rendered, 0600); err != nil {
+	err = os.WriteFile(ms.configPath, rendered, 0600)
+	if err != nil {
 		req.Error("009", fmt.Sprintf("config write failed: %v", err), nil)
 		return
 	}
 
-	// Writing new config was successful, update the managedServer's templateData.
-	ms.td = tdNew
-	if newTLS != nil {
-		ms.tlsFiles = newTLS
+	// Writing the new config was successful: swap in a new node plan with the
+	// new template data and TLS settings, here and in the instance's plan. The
+	// old node plan is left as it was.
+	next := *node
+	next.TemplateData = tdNew
+	next.TLS = tlsNew
+	ms.node = &next
+
+	s.mu.Lock()
+	inst := s.instances[ms.instanceID]
+	if inst != nil && inst.plan != nil {
+		i := slices.Index(inst.plan.Nodes, node)
+		if i >= 0 {
+			inst.plan.Nodes[i] = &next
+		}
 	}
+	s.mu.Unlock()
 
 	req.RespondJSON(api.UpdateServerResponse{Updated: true})
 }
@@ -1823,8 +1803,8 @@ func startFromConfig(log *slog.Logger, configPath string) (*server.Server, error
 
 // cloneTemplateData returns a shallow copy of td with a fresh empty
 // Snippets map. Used by updateServer to render against a copy so an
-// in-progress update doesn't mutate the live ms.td before the new
-// config is written; ms.td is only swapped to the copy on success.
+// in-progress update doesn't mutate the node plan's template data; the
+// node plan is only swapped for one holding the copy on success.
 func cloneTemplateData(td *templateData) *templateData {
 	c := *td
 	c.Snippets = map[string]string{}

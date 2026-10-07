@@ -129,21 +129,25 @@ type instancePlan struct {
 	ProxyNode string
 }
 
-// dropContents drops the contents of every file, every node's rendered config
-// and the TLS material from p, keeping the rest of the plan. A runtime calls it
-// once the files are written and the create has answered, so private keys are
-// not held in memory for the life of the instance.
+// dropContents drops the contents of the instance's own files and the TLS
+// material from p, keeping the rest of the plan. A runtime calls it once those
+// files are written and the TLS material is in the create response, so private
+// keys are not held in memory for the life of the instance. Each node's
+// contents are dropped by the node's own dropContents.
 func (p *instancePlan) dropContents() {
 	p.TLS = nil
 	for i := range p.Files {
 		p.Files[i].Data = nil
 	}
+}
 
-	for _, n := range p.Nodes {
-		n.Config = nil
-		for i := range n.Files {
-			n.Files[i].Data = nil
-		}
+// dropContents drops the node's rendered config and the contents of its files,
+// keeping the rest of its plan. A runtime calls it once the node has started
+// and before the node is published, so a published node plan never changes.
+func (n *nodePlan) dropContents() {
+	n.Config = nil
+	for i := range n.Files {
+		n.Files[i].Data = nil
 	}
 }
 

@@ -168,9 +168,10 @@ type instance struct {
 	// return to the range when the instance is torn down. Guarded by Service.mu.
 	ports []int
 
-	// plan is the plan the instance was created from, set once the create has
-	// answered. It holds no file contents and no TLS material. Guarded by
-	// Service.mu.
+	// plan is the plan the instance was created from, set before its first node
+	// starts. It holds no TLS material and no contents of the instance's own
+	// files; each node's config and file contents are dropped once that node has
+	// started, before it is published. Guarded by Service.mu.
 	plan *instancePlan
 }
 
@@ -194,20 +195,15 @@ type managedServer struct {
 	// advertiseHost is the resolved client_advertise host for this server,
 	// captured at create time. Immutable for the life of the server (an update
 	// never changes it), so status can read it lock-free rather than racing the
-	// td pointer swap in updateServer. Empty when the node advertises nothing.
+	// node plan swap in updateServer. Empty when the node advertises nothing.
 	advertiseHost string
 
-	// td is the render environment captured at create time. Used by
-	// updateServer to re-render the snippets and main template when staging
-	// a new config.
-	td *templateData
-
-	// tlsFiles holds the generated-TLS material paths and rendered tls{} knobs
-	// (verify, handshake_first, timeout) for this server. nil when the server
-	// was not created with generated TLS. The pointer is shared across an
-	// instance's nodes at create time; updateServer copy-on-writes a fresh copy
-	// for the single targeted server when changing its timeout.
-	tlsFiles *tlsInstanceFiles
+	// node is this server's node in its instance's plan. updateServer renders
+	// the snippets and main template from its template data and its managed TLS
+	// settings when staging a new config. The TLS settings pointer is shared by
+	// every node of the instance, so a node plan is never mutated: updateServer
+	// swaps in a changed copy on success. Guarded by cfgMu.
+	node *nodePlan
 
 	// traceProxy is the capture proxy fronting this server's client port, set when
 	// the server was created with trace capture enabled. nil otherwise. Stopped
