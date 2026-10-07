@@ -1,0 +1,87 @@
+=== n1/config.cfg
+
+
+server_name: "<SHORT>-n1"
+port: <PORT1>
+
+client_advertise: "localhost:<PORT1>"
+
+
+log_file: "<INSTANCE_DIR>/n1/server.log"
+
+
+
+jetstream {
+	enabled: true
+	store_dir: "<INSTANCE_DIR>/n1"
+	include "snippets/jetstream.conf"
+}
+
+
+
+
+
+
+
+include "snippets/_tls_managed.conf"
+include "snippets/websocket.conf"
+include "snippets/mqtt.conf"
+include "snippets/leafnode.conf"
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: true
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: true
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: true
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: true
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: true
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== n1/snippets/_tls_managed.conf
+tls {
+    cert_file: "<INSTANCE_DIR>/tls/server.crt"
+    key_file:  "<INSTANCE_DIR>/tls/server.key"
+    ca_file:   "<INSTANCE_DIR>/tls/ca.pem"
+    verify:    false
+    timeout:   2
+}
+
+=== n1/snippets/jetstream.conf
+max_memory_store: 64MB
+
+=== n1/snippets/leafnode.conf
+leafnodes {
+	port: <PORT2>
+}
+
+=== n1/snippets/mqtt.conf
+mqtt {
+	port: <PORT3>
+}
+
+=== n1/snippets/websocket.conf
+websocket {
+	port: <PORT4>
+	tls {
+		cert_file: "<INSTANCE_DIR>/tls/server.crt"
+		key_file: "<INSTANCE_DIR>/tls/server.key"
+	}
+}
+

@@ -1,0 +1,306 @@
+=== n1/config.cfg
+
+
+server_name: "<SHORT>-n1"
+port: <PORT1>
+
+client_advertise: "localhost:<PORT1>"
+
+
+log_file: "<INSTANCE_DIR>/n1/server.log"
+
+
+
+jetstream {
+	enabled: true
+	store_dir: "<INSTANCE_DIR>/n1"
+	include "snippets/jetstream.conf"
+}
+
+
+
+cluster {
+	name: "C_<SHORT>"
+	port: <PORT2>
+	routes: [
+
+"nats://localhost:<PORT2>"
+
+"nats://localhost:<PORT3>"
+
+"nats://localhost:<PORT4>"
+
+	]
+}
+
+
+
+
+
+include "snippets/_tls_managed.conf"
+include "snippets/websocket.conf"
+include "snippets/mqtt.conf"
+include "snippets/leafnode.conf"
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: true
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: true
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: true
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: true
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: true
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== n1/snippets/_tls_managed.conf
+tls {
+    cert_file: "<INSTANCE_DIR>/tls/server.crt"
+    key_file:  "<INSTANCE_DIR>/tls/server.key"
+    ca_file:   "<INSTANCE_DIR>/tls/ca.pem"
+    verify:    true
+    timeout:   2
+    handshake_first: true
+}
+
+=== n1/snippets/jetstream.conf
+max_memory_store: 64MB
+
+=== n1/snippets/leafnode.conf
+leafnodes {
+	port: <PORT5>
+}
+
+=== n1/snippets/mqtt.conf
+mqtt {
+	port: <PORT6>
+}
+
+=== n1/snippets/websocket.conf
+websocket {
+	port: <PORT7>
+	tls {
+		cert_file: "<INSTANCE_DIR>/tls/server.crt"
+		key_file: "<INSTANCE_DIR>/tls/server.key"
+	}
+}
+
+=== n2/config.cfg
+
+
+server_name: "<SHORT>-n2"
+port: <PORT8>
+
+client_advertise: "localhost:<PORT8>"
+
+
+log_file: "<INSTANCE_DIR>/n2/server.log"
+
+
+
+jetstream {
+	enabled: true
+	store_dir: "<INSTANCE_DIR>/n2"
+	include "snippets/jetstream.conf"
+}
+
+
+
+cluster {
+	name: "C_<SHORT>"
+	port: <PORT3>
+	routes: [
+
+"nats://localhost:<PORT2>"
+
+"nats://localhost:<PORT3>"
+
+"nats://localhost:<PORT4>"
+
+	]
+}
+
+
+
+
+
+include "snippets/_tls_managed.conf"
+include "snippets/websocket.conf"
+include "snippets/mqtt.conf"
+include "snippets/leafnode.conf"
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: true
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: true
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: true
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: true
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: true
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== n2/snippets/_tls_managed.conf
+tls {
+    cert_file: "<INSTANCE_DIR>/tls/server.crt"
+    key_file:  "<INSTANCE_DIR>/tls/server.key"
+    ca_file:   "<INSTANCE_DIR>/tls/ca.pem"
+    verify:    true
+    timeout:   2
+    handshake_first: true
+}
+
+=== n2/snippets/jetstream.conf
+max_memory_store: 64MB
+
+=== n2/snippets/leafnode.conf
+leafnodes {
+	port: <PORT9>
+}
+
+=== n2/snippets/mqtt.conf
+mqtt {
+	port: <PORT10>
+}
+
+=== n2/snippets/websocket.conf
+websocket {
+	port: <PORT11>
+	tls {
+		cert_file: "<INSTANCE_DIR>/tls/server.crt"
+		key_file: "<INSTANCE_DIR>/tls/server.key"
+	}
+}
+
+=== n3/config.cfg
+
+
+server_name: "<SHORT>-n3"
+port: <PORT12>
+
+client_advertise: "localhost:<PORT12>"
+
+
+log_file: "<INSTANCE_DIR>/n3/server.log"
+
+
+
+jetstream {
+	enabled: true
+	store_dir: "<INSTANCE_DIR>/n3"
+	include "snippets/jetstream.conf"
+}
+
+
+
+cluster {
+	name: "C_<SHORT>"
+	port: <PORT4>
+	routes: [
+
+"nats://localhost:<PORT2>"
+
+"nats://localhost:<PORT3>"
+
+"nats://localhost:<PORT4>"
+
+	]
+}
+
+
+
+
+
+include "snippets/_tls_managed.conf"
+include "snippets/websocket.conf"
+include "snippets/mqtt.conf"
+include "snippets/leafnode.conf"
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: true
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: true
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: true
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: true
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: true
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== n3/snippets/_tls_managed.conf
+tls {
+    cert_file: "<INSTANCE_DIR>/tls/server.crt"
+    key_file:  "<INSTANCE_DIR>/tls/server.key"
+    ca_file:   "<INSTANCE_DIR>/tls/ca.pem"
+    verify:    true
+    timeout:   2
+    handshake_first: true
+}
+
+=== n3/snippets/jetstream.conf
+max_memory_store: 64MB
+
+=== n3/snippets/leafnode.conf
+leafnodes {
+	port: <PORT13>
+}
+
+=== n3/snippets/mqtt.conf
+mqtt {
+	port: <PORT14>
+}
+
+=== n3/snippets/websocket.conf
+websocket {
+	port: <PORT15>
+	tls {
+		cert_file: "<INSTANCE_DIR>/tls/server.crt"
+		key_file: "<INSTANCE_DIR>/tls/server.key"
+	}
+}
+
