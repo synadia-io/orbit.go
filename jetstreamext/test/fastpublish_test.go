@@ -271,6 +271,45 @@ func TestFastPublisher(t *testing.T) {
 			t.Fatalf("Expected ErrBatchClosed adding to discarded batch, got %v", err)
 		}
 	})
+	t.Run("does not modify message", func(t *testing.T) {
+		s := RunBasicJetStreamServer()
+		defer shutdownJSServerAndRemoveStorage(t, s)
+		nc, js := jsClient(t, s)
+		defer nc.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		cfg := jetstream.StreamConfig{
+			Name:              "TEST",
+			Subjects:          []string{"test.>"},
+			AllowBatchPublish: true,
+		}
+		if _, err := js.CreateStream(ctx, cfg); err != nil {
+			t.Fatalf("Unexpected error creating stream: %v", err)
+		}
+
+		batch, err := jetstreamext.NewFastPublisher(js)
+		if err != nil {
+			t.Fatalf("Unexpected error creating fast publisher: %v", err)
+		}
+
+		msg := nats.NewMsg("test.1")
+		msg.Header.Set("X-User", "value")
+		if _, err := batch.AddMsg(msg, jetstreamext.WithBatchExpectStream("TEST")); err != nil {
+			t.Fatalf("Unexpected error adding message: %v", err)
+		}
+		commit := nats.NewMsg("test.2")
+		if _, err := batch.CommitMsg(ctx, commit); err != nil {
+			t.Fatalf("Unexpected error committing batch: %v", err)
+		}
+
+		if msg.Reply != "" || len(msg.Header) != 1 || msg.Header.Get("X-User") != "value" {
+			t.Fatalf("Expected added message to be unmodified, got reply %q, headers %v", msg.Reply, msg.Header)
+		}
+		if commit.Reply != "" || len(commit.Header) != 0 {
+			t.Fatalf("Expected commit message to be unmodified, got reply %q, headers %v", commit.Reply, commit.Header)
+		}
+	})
 }
 
 func TestFastPublisher_ReplyPrefixUnchangedOnFlowChange(t *testing.T) {
