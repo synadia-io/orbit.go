@@ -203,10 +203,12 @@ func cloneHeader(hdr nats.Header) nats.Header {
 // act on. first reports whether this is the first message of the batch, add
 // whether the message is being added rather than used to commit.
 func validateBatchMsgHeaders(hdr nats.Header, first, add bool) error {
-	if !first && hdr.Get(jetstream.ExpectedLastSeqHeader) != "" {
+	// The server ignores an empty expected last sequence but treats a commit
+	// header as present whatever its value. A key without values is not sent.
+	if v := hdr[jetstream.ExpectedLastSeqHeader]; !first && len(v) > 0 && v[0] != "" {
 		return ErrBatchExpectedLastSeqNotFirst
 	}
-	if add && hdr.Get(BatchCommitHeader) != "" {
+	if add && len(hdr[BatchCommitHeader]) > 0 {
 		return ErrBatchCommitOnAdd
 	}
 	return nil

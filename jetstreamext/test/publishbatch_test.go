@@ -559,18 +559,32 @@ func TestBatchPublisher(t *testing.T) {
 		if err := batch.AddMsg(msg); !errors.Is(err, jetstreamext.ErrBatchCommitOnAdd) {
 			t.Fatalf("Expected ErrBatchCommitOnAdd, got %v", err)
 		}
+		// The server acts on a commit header even when its value is empty.
+		msg = nats.NewMsg("test.2")
+		msg.Header[jetstreamext.BatchCommitHeader] = []string{""}
+		if err := batch.AddMsg(msg); !errors.Is(err, jetstreamext.ErrBatchCommitOnAdd) {
+			t.Fatalf("Expected ErrBatchCommitOnAdd with empty value, got %v", err)
+		}
+
+		// Keys without values are not sent, so they are not rejected.
+		msg = nats.NewMsg("test.2")
+		msg.Header[jetstream.ExpectedLastSeqHeader] = []string{}
+		msg.Header[jetstreamext.BatchCommitHeader] = []string{}
+		if err := batch.AddMsg(msg); err != nil {
+			t.Fatalf("Unexpected error adding message with valueless headers: %v", err)
+		}
 
 		// Rejected messages were never sent: the batch is still open and
 		// commits with only the messages that went through.
-		if size := batch.Size(); size != 1 || batch.IsClosed() {
-			t.Fatalf("Expected open batch of size 1, got size %d, closed %v", size, batch.IsClosed())
+		if size := batch.Size(); size != 2 || batch.IsClosed() {
+			t.Fatalf("Expected open batch of size 2, got size %d, closed %v", size, batch.IsClosed())
 		}
 		ack, err := batch.Commit(ctx, "test.2", []byte("message 2"))
 		if err != nil {
 			t.Fatalf("Unexpected error committing batch: %v", err)
 		}
-		if ack.BatchSize != 2 {
-			t.Fatalf("Expected BatchAck.BatchSize to be 2, got %d", ack.BatchSize)
+		if ack.BatchSize != 3 {
+			t.Fatalf("Expected BatchAck.BatchSize to be 3, got %d", ack.BatchSize)
 		}
 
 		// A commit on an empty batch is its first message, so the option is allowed.
@@ -578,7 +592,7 @@ func TestBatchPublisher(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Unexpected error creating batch publisher: %v", err)
 		}
-		if _, err := batch.Commit(ctx, "test.3", []byte("message 3"), jetstreamext.WithBatchExpectLastSequence(2)); err != nil {
+		if _, err := batch.Commit(ctx, "test.3", []byte("message 3"), jetstreamext.WithBatchExpectLastSequence(3)); err != nil {
 			t.Fatalf("Unexpected error committing single-message batch: %v", err)
 		}
 	})

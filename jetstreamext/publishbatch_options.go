@@ -41,8 +41,9 @@ func WithBatchExpectStream(stream string) BatchMsgOpt {
 // on a stream should have. If the last message has a different sequence number
 // server will reject the message and publish will fail.
 //
-// It is only allowed on the first message of a batch; Add, AddMsg, Commit
-// and CommitMsg return ErrBatchExpectedLastSeqNotFirst otherwise.
+// With BatchPublisher it is only allowed on the first message of a batch;
+// Add, AddMsg, Commit and CommitMsg return ErrBatchExpectedLastSeqNotFirst
+// otherwise. FastPublisher accepts it on any message.
 func WithBatchExpectLastSequence(seq uint64) BatchMsgOpt {
 	return func(opts *batchMsgOpts) error {
 		opts.lastSeq = &seq
