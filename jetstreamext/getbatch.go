@@ -304,7 +304,7 @@ func getPrefixedSubject(jsOpts jetstream.JetStreamOptions, subject string) strin
 			prefix = jsOpts.APIPrefix
 		}
 	} else if jsOpts.Domain != "" {
-		prefix = fmt.Sprintf("$JS.%s.", jsOpts.Domain)
+		prefix = fmt.Sprintf("$JS.%s.API.", jsOpts.Domain)
 	} else {
 		prefix = "$JS.API."
 	}
