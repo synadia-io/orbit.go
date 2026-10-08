@@ -34,12 +34,8 @@ import (
 	"github.com/synadia-io/orbit.go/ntf/api"
 )
 
-func TestPopulateTemplateData(t *testing.T) {
-	inst := &instance{
-		ID:          "abcdef0123456789abcdef0123456789",
-		Description: "test",
-		Kind:        "server",
-	}
+func TestPlanInstanceTemplateDataAdvertiseHost(t *testing.T) {
+	id := "abcdef0123456789abcdef0123456789"
 
 	tests := []struct {
 		name          string
@@ -51,15 +47,19 @@ func TestPopulateTemplateData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plan := serverPlan{
-				name:          "test-n1",
-				serverDir:     "/tmp/test",
-				serverIndex:   1,
-				clientPort:    4222,
-				advertiseHost: tt.advertiseHost,
+			spec := instanceSpec{
+				Kind:          "server",
+				Servers:       1,
+				Description:   "test",
+				MainTemplate:  serverConfigTemplate,
+				AdvertiseHost: tt.advertiseHost,
 			}
 
-			td := populateTemplateData(inst, plan)
+			plan, err := planInstance(spec, id, newFakePlacement(id))
+			if err != nil {
+				t.Fatalf("planInstance: %v", err)
+			}
+			td := plan.Nodes[0].TemplateData
 
 			if td.AdvertiseHost != tt.advertiseHost {
 				t.Fatalf("AdvertiseHost: got %q, want %q", td.AdvertiseHost, tt.advertiseHost)
@@ -143,12 +143,11 @@ func TestEffectiveAdvertiseHost(t *testing.T) {
 	}
 }
 
-// TestWriteServerTLSSnippetOmitsClientAdvertise pins that the managed TLS
+// TestRenderTLSSnippetOmitsClientAdvertise pins that the managed TLS
 // snippet no longer emits client_advertise — that directive is owned solely by
 // the main template (driven by --advertise), so a snippet copy can't override
 // the operator's value.
-func TestWriteServerTLSSnippetOmitsClientAdvertise(t *testing.T) {
-	dir := t.TempDir()
+func TestRenderTLSSnippetOmitsClientAdvertise(t *testing.T) {
 	files := &tlsInstanceFiles{
 		caPath:     "/tls/ca.pem",
 		serverCert: "/tls/server.crt",
@@ -156,16 +155,7 @@ func TestWriteServerTLSSnippetOmitsClientAdvertise(t *testing.T) {
 		mutual:     true,
 	}
 
-	rel, err := writeServerTLSSnippet(dir, files)
-	if err != nil {
-		t.Fatalf("writeServerTLSSnippet: %v", err)
-	}
-
-	body, err := os.ReadFile(filepath.Join(dir, filepath.Base(rel)))
-	if err != nil {
-		t.Fatalf("read snippet: %v", err)
-	}
-	got := string(body)
+	got := string(renderTLSSnippet(files))
 
 	if strings.Contains(got, "client_advertise") {
 		t.Fatalf("managed TLS snippet must not emit client_advertise:\n%s", got)
@@ -206,9 +196,9 @@ func TestValidateTLSSnippetRefs(t *testing.T) {
 	})
 }
 
-// TestWriteServerTLSSnippetHandshakeFirst pins that handshake_first is rendered
+// TestRenderTLSSnippetHandshakeFirst pins that handshake_first is rendered
 // into the tls block only when requested.
-func TestWriteServerTLSSnippetHandshakeFirst(t *testing.T) {
+func TestRenderTLSSnippetHandshakeFirst(t *testing.T) {
 	base := tlsInstanceFiles{
 		caPath:     "/tls/ca.pem",
 		serverCert: "/tls/server.crt",
@@ -216,30 +206,20 @@ func TestWriteServerTLSSnippetHandshakeFirst(t *testing.T) {
 		mutual:     true,
 	}
 
-	render := func(t *testing.T, files tlsInstanceFiles) string {
-		t.Helper()
-		dir := t.TempDir()
-		rel, err := writeServerTLSSnippet(dir, &files)
-		if err != nil {
-			t.Fatalf("writeServerTLSSnippet: %v", err)
-		}
-		body, err := os.ReadFile(filepath.Join(dir, filepath.Base(rel)))
-		if err != nil {
-			t.Fatalf("read snippet: %v", err)
-		}
-		return string(body)
+	render := func(files tlsInstanceFiles) string {
+		return string(renderTLSSnippet(&files))
 	}
 
 	t.Run("present when set", func(t *testing.T) {
 		files := base
 		files.handshakeFirst = true
-		if got := render(t, files); !strings.Contains(got, "handshake_first: true") {
+		if got := render(files); !strings.Contains(got, "handshake_first: true") {
 			t.Fatalf("snippet missing handshake_first:\n%s", got)
 		}
 	})
 
 	t.Run("absent when unset", func(t *testing.T) {
-		if got := render(t, base); strings.Contains(got, "handshake_first") {
+		if got := render(base); strings.Contains(got, "handshake_first") {
 			t.Fatalf("snippet should not contain handshake_first:\n%s", got)
 		}
 	})
@@ -318,7 +298,7 @@ func renderJS(t *testing.T, jetStream bool, snippets map[string]string) string {
 	td.StoreDir = "/tmp/store"
 	td.JetStream = jetStream
 	for k := range snippets {
-		// Mirror what renderAndWriteSnippets records: the include path.
+		// Mirror what renderSnippets records: the include path.
 		td.Snippets[k] = "snippets/" + k + ".conf"
 	}
 	out, err := renderConfig(td, serverConfigTemplate)
@@ -398,10 +378,10 @@ func TestRenderConfigQuotesNames(t *testing.T) {
 	}
 }
 
-// TestWriteServerTLSSnippetTimeout pins that the tls timeout renders the
+// TestRenderTLSSnippetTimeout pins that the tls timeout renders the
 // configured value, falling back to the managed default of 2 when unset or
 // non-positive.
-func TestWriteServerTLSSnippetTimeout(t *testing.T) {
+func TestRenderTLSSnippetTimeout(t *testing.T) {
 	base := tlsInstanceFiles{
 		caPath:     "/tls/ca.pem",
 		serverCert: "/tls/server.crt",
@@ -409,22 +389,12 @@ func TestWriteServerTLSSnippetTimeout(t *testing.T) {
 		mutual:     true,
 	}
 
-	render := func(t *testing.T, files tlsInstanceFiles) string {
-		t.Helper()
-		dir := t.TempDir()
-		rel, err := writeServerTLSSnippet(dir, &files)
-		if err != nil {
-			t.Fatalf("writeServerTLSSnippet: %v", err)
-		}
-		body, err := os.ReadFile(filepath.Join(dir, filepath.Base(rel)))
-		if err != nil {
-			t.Fatalf("read snippet: %v", err)
-		}
-		return string(body)
+	render := func(files tlsInstanceFiles) string {
+		return string(renderTLSSnippet(&files))
 	}
 
 	t.Run("default when unset", func(t *testing.T) {
-		if got := render(t, base); !strings.Contains(got, "timeout:   2") {
+		if got := render(base); !strings.Contains(got, "timeout:   2") {
 			t.Fatalf("snippet missing default timeout:\n%s", got)
 		}
 	})
@@ -432,7 +402,7 @@ func TestWriteServerTLSSnippetTimeout(t *testing.T) {
 	t.Run("fractional value", func(t *testing.T) {
 		files := base
 		files.timeoutSeconds = 0.5
-		if got := render(t, files); !strings.Contains(got, "timeout:   0.5") {
+		if got := render(files); !strings.Contains(got, "timeout:   0.5") {
 			t.Fatalf("snippet missing timeout 0.5:\n%s", got)
 		}
 	})
@@ -440,7 +410,7 @@ func TestWriteServerTLSSnippetTimeout(t *testing.T) {
 	t.Run("sub-second value", func(t *testing.T) {
 		files := base
 		files.timeoutSeconds = 0.25
-		if got := render(t, files); !strings.Contains(got, "timeout:   0.25") {
+		if got := render(files); !strings.Contains(got, "timeout:   0.25") {
 			t.Fatalf("snippet missing timeout 0.25:\n%s", got)
 		}
 	})
@@ -448,7 +418,7 @@ func TestWriteServerTLSSnippetTimeout(t *testing.T) {
 	t.Run("negative falls back to default", func(t *testing.T) {
 		files := base
 		files.timeoutSeconds = -1
-		if got := render(t, files); !strings.Contains(got, "timeout:   2") {
+		if got := render(files); !strings.Contains(got, "timeout:   2") {
 			t.Fatalf("negative timeout should render default:\n%s", got)
 		}
 	})
@@ -769,6 +739,42 @@ func TestUpdateTracedServer(t *testing.T) {
 	})
 	if got != "008" {
 		t.Errorf("adding a listener to a traced server: error code = %q, want 008", got)
+	}
+}
+
+// TestUpdateKeepsTLSTimeout proves an update without tls_timeout leaves the
+// managed TLS snippet alone, so it does not undo an earlier timeout change.
+func TestUpdateKeepsTLSTimeout(t *testing.T) {
+	ms := startTestService(t)
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{
+		TLS: &api.TLSOptions{Mode: api.TLSModeServer},
+	}, &created)
+	name := created.Servers[0].Name
+
+	timeout := 0.5
+	var updated api.UpdateServerResponse
+	mustRequest(t, ms.nc, "tester.update.server", api.UpdateServerRequest{
+		Name:       name,
+		TLSTimeout: &timeout,
+	}, &updated)
+	if !updated.Updated {
+		t.Fatal("update with tls_timeout reported no change")
+	}
+
+	updated = api.UpdateServerResponse{}
+	mustRequest(t, ms.nc, "tester.update.server", api.UpdateServerRequest{Name: name}, &updated)
+	if !updated.Updated {
+		t.Fatal("update without tls_timeout reported no change")
+	}
+
+	snippet, err := os.ReadFile(filepath.Join(ms.findServerByName(name).rootDir, "snippets", "_tls_managed.conf"))
+	if err != nil {
+		t.Fatalf("read managed TLS snippet: %v", err)
+	}
+	if !strings.Contains(string(snippet), "timeout:   0.5") {
+		t.Errorf("managed TLS snippet lost the first update's timeout:\n%s", snippet)
 	}
 }
 

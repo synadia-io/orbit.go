@@ -1,0 +1,78 @@
+=== n1/config.cfg
+# custom template
+# InstanceID <ID> ShortID <SHORT> Kind cluster Description golden custom template
+# ServerName <SHORT>-n1 ServerIndex 1 ClusterIndex 0 ClusterSize 2
+# ServerDir <INSTANCE_DIR>/n1 StoreDir <INSTANCE_DIR>/n1 LogFile <INSTANCE_DIR>/n1/server.log
+# Host localhost AdvertiseHost  JetStream false ClientPort <PORT1>
+# ClusterName C_<SHORT> ClusterPort <PORT2> Routes [localhost:<PORT2> localhost:<PORT3>]
+# Clusters [] GatewayPort 0 Gateways map[]
+# Ports map[leafnode:<PORT4> websocket:<PORT5>] Snippets map[leafnode:snippets/leafnode.conf top:snippets/top.conf websocket:snippets/websocket.conf] TLSInclude  TLS <nil>
+include "snippets/top.conf"
+server_name: "<SHORT>-n1"
+listen: "localhost:<PORT1>"
+log_file: "<INSTANCE_DIR>/n1/server.log"
+cluster {
+	name: "C_<SHORT>"
+	port: <PORT2>
+	routes: [
+		"nats://localhost:<PORT2>"
+		"nats://localhost:<PORT3>"
+	]
+}
+include "snippets/websocket.conf"
+include "snippets/leafnode.conf"
+
+=== n1/snippets/leafnode.conf
+leafnodes {
+	port: <PORT4>
+}
+
+=== n1/snippets/top.conf
+# top snippet of <SHORT>-n1 in C_<SHORT>
+max_connections: 1000
+
+=== n1/snippets/websocket.conf
+websocket {
+	port: <PORT5>
+	no_tls: true
+}
+
+=== n2/config.cfg
+# custom template
+# InstanceID <ID> ShortID <SHORT> Kind cluster Description golden custom template
+# ServerName <SHORT>-n2 ServerIndex 2 ClusterIndex 0 ClusterSize 2
+# ServerDir <INSTANCE_DIR>/n2 StoreDir <INSTANCE_DIR>/n2 LogFile <INSTANCE_DIR>/n2/server.log
+# Host localhost AdvertiseHost  JetStream false ClientPort <PORT6>
+# ClusterName C_<SHORT> ClusterPort <PORT3> Routes [localhost:<PORT2> localhost:<PORT3>]
+# Clusters [] GatewayPort 0 Gateways map[]
+# Ports map[leafnode:<PORT7> websocket:<PORT8>] Snippets map[leafnode:snippets/leafnode.conf top:snippets/top.conf websocket:snippets/websocket.conf] TLSInclude  TLS <nil>
+include "snippets/top.conf"
+server_name: "<SHORT>-n2"
+listen: "localhost:<PORT6>"
+log_file: "<INSTANCE_DIR>/n2/server.log"
+cluster {
+	name: "C_<SHORT>"
+	port: <PORT3>
+	routes: [
+		"nats://localhost:<PORT2>"
+		"nats://localhost:<PORT3>"
+	]
+}
+include "snippets/websocket.conf"
+include "snippets/leafnode.conf"
+
+=== n2/snippets/leafnode.conf
+leafnodes {
+	port: <PORT7>
+}
+
+=== n2/snippets/top.conf
+# top snippet of <SHORT>-n2 in C_<SHORT>
+max_connections: 1000
+
+=== n2/snippets/websocket.conf
+websocket {
+	port: <PORT8>
+	no_tls: true
+}
+
