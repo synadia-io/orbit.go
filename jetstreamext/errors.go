@@ -29,13 +29,13 @@ const (
 	JSErrCodeBatchPublishExceedsLimit      jetstream.ErrorCode = 10199
 	JSErrCodeBatchPublishInvalidCommit     jetstream.ErrorCode = 10200
 	JSErrCodeBatchPublishDuplicateMsgID    jetstream.ErrorCode = 10201
-	JSErrCodeBatchPublishInvalidGapMode    jetstream.ErrorCode = 10202
 
 	// Fast-ingest batch publish error codes
-	JSErrCodeFastBatchNotEnabled     jetstream.ErrorCode = 10203
-	JSErrCodeFastBatchInvalidPattern jetstream.ErrorCode = 10204
-	JSErrCodeFastBatchInvalidID      jetstream.ErrorCode = 10205
-	JSErrCodeFastBatchUnknownID      jetstream.ErrorCode = 10206
+	JSErrCodeFastBatchNotEnabled     jetstream.ErrorCode = 10205
+	JSErrCodeFastBatchInvalidPattern jetstream.ErrorCode = 10206
+	JSErrCodeFastBatchInvalidID      jetstream.ErrorCode = 10207
+	JSErrCodeFastBatchUnknownID      jetstream.ErrorCode = 10208
+	JSErrCodeMirrorWithBatchPublish  jetstream.ErrorCode = 10209
 
 	// Too many inflight error codes
 	JSErrCodeAtomicPublishTooManyInflight jetstream.ErrorCode = 10210
@@ -70,9 +70,6 @@ var (
 	// is not recognized by the server.
 	ErrBatchPublishInvalidCommit jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeBatchPublishInvalidCommit, Description: "atomic publish batch commit is invalid", Code: 400}}
 
-	// ErrBatchPublishInvalidGapMode is returned when invalid batch gap mode is specified.
-	ErrBatchPublishInvalidGapMode jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeBatchPublishInvalidGapMode, Description: "invalid batch gap mode", Code: 400}}
-
 	// ErrAtomicPublishTooManyInflight is returned when there are too many inflight atomic publish batches.
 	ErrAtomicPublishTooManyInflight jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeAtomicPublishTooManyInflight, Description: "atomic publish too many inflight", Code: 429}}
 
@@ -97,16 +94,20 @@ var (
 	// Fast-ingest batch publish errors
 
 	// ErrFastBatchNotEnabled is returned when fast batch publish is not enabled on the stream.
-	ErrFastBatchNotEnabled jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchNotEnabled, Description: "fast batch publish not enabled on stream", Code: 400}}
+	ErrFastBatchNotEnabled jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchNotEnabled, Description: "batch publish is disabled", Code: 400}}
 
-	// ErrFastBatchInvalidPattern is returned when an invalid pattern is used for fast batch publish.
-	ErrFastBatchInvalidPattern jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchInvalidPattern, Description: "fast batch publish invalid pattern used", Code: 400}}
+	// ErrFastBatchInvalidPattern is returned when the fast batch publish reply
+	// subject pattern is invalid, including an unrecognized gap mode.
+	ErrFastBatchInvalidPattern jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchInvalidPattern, Description: "batch publish pattern is invalid", Code: 400}}
 
 	// ErrFastBatchInvalidID is returned when fast batch publish ID is invalid (exceeds 64 characters).
-	ErrFastBatchInvalidID jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchInvalidID, Description: "fast batch publish ID is invalid (exceeds 64 characters)", Code: 400}}
+	ErrFastBatchInvalidID jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchInvalidID, Description: "batch publish ID is invalid", Code: 400}}
 
 	// ErrFastBatchUnknownID is returned when the fast batch publish ID is unknown.
-	ErrFastBatchUnknownID jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchUnknownID, Description: "fast batch publish ID is unknown", Code: 400}}
+	ErrFastBatchUnknownID jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeFastBatchUnknownID, Description: "batch publish ID unknown", Code: 400}}
+
+	// ErrMirrorWithBatchPublish is returned when a stream is configured as a mirror and also allows batch publishing.
+	ErrMirrorWithBatchPublish jetstream.JetStreamError = &jsError{apiErr: &jetstream.APIError{ErrorCode: JSErrCodeMirrorWithBatchPublish, Description: "stream mirrors can not also use batch publishing", Code: 400}}
 )
 
 type jsError struct {
