@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -116,6 +117,13 @@ type (
 		Error *jetstream.APIError `json:"error"`
 	}
 
+	// commitResult is what ackMsgHandler hands to a waiting commit: either
+	// the pub ack, or the error that ended the batch before one arrived.
+	commitResult struct {
+		ack *batchAckResponse
+		err error
+	}
+
 	// FastPublisherOpt is a functional option for configuring a FastPublisher.
 	FastPublisherOpt interface {
 		configureFastPublisher(*fastPublisherOpts) error
@@ -133,7 +141,7 @@ type (
 		closed       bool
 		opts         fastPublisherOpts
 		stallCh      chan struct{}
-		commitCh     chan *batchAckResponse
+		commitCh     chan commitResult
 		firstAckCh   chan *batchFlowAck
 		initialErrCh chan error
 		errHandler   FastPublishErrHandler
@@ -142,6 +150,11 @@ type (
 		mu           sync.Mutex
 	}
 
+	// FastPublishErrHandler is called with errors the server reports
+	// asynchronously over the control channel: gaps, per-message errors,
+	// and a batch ending without a commit in flight. It runs on the
+	// subscription's goroutine while the publisher's lock is held, so it
+	// must return quickly and must not call back into the FastPublisher.
 	FastPublishErrHandler func(error)
 
 	fastPublisherOpts struct {
@@ -258,6 +271,68 @@ func (fp *fastPublisher) buildReplySubject(seq uint64, operation int) string {
 	return fp.replyPrefix + strconv.FormatUint(seq, 10) + "." + strconv.FormatInt(int64(operation), 10) + ".$FI"
 }
 
+// abort ends the batch with err and delivers it to whoever is waiting on
+// the server: the first Add, a pending commit, or else the error handler.
+// Lock should be held.
+func (fp *fastPublisher) abort(err error) {
+	fp.closed = true
+	switch {
+	case fp.initialErrCh != nil:
+		fp.initialErrCh <- err
+		fp.initialErrCh = nil
+		fp.firstAckCh = nil
+	case fp.commitCh != nil:
+		fp.commitCh <- commitResult{err: err}
+	case fp.errHandler != nil:
+		fp.errHandler(err)
+	}
+	if fp.ackSub != nil {
+		fp.ackSub.Unsubscribe()
+		fp.ackSub = nil
+	}
+}
+
+// replyOperation returns the batch sequence and operation encoded in a
+// control-channel reply subject (<prefix>.<flow>.<gap>.<seq>.<op>.$FI).
+func replyOperation(subject string) (seq uint64, op int, ok bool) {
+	tokens := strings.Split(subject, ".")
+	if len(tokens) < 3 {
+		return 0, 0, false
+	}
+	seq, err := strconv.ParseUint(tokens[len(tokens)-3], 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	op, err = strconv.Atoi(tokens[len(tokens)-2])
+	if err != nil {
+		return 0, 0, false
+	}
+	return seq, op, true
+}
+
+// handleStatus deals with a status-only reply on the control channel,
+// such as the 503 the server sends when nothing captures the subject a
+// message was published to. Lock should be held.
+func (fp *fastPublisher) handleStatus(msg *nats.Msg) {
+	var err error
+	if status := msg.Header.Get("Status"); status == "503" {
+		err = nats.ErrNoResponders
+	} else {
+		err = fmt.Errorf("%w: status %s", ErrInvalidBatchAck, status)
+	}
+
+	// A lost start or commit ends the batch. A lost message in between is
+	// a gap; report it and let gap mode decide what happens next.
+	seq, op, ok := replyOperation(msg.Subject)
+	if ok && (op == fastBatchAddMsg || op == fastBatchPing) {
+		if fp.errHandler != nil {
+			fp.errHandler(fmt.Errorf("batch message %d: %w", seq, err))
+		}
+		return
+	}
+	fp.abort(err)
+}
+
 func (fp *fastPublisher) Add(subject string, data []byte, opts ...BatchMsgOpt) (*FastPubAck, error) {
 	return fp.AddMsg(&nats.Msg{
 		Subject: subject,
@@ -338,14 +413,16 @@ func (fp *fastPublisher) AddMsg(msg *nats.Msg, opts ...BatchMsgOpt) (*FastPubAck
 				AckSequence:   firstAck.Sequence,
 			}, nil
 
-		case err := <-fp.initialErrCh:
+		case err := <-initialErrCh:
 			fp.mu.Lock()
 			defer fp.mu.Unlock()
 			fp.firstAckCh = nil
 			fp.initialErrCh = nil
 			fp.closed = true
-			fp.ackSub.Unsubscribe()
-			fp.ackSub = nil
+			if fp.ackSub != nil {
+				fp.ackSub.Unsubscribe()
+				fp.ackSub = nil
+			}
 			return nil, fmt.Errorf("batch message %d ack error: %w", fp.sequence, err)
 		case <-ackTimer.C:
 			// Re-acquire lock to mark closed
@@ -465,7 +542,7 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 	msg.Reply = fp.buildReplySubject(fp.sequence, operation)
 
 	if fp.commitCh == nil {
-		fp.commitCh = make(chan *batchAckResponse, 1)
+		fp.commitCh = make(chan commitResult, 1)
 	}
 	if fp.ackSub == nil {
 		ackSub, err := fp.js.Conn().Subscribe(fmt.Sprintf("%s.>", fp.ackInboxPrefix), fp.ackMsgHandler)
@@ -491,13 +568,18 @@ func (fp *fastPublisher) commit(ctx context.Context, msg *nats.Msg, eob bool) (*
 	var commitErr error
 	for {
 		select {
-		case commitResp := <-fp.commitCh:
-			if commitResp.Error != nil {
-				commitErr = commitResp.Error
-			} else if commitResp.BatchAck == nil || commitResp.Stream == "" {
+		case res := <-fp.commitCh:
+			switch {
+			case res.err != nil:
+				commitErr = res.err
+			case res.ack == nil:
 				commitErr = ErrInvalidBatchAck
-			} else {
-				batchAck = commitResp.BatchAck
+			case res.ack.Error != nil:
+				commitErr = res.ack.Error
+			case res.ack.BatchAck == nil || res.ack.Stream == "":
+				commitErr = ErrInvalidBatchAck
+			default:
+				batchAck = res.ack.BatchAck
 			}
 		case <-ping.C:
 			if err := fp.sendPing(); err != nil {
@@ -557,6 +639,11 @@ func (fp *fastPublisher) IsClosed() bool {
 func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 	fp.mu.Lock()
 	defer fp.mu.Unlock()
+
+	if len(msg.Data) == 0 && msg.Header.Get("Status") != "" {
+		fp.handleStatus(msg)
+		return
+	}
 	var commitAck *batchAckResponse
 	var flowAck *batchFlowAck
 	var flowErr *batchFlowErr
@@ -592,6 +679,7 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 				fp.firstAckCh <- flowAck
 				close(fp.firstAckCh)
 				fp.firstAckCh = nil
+				fp.initialErrCh = nil
 				return
 			}
 
@@ -622,9 +710,19 @@ func (fp *fastPublisher) ackMsgHandler(msg *nats.Msg) {
 			}
 			return
 		}
+		if fp.firstAckCh != nil {
+			// A pub ack instead of a flow ack for the first message means
+			// the server refused to start the batch.
+			var err error = ErrInvalidBatchAck
+			if commitAck != nil && commitAck.Error != nil {
+				err = commitAck.Error
+			}
+			fp.abort(err)
+			return
+		}
 		fp.closed = true
 		if fp.commitCh != nil {
-			fp.commitCh <- commitAck
+			fp.commitCh <- commitResult{ack: commitAck}
 		} else if commitAck != nil && commitAck.Error != nil && fp.errHandler != nil {
 			fp.errHandler(commitAck.Error)
 		}

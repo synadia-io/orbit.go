@@ -271,6 +271,114 @@ func TestFastPublisher(t *testing.T) {
 			t.Fatalf("Expected ErrBatchClosed adding to discarded batch, got %v", err)
 		}
 	})
+	t.Run("error on first message", func(t *testing.T) {
+		s := RunBasicJetStreamServer()
+		defer shutdownJSServerAndRemoveStorage(t, s)
+		nc, js := jsClient(t, s)
+		defer nc.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Batch publishing is not enabled on the stream, so the server
+		// answers the first message with an error pub ack instead of a
+		// flow ack. Add must return that error, not wait for the ack timeout.
+		cfg := jetstream.StreamConfig{
+			Name:     "TEST",
+			Subjects: []string{"test.>"},
+		}
+		if _, err := js.CreateStream(ctx, cfg); err != nil {
+			t.Fatalf("Unexpected error creating stream: %v", err)
+		}
+
+		batch, err := jetstreamext.NewFastPublisher(js)
+		if err != nil {
+			t.Fatalf("Unexpected error creating fast publisher: %v", err)
+		}
+		_, err = batch.Add("test.1", []byte("message 1"))
+		if !errors.Is(err, jetstreamext.ErrFastBatchNotEnabled) {
+			t.Fatalf("Expected ErrFastBatchNotEnabled, got %v", err)
+		}
+		if !batch.IsClosed() {
+			t.Fatal("Expected batch to be closed")
+		}
+	})
+	t.Run("no responders", func(t *testing.T) {
+		s := RunBasicJetStreamServer()
+		defer shutdownJSServerAndRemoveStorage(t, s)
+		nc, js := jsClient(t, s)
+		defer nc.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Nothing captures "other.>", so the server answers those with a
+		// 503 status on the control channel.
+		cfg := jetstream.StreamConfig{
+			Name:              "TEST",
+			Subjects:          []string{"test.>"},
+			AllowBatchPublish: true,
+		}
+		stream, err := js.CreateStream(ctx, cfg)
+		if err != nil {
+			t.Fatalf("Unexpected error creating stream: %v", err)
+		}
+
+		// On the first message the batch never starts.
+		batch, err := jetstreamext.NewFastPublisher(js)
+		if err != nil {
+			t.Fatalf("Unexpected error creating fast publisher: %v", err)
+		}
+		if _, err := batch.Add("other.1", []byte("message 1")); !errors.Is(err, nats.ErrNoResponders) {
+			t.Fatalf("Expected ErrNoResponders on first message, got %v", err)
+		}
+		if !batch.IsClosed() {
+			t.Fatal("Expected batch to be closed")
+		}
+
+		// On the commit the batch ends with the error.
+		batch, err = jetstreamext.NewFastPublisher(js)
+		if err != nil {
+			t.Fatalf("Unexpected error creating fast publisher: %v", err)
+		}
+		if _, err := batch.Add("test.1", []byte("message 1")); err != nil {
+			t.Fatalf("Unexpected error adding message 1: %v", err)
+		}
+		if _, err := batch.Commit(ctx, "other.1", []byte("commit")); !errors.Is(err, nats.ErrNoResponders) {
+			t.Fatalf("Expected ErrNoResponders on commit, got %v", err)
+		}
+
+		// In the middle of a batch the message is simply lost: the error
+		// handler is told and the batch carries on according to gap mode.
+		errCh := make(chan error, 10)
+		batch, err = jetstreamext.NewFastPublisher(js,
+			jetstreamext.WithFastPublisherContinueOnGap(true),
+			jetstreamext.WithFastPublisherErrorHandler(func(err error) { errCh <- err }))
+		if err != nil {
+			t.Fatalf("Unexpected error creating fast publisher: %v", err)
+		}
+		for _, subject := range []string{"test.2", "other.1", "test.3"} {
+			if _, err := batch.Add(subject, []byte("message")); err != nil {
+				t.Fatalf("Unexpected error adding %s: %v", subject, err)
+			}
+		}
+		if _, err := batch.Close(ctx); err != nil {
+			t.Fatalf("Unexpected error closing batch: %v", err)
+		}
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, nats.ErrNoResponders) {
+				t.Fatalf("Expected ErrNoResponders from error handler, got %v", err)
+			}
+		default:
+			t.Fatal("Expected error handler to be called")
+		}
+		info, err := stream.Info(ctx)
+		if err != nil {
+			t.Fatalf("Unexpected error getting stream info: %v", err)
+		}
+		if info.State.Msgs != 3 {
+			t.Fatalf("Expected 3 messages in the stream, got %d", info.State.Msgs)
+		}
+	})
 }
 
 func TestFastPublisher_ReplyPrefixUnchangedOnFlowChange(t *testing.T) {
