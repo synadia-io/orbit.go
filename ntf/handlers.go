@@ -638,6 +638,22 @@ func backendErrorResponse(err error) (string, string) {
 	return "003", err.Error()
 }
 
+// revisionErrorMessage returns the message an update answers a failure to
+// render a node's next revision with, under code 009: a snippet failure as a
+// snippet render failure, anything else as a config render failure.
+func revisionErrorMessage(err error) string {
+	var perr *planError
+	if !errors.As(err, &perr) {
+		return fmt.Sprintf("config render failed: %v", err)
+	}
+
+	if perr.Kind == planErrSnippet {
+		return fmt.Sprintf("snippet render failed: %v", perr.Err)
+	}
+
+	return fmt.Sprintf("config render failed: %v", perr.Err)
+}
+
 // traceSetupTimeout limits a Capturer's setup for one server, which may include
 // first-use work such as creating the store captures are written to.
 const traceSetupTimeout = 30 * time.Second
@@ -951,11 +967,6 @@ func (s *Service) startServer(req micro.Request) {
 		return
 	}
 
-	if ms.inProcess().configPath() == "" {
-		req.Error("005", "Server cannot be restarted: no persisted config", nil)
-		return
-	}
-
 	err = node.Start(ctx)
 
 	// A concurrent destroy or reset may have removed the instance while this
@@ -978,6 +989,11 @@ func (s *Service) startServer(req micro.Request) {
 	}
 
 	if err != nil {
+		var berr *inProcessError
+		if errors.As(err, &berr) {
+			req.Error(berr.Code, berr.Message, nil)
+			return
+		}
 		req.Error("005", fmt.Sprintf("Server restart failed: %v", err), nil)
 		return
 	}
@@ -1100,13 +1116,6 @@ func (s *Service) startInstance(req micro.Request) {
 			continue
 		}
 
-		if ms.inProcess().configPath() == "" {
-			ms.cfgMu.Unlock()
-			res.Error = "no persisted config"
-			results = append(results, res)
-			continue
-		}
-
 		err = node.Start(ctx)
 
 		// A concurrent destroy may have removed the instance while this node was
@@ -1129,6 +1138,14 @@ func (s *Service) startInstance(req micro.Request) {
 		}
 
 		ms.cfgMu.Unlock()
+
+		// A node with no config to start from reports the cause its error
+		// carries.
+		if errors.Is(err, errNoPersistedConfig) {
+			res.Error = errNoPersistedConfig.Error()
+			results = append(results, res)
+			continue
+		}
 
 		if err != nil {
 			res.Error = err.Error()
@@ -1203,73 +1220,42 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
-	// The node's files are rendered with paths relative to the instance
-	// directory, as the planner renders them.
-	instDir := filepath.Dir(ms.rootDir)
-	snippetsDir := filepath.Join(filepath.Base(ms.rootDir), "snippets")
-
-	tdNew := cloneTemplateData(node.TemplateData)
-
-	snippets, err := renderSnippets(tdNew, creq.Snippets, snippetsDir)
-	if err != nil {
-		req.Error("009", fmt.Sprintf("snippet render failed: %v", err), nil)
-		return
-	}
-
-	for _, f := range snippets {
-		err = os.WriteFile(filepath.Join(instDir, f.Path), f.Data, f.Mode)
-		if err != nil {
-			name := strings.TrimSuffix(filepath.Base(f.Path), ".conf")
-			req.Error("009", fmt.Sprintf("snippet render failed: snippet %q write: %v", name, err), nil)
-			return
-		}
-	}
-
-	// The TLS settings are shared by every node of the instance, so a new
-	// timeout goes into a copy.
-	tlsNew := node.TLS
-	if creq.TLSTimeout != nil {
-		cow := *node.TLS
-		cow.timeoutSeconds = *creq.TLSTimeout
-		tlsNew = &cow
-
-		err = os.WriteFile(filepath.Join(instDir, snippetsDir, "_tls_managed.conf"), renderTLSSnippet(tlsNew), 0600)
-		if err != nil {
-			req.Error("009", fmt.Sprintf("TLS snippet rewrite failed: %v", err), nil)
-			return
-		}
-	}
-
 	mainTmpl := serverConfigTemplate
 	if creq.Template != "" {
 		mainTmpl = creq.Template
 	}
-	rendered, err := renderConfig(tdNew, mainTmpl)
+
+	// Render the whole next revision before anything is written, so a failed
+	// render writes nothing.
+	next, err := planRevision(node, creq.Snippets, mainTmpl, creq.TLSTimeout)
 	if err != nil {
-		req.Error("009", fmt.Sprintf("config render failed: %v", err), nil)
+		req.Error("009", revisionErrorMessage(err), nil)
 		return
 	}
 
-	err = os.WriteFile(ms.inProcess().configPath(), rendered, 0600)
+	err = ms.backendNode.Apply(context.Background(), &next.NodePlan)
 	if err != nil {
-		req.Error("009", fmt.Sprintf("config write failed: %v", err), nil)
+		var berr *inProcessError
+		if errors.As(err, &berr) {
+			req.Error(berr.Code, berr.Message, nil)
+			return
+		}
+		req.Error("009", err.Error(), nil)
 		return
 	}
 
-	// Writing the new config was successful: swap in a new node plan with the
-	// new template data and TLS settings, here and in the instance's plan. The
-	// old node plan is left as it was.
-	next := *node
-	next.TemplateData = tdNew
-	next.TLS = tlsNew
-	ms.node = &next
+	// The node has the revision: drop its contents and swap it in for the
+	// node's plan, here and in the instance's plan. The old node plan is left
+	// as it was.
+	next.dropContents()
+	ms.node = next
 
 	s.mu.Lock()
 	inst := s.instances[ms.instanceID]
 	if inst != nil && inst.plan != nil {
 		i := slices.Index(inst.plan.nodes, node)
 		if i >= 0 {
-			inst.plan.nodes[i] = &next
+			inst.plan.nodes[i] = next
 			inst.plan.Nodes[i] = &next.NodePlan
 		}
 	}
@@ -1746,8 +1732,9 @@ func clientPortOf(srv *server.Server) (int, error) {
 }
 
 // beforeServerStart, when set, runs in runServerWithConfig after the server's
-// port reservations are closed and before it starts. Tests use it to take a port
-// in that gap. Nil outside tests.
+// port reservations are closed and before it starts, and in startFromConfig
+// just before the server starts. Tests use it to take a port in that gap, or to
+// stall a start. Nil outside tests.
 var beforeServerStart func(opts *server.Options)
 
 // runServerWithConfig writes the rendered NATS config to a file under rootDir,
@@ -1829,6 +1816,10 @@ func startFromConfig(log *slog.Logger, configPath string) (*server.Server, error
 
 	guard := guardServerLogger(srv, opts, log)
 
+	if beforeServerStart != nil {
+		beforeServerStart(opts)
+	}
+
 	log.Info("Restarting server", "server", srv.Name())
 	srv.Start()
 
@@ -1845,7 +1836,7 @@ func startFromConfig(log *slog.Logger, configPath string) (*server.Server, error
 }
 
 // cloneTemplateData returns a shallow copy of td with a fresh empty
-// Snippets map. Used by updateServer to render against a copy so an
+// Snippets map. Used by planRevision to render against a copy so an
 // in-progress update doesn't mutate the node plan's template data; the
 // node plan is only swapped for one holding the copy on success.
 func cloneTemplateData(td *templateData) *templateData {

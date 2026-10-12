@@ -230,13 +230,6 @@ type managedServer struct {
 	cfgMu sync.Mutex
 }
 
-// inProcess returns the server's node when the in-process backend runs it, or
-// nil. The handlers that reach the config path do so through it.
-func (ms *managedServer) inProcess() *inProcessNode {
-	n, _ := ms.backendNode.(*inProcessNode)
-	return n
-}
-
 // New starts the management service and, unless Options.Conn is set, the embedded
 // server that hosts it. It unwinds everything it started if any step fails, so a
 // non-nil error leaves nothing running.

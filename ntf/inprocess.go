@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -40,7 +41,7 @@ const (
 )
 
 // inProcessError is a failure of the in-process backend. It carries the
-// response code and message a create answers it with.
+// response code and message the handler answers it with.
 type inProcessError struct {
 	// Code is the response code.
 	Code string
@@ -69,6 +70,14 @@ var errInstanceNotFound = &inProcessError{Code: "404", Message: "Instance not fo
 // errNodeTornDown is the failure of a call on a node after Teardown of its
 // instance.
 var errNodeTornDown = errors.New("node torn down")
+
+// errNoPersistedConfig is the cause of a Start of a node with no config to
+// start from.
+var errNoPersistedConfig = errors.New("no persisted config")
+
+// errIdentityChange is the cause of an Apply refused because the revision
+// changes the node's identity.
+var errIdentityChange = errors.New("revision changes the node's identity")
 
 // inProcessBackend runs managed servers in the service's own process. It
 // closes over the Service: ports come from its port range through reservePort
@@ -224,7 +233,7 @@ func (b *inProcessBackend) Provision(_ context.Context, plan *backend.InstancePl
 			return fail(&inProcessError{Code: "003", Message: fmt.Sprintf("Server creation failed: %v", err), Err: err})
 		}
 
-		node := &inProcessNode{name: n.Name, addrs: b.addresses(n, srv), cfgPath: cfgPath, log: b.svc.log, srv: srv}
+		node := &inProcessNode{name: n.Name, addrs: b.addresses(n, srv), identity: nodeIdentity(n), instDir: instDir, cfgPath: cfgPath, log: b.svc.log, srv: srv}
 
 		b.mu.Lock()
 		torn = rec.torn
@@ -276,6 +285,7 @@ func (b *inProcessBackend) addresses(n *backend.NodePlan, srv *server.Server) []
 // holding its ports, releases its ports and removes its directory unless the
 // service preserves it. A Provision still starting the instance starts no
 // further node, and Teardown waits for it to return before it stops anything.
+// It also waits for a Start of one of the instance's nodes in flight to return.
 // A Teardown that finds another in progress waits for that one to finish.
 // Calling it once one has finished does nothing.
 func (b *inProcessBackend) Teardown(_ context.Context, instanceID string) error {
@@ -349,11 +359,21 @@ func (b *inProcessBackend) Teardown(_ context.Context, instanceID string) error 
 
 // stopNodes marks each of nodes torn and shuts its server down. A Start of a
 // node that swaps in its server before the node is marked torn has it shut down
-// here, and one that would swap it in afterwards shuts it down itself.
+// here, and one that would swap it in afterwards shuts it down itself. A Start
+// in flight is waited for, with no lock held, so no server of the node runs
+// once stopNodes returns.
 func (b *inProcessBackend) stopNodes(nodes []*inProcessNode) {
 	for _, n := range nodes {
 		n.mu.Lock()
 		n.torn = true
+		starting := n.starting
+		n.mu.Unlock()
+
+		if starting != nil {
+			<-starting
+		}
+
+		n.mu.Lock()
 		srv := n.srv
 		n.mu.Unlock()
 
@@ -476,13 +496,24 @@ func (p *inProcessPlacement) StoreDir(node string) string {
 
 // inProcessNode is one server the in-process backend started.
 type inProcessNode struct {
-	name    string
-	addrs   []backend.Address
+	name  string
+	addrs []backend.Address
+
+	// identity is the node's plan with no files and no config, which Apply
+	// compares a revision against.
+	identity backend.NodePlan
+
+	// instDir is the instance directory, which the paths of a revision's files
+	// are relative to.
+	instDir string
+
 	cfgPath string
 	log     *slog.Logger
 
-	// mu guards srv and torn only, and is held only to read or swap them, so
-	// Status never waits behind a start or stop.
+	// mu guards srv, torn and starting. It is held only to read or swap them,
+	// so Status never waits behind a start or stop, apart from Apply, which
+	// holds it across its writes so Teardown cannot remove the directory
+	// underneath them.
 	mu  sync.Mutex
 	srv *server.Server
 
@@ -490,6 +521,41 @@ type inProcessNode struct {
 	// failed Provision. Every method that returns an error then fails with
 	// errNodeTornDown.
 	torn bool
+
+	// starting is closed when a Start in flight returns, nil when none is.
+	// stopNodes waits on it.
+	starting chan struct{}
+}
+
+// nodeIdentity returns n with no files and no config, and its own copies of
+// its listeners and persistent paths.
+func nodeIdentity(n *backend.NodePlan) backend.NodePlan {
+	id := *n
+	id.Files = nil
+	id.Config = nil
+	id.Listeners = slices.Clone(n.Listeners)
+	id.Persistent = slices.Clone(n.Persistent)
+
+	return id
+}
+
+// identityChange names the first part of the node's identity, as Apply
+// compares it, in which next differs from cur, or returns empty when none does.
+func identityChange(cur, next *backend.NodePlan) string {
+	switch {
+	case next.Name != cur.Name:
+		return "name"
+	case next.Dir != cur.Dir:
+		return "dir"
+	case next.Cluster != cur.Cluster:
+		return "cluster"
+	case !slices.Equal(next.Listeners, cur.Listeners):
+		return "listeners"
+	case !slices.Equal(next.Persistent, cur.Persistent):
+		return "persistent"
+	default:
+		return ""
+	}
 }
 
 // Name returns the node's plan name.
@@ -531,15 +597,32 @@ func (n *inProcessNode) Status(context.Context) (backend.NodeStatus, error) {
 // Start starts a new server from the node's config and swaps it in for the
 // stopped one, since a server cannot be restarted in place after a shutdown.
 // When Teardown marked the node torn while the server was starting, it shuts
-// that server down and fails.
+// that server down and fails; Teardown waits for it to return. A node with no
+// config fails with an *inProcessError carrying 005.
 func (n *inProcessNode) Start(context.Context) error {
+	if n.cfgPath == "" {
+		return &inProcessError{Code: "005", Message: "Server cannot be restarted: no persisted config", Err: errNoPersistedConfig}
+	}
+
 	n.mu.Lock()
 	torn := n.torn
+	starting := make(chan struct{})
+	if !torn {
+		n.starting = starting
+	}
 	n.mu.Unlock()
 
 	if torn {
 		return errNodeTornDown
 	}
+
+	defer func() {
+		n.mu.Lock()
+		n.starting = nil
+		n.mu.Unlock()
+
+		close(starting)
+	}()
 
 	srv, err := startFromConfig(n.log, n.cfgPath)
 	if err != nil {
@@ -592,9 +675,50 @@ func (n *inProcessNode) Reload(context.Context) error {
 	return srv.Reload()
 }
 
-// Apply is not supported yet.
-func (n *inProcessNode) Apply(context.Context, *backend.NodePlan) error {
-	return backend.ErrUnsupported
+// Apply writes the revision plan's files, each with its mode, then overwrites
+// the node's config with its Config, under the node's mutex. Files the revision
+// does not carry are kept. It never reloads and works on a stopped node.
+//
+// It refuses a revision that changes the node's name, directory, cluster,
+// listeners or persistent paths with an error wrapping errIdentityChange that
+// names the field, and one that changes the version with
+// backend.ErrUnsupported, since the backend does not declare
+// CapabilityVersionChange. A failed write is an *inProcessError carrying 009
+// and the message an update answers it with.
+func (n *inProcessNode) Apply(_ context.Context, plan *backend.NodePlan) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.torn {
+		return errNodeTornDown
+	}
+
+	field := identityChange(&n.identity, plan)
+	if field != "" {
+		return fmt.Errorf("%w: %s differs", errIdentityChange, field)
+	}
+
+	if plan.Version != n.identity.Version {
+		return backend.ErrUnsupported
+	}
+
+	for _, f := range plan.Files {
+		err := os.WriteFile(filepath.Join(n.instDir, f.Path), f.Data, f.Mode)
+		if err != nil {
+			name := filepath.Base(f.Path)
+			if name == "_tls_managed.conf" {
+				return &inProcessError{Code: "009", Message: fmt.Sprintf("TLS snippet rewrite failed: %v", err), Err: err}
+			}
+			return &inProcessError{Code: "009", Message: fmt.Sprintf("snippet render failed: snippet %q write: %v", strings.TrimSuffix(name, ".conf"), err), Err: err}
+		}
+	}
+
+	err := os.WriteFile(n.cfgPath, plan.Config, 0600)
+	if err != nil {
+		return &inProcessError{Code: "009", Message: fmt.Sprintf("config write failed: %v", err), Err: err}
+	}
+
+	return nil
 }
 
 // Kill is not supported: an in-process server can only be shut down
@@ -611,15 +735,6 @@ func (n *inProcessNode) Pause(context.Context) error {
 // Resume is not supported.
 func (n *inProcessNode) Resume(context.Context) error {
 	return backend.ErrUnsupported
-}
-
-// configPath returns the path of the node's config, empty for a nil node.
-func (n *inProcessNode) configPath() string {
-	if n == nil {
-		return ""
-	}
-
-	return n.cfgPath
 }
 
 var (

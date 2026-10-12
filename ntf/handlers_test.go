@@ -778,6 +778,48 @@ func TestUpdateKeepsTLSTimeout(t *testing.T) {
 	}
 }
 
+// TestUpdateConfigRenderFailureWritesNothing proves an update whose config
+// fails to render answers 009 and leaves the node's snippets as they were, so a
+// later reload cannot apply half of the update.
+func TestUpdateConfigRenderFailureWritesNothing(t *testing.T) {
+	ms := startTestService(t)
+
+	const before = "# top before the update\n"
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{
+		Snippets: map[string]string{"top": before},
+	}, &created)
+	name := created.Servers[0].Name
+
+	payload, err := json.Marshal(api.UpdateServerRequest{
+		Name:     name,
+		Snippets: map[string]string{"top": "# top after the update\n"},
+		Template: "{{ .NoSuchField }}",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := ms.nc.Request("tester.update.server", payload, 30*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	code := msg.Header.Get("Nats-Service-Error-Code")
+	desc := msg.Header.Get("Nats-Service-Error")
+	if code != "009" || !strings.HasPrefix(desc, "config render failed: ") {
+		t.Errorf("answered %q %q, want 009 config render failed", code, desc)
+	}
+
+	snippet, err := os.ReadFile(filepath.Join(ms.findServerByName(name).rootDir, "snippets", "top.conf"))
+	if err != nil {
+		t.Fatalf("read top snippet: %v", err)
+	}
+	if string(snippet) != before {
+		t.Errorf("failed update rewrote the top snippet:\n%s", snippet)
+	}
+}
+
 // TestReloadStoppedServerIsRejected proves reload refuses a server that is not
 // running, rather than reporting a reload that cannot have happened.
 func TestReloadStoppedServerIsRejected(t *testing.T) {

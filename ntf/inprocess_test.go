@@ -19,6 +19,8 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -192,6 +194,263 @@ func TestBackendProvisionFailsPartWay(t *testing.T) {
 	}
 	if trackedPorts(s) != 0 {
 		t.Errorf("%d ports still reserved after teardown", trackedPorts(s))
+	}
+}
+
+// provisionServer plans and provisions a single server with snippets on its own
+// service, and returns its plan and node. The instance is torn down when the
+// test ends.
+func provisionServer(t *testing.T, snippets map[string]string) (*instancePlan, *inProcessNode) {
+	t.Helper()
+
+	s := placementService(t, freeRange(t, 4))
+	inst := s.newInstance("server", "")
+	p := placeInstance(t, s, inst)
+	t.Cleanup(func() { s.dropInstance(inst) })
+
+	spec := instanceSpec{Kind: "server", Servers: 1, Snippets: snippets, MainTemplate: serverConfigTemplate}
+	plan, err := planInstance(spec, inst.ID, p, s.backend.DefaultVersion())
+	if err != nil {
+		t.Fatalf("planInstance: %v", err)
+	}
+
+	nodes, err := s.backend.Provision(t.Context(), &plan.InstancePlan)
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	return plan, nodes[0].(*inProcessNode)
+}
+
+// TestInProcessApplyRefusesIdentityChange proves Apply refuses a revision that
+// changes any part of the node's identity, naming the part.
+func TestInProcessApplyRefusesIdentityChange(t *testing.T) {
+	plan, node := provisionServer(t, nil)
+
+	tests := []struct {
+		field  string
+		change func(n *backend.NodePlan)
+	}{
+		{"name", func(n *backend.NodePlan) { n.Name += "x" }},
+		{"dir", func(n *backend.NodePlan) { n.Dir = "n2" }},
+		{"cluster", func(n *backend.NodePlan) { n.Cluster = "C_other" }},
+		{"listeners", func(n *backend.NodePlan) {
+			n.Listeners = append(slices.Clone(n.Listeners), backend.Listener{Name: "websocket", Endpoint: backend.Endpoint{Host: "localhost", Port: 1}})
+		}},
+		{"persistent", func(n *backend.NodePlan) { n.Persistent = []string{"/elsewhere"} }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			rev := *plan.Nodes[0]
+			tt.change(&rev)
+
+			err := node.Apply(t.Context(), &rev)
+			if !errors.Is(err, errIdentityChange) {
+				t.Fatalf("Apply = %v, want an identity change", err)
+			}
+			if !strings.Contains(err.Error(), tt.field) {
+				t.Errorf("error %q does not name %s", err, tt.field)
+			}
+		})
+	}
+}
+
+// TestInProcessApplyRefusesVersionChange proves Apply refuses a revision that
+// changes the version with ErrUnsupported, since the in-process backend does
+// not declare version-change.
+func TestInProcessApplyRefusesVersionChange(t *testing.T) {
+	plan, node := provisionServer(t, nil)
+
+	rev := *plan.Nodes[0]
+	rev.Version = "0.0.1"
+
+	err := node.Apply(t.Context(), &rev)
+	if !errors.Is(err, backend.ErrUnsupported) {
+		t.Errorf("Apply = %v, want ErrUnsupported", err)
+	}
+}
+
+// TestInProcessApplyWritesConfigAndKeepsFiles proves Apply overwrites the node's
+// config, writes the revision's files with their modes, and keeps a file the
+// revision does not carry.
+func TestInProcessApplyWritesConfigAndKeepsFiles(t *testing.T) {
+	const top = "# top as created\n"
+	plan, node := provisionServer(t, map[string]string{"top": top})
+
+	rev := *plan.Nodes[0]
+	rev.Config = []byte("# the revised config\n")
+	rev.Files = []backend.File{{Path: filepath.Join(rev.Dir, "snippets", "accounts.conf"), Data: []byte("# accounts\n"), Mode: 0600}}
+
+	err := node.Apply(t.Context(), &rev)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	cfg, err := os.ReadFile(node.cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(cfg) != string(rev.Config) {
+		t.Errorf("config = %q, want %q", cfg, rev.Config)
+	}
+
+	path := filepath.Join(node.instDir, rev.Files[0].Path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read revision file: %v", err)
+	}
+	if string(data) != "# accounts\n" {
+		t.Errorf("revision file = %q, want %q", data, "# accounts\n")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat revision file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("revision file mode = %v, want 0600", info.Mode().Perm())
+	}
+
+	kept, err := os.ReadFile(filepath.Join(node.instDir, rev.Dir, "snippets", "top.conf"))
+	if err != nil {
+		t.Fatalf("read kept file: %v", err)
+	}
+	if string(kept) != top {
+		t.Errorf("kept file = %q, want %q", kept, top)
+	}
+}
+
+// TestStartRacedByDestroyAnswersNotFound stalls a tester.start.server of a
+// stopped server just before its server starts, destroys the instance
+// meanwhile, and proves the destroy waits for the start, the start answers 404,
+// no server is left running and the instance directory is gone.
+func TestStartRacedByDestroyAnswersNotFound(t *testing.T) {
+	// Cleanups run in reverse: the stalled start is released, the service
+	// closes, the request goroutines return, and only then is the hook reset,
+	// when nothing can read it any more.
+	t.Cleanup(func() { beforeServerStart = nil })
+
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+
+	svc := startTestService(t)
+
+	stalled := make(chan struct{})
+	release := make(chan struct{})
+	var stallOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{}, &created)
+	name := created.Servers[0].Name
+	port := created.Servers[0].Port
+
+	svc.mu.Lock()
+	dir := svc.instances[created.ID].RootDir
+	svc.mu.Unlock()
+
+	node := svc.findServerByName(name).backendNode.(*inProcessNode)
+	nodeTorn := func() bool {
+		node.mu.Lock()
+		defer node.mu.Unlock()
+
+		return node.torn
+	}
+
+	mustRequest(t, svc.nc, "tester.stop.server", api.StopServerRequest{Name: name}, nil)
+
+	beforeServerStart = func(*server.Options) {
+		stallOnce.Do(func() { close(stalled) })
+		<-release
+	}
+
+	type reply struct {
+		msg *nats.Msg
+		err error
+	}
+	request := func(subject string, req any) <-chan reply {
+		payload, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", subject, err)
+		}
+
+		replies := make(chan reply, 1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			msg, err := svc.nc.Request(subject, payload, 30*time.Second)
+			replies <- reply{msg: msg, err: err}
+		}()
+
+		return replies
+	}
+	await := func(subject string, replies <-chan reply) *nats.Msg {
+		select {
+		case r := <-replies:
+			if r.err != nil {
+				t.Fatalf("request %s: %v", subject, r.err)
+			}
+			return r.msg
+		case <-time.After(40 * time.Second):
+			t.Fatalf("request %s never returned", subject)
+			return nil
+		}
+	}
+
+	starts := request("tester.start.server", api.StartServerRequest{Name: name})
+
+	select {
+	case <-stalled:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the start never reached its server start")
+	}
+
+	destroys := request("tester.destroy", api.DestroyRequest{InstanceID: created.ID})
+
+	// The destroy marks the node torn, then waits for the stalled start.
+	deadline := time.Now().Add(30 * time.Second)
+	for !nodeTorn() {
+		if time.Now().After(deadline) {
+			t.Fatal("the destroy never marked the node torn")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	select {
+	case <-destroys:
+		t.Fatal("the destroy answered while the start was in flight")
+	default:
+	}
+
+	unblock()
+
+	msg := await("tester.start.server", starts)
+	code := msg.Header.Get("Nats-Service-Error-Code")
+	desc := msg.Header.Get("Nats-Service-Error")
+	if code != "404" {
+		t.Errorf("start answered %q %q, want 404", code, desc)
+	}
+
+	msg = await("tester.destroy", destroys)
+	if e := msg.Header.Get("Nats-Service-Error"); e != "" {
+		t.Fatalf("destroy failed: %s", e)
+	}
+	var destroyed api.DestroyResponse
+	err := json.Unmarshal(msg.Data, &destroyed)
+	if err != nil {
+		t.Fatalf("unmarshal destroy response: %v", err)
+	}
+	if !destroyed.Destroyed {
+		t.Error("destroy reported nothing destroyed")
+	}
+
+	if !portBindable(port) {
+		t.Errorf("a server still listens on %d", port)
+	}
+	_, err = os.Stat(dir)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("instance dir %s left behind (stat err %v)", dir, err)
 	}
 }
 

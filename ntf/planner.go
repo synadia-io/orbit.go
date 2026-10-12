@@ -176,14 +176,10 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 		n.Persistent = []string{storeDir}
 		td := planTemplateData(plan, n, spec, filepath.Join(place.InstanceDir(), n.Dir), storeDir)
 
-		// 6. The node's snippets.
+		// 6. The node's managed TLS snippet.
 		if tlsFiles != nil {
 			n.TLS = tlsFiles
-			n.Files = append(n.Files, backend.File{
-				Path: filepath.Join(n.Dir, "snippets", "_tls_managed.conf"),
-				Data: renderTLSSnippet(tlsFiles),
-				Mode: 0600,
-			})
+			n.Files = append(n.Files, managedTLSFile(n))
 			td.TLSInclude = filepath.Join("snippets", "_tls_managed.conf")
 			td.TLS = &templateTLS{
 				CAFile:   tlsFiles.caPath,
@@ -192,18 +188,11 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 			}
 		}
 
-		snippets, err := renderSnippets(td, spec.Snippets, filepath.Join(n.Dir, "snippets"))
+		// 7. The node's snippets and config.
+		err = renderNode(n, td, spec.Snippets, spec.MainTemplate)
 		if err != nil {
-			return fail(planErrSnippet, err)
+			return nil, err
 		}
-		n.Files = append(n.Files, snippets...)
-
-		// 7. The node's config.
-		n.Config, err = renderConfig(td, spec.MainTemplate)
-		if err != nil {
-			return fail(planErrTemplate, err)
-		}
-		n.TemplateData = td
 	}
 
 	// 8. The node the capture proxy fronts.
@@ -212,6 +201,70 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 	}
 
 	return plan, nil
+}
+
+// planRevision returns the next revision of node n, as an update renders it:
+// the same identity, listeners, version and persistent paths, the caller's
+// snippets rendered against a copy of n's template data in place of its own,
+// and a config rendered from mainTemplate. When tlsTimeout is given, the
+// revision's managed TLS settings take that timeout and it carries the managed
+// TLS snippet as well; n must then have managed TLS settings. n is left as it
+// is.
+//
+// The revision carries only the files it renders. A failure is a *planError of
+// kind planErrSnippet or planErrTemplate.
+func planRevision(n *nodePlan, snippets map[string]string, mainTemplate string, tlsTimeout *float64) (*nodePlan, error) {
+	next := &nodePlan{NodePlan: n.NodePlan, TLS: n.TLS}
+	next.Files = nil
+	next.Config = nil
+
+	// The TLS settings are shared by every node of the instance, so a new
+	// timeout goes into a copy.
+	if tlsTimeout != nil {
+		cow := *n.TLS
+		cow.timeoutSeconds = *tlsTimeout
+		next.TLS = &cow
+	}
+
+	err := renderNode(next, cloneTemplateData(n.TemplateData), snippets, mainTemplate)
+	if err != nil {
+		return nil, err
+	}
+
+	if tlsTimeout != nil {
+		next.Files = append(next.Files, managedTLSFile(next))
+	}
+
+	return next, nil
+}
+
+// renderNode renders the caller's snippets against td into files appended to
+// n.Files, then n.Config from mainTemplate, and keeps td on n as the template
+// data the config was rendered with. A failure is a *planError of kind
+// planErrSnippet or planErrTemplate.
+func renderNode(n *nodePlan, td *templateData, snippets map[string]string, mainTemplate string) error {
+	files, err := renderSnippets(td, snippets, filepath.Join(n.Dir, "snippets"))
+	if err != nil {
+		return &planError{Kind: planErrSnippet, Err: err}
+	}
+	n.Files = append(n.Files, files...)
+
+	n.Config, err = renderConfig(td, mainTemplate)
+	if err != nil {
+		return &planError{Kind: planErrTemplate, Err: err}
+	}
+	n.TemplateData = td
+
+	return nil
+}
+
+// managedTLSFile returns node n's managed TLS snippet, rendered from n.TLS.
+func managedTLSFile(n *nodePlan) backend.File {
+	return backend.File{
+		Path: filepath.Join(n.Dir, "snippets", "_tls_managed.conf"),
+		Data: renderTLSSnippet(n.TLS),
+		Mode: 0600,
+	}
 }
 
 // planTLS generates the instance's TLS material with the SANs spec asks for and
