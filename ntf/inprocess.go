@@ -15,7 +15,9 @@ package ntf
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -63,6 +65,10 @@ func (e *inProcessError) Unwrap() error {
 // errInstanceNotFound is the failure of a placement or provision of an
 // instance a destroy or reset has removed.
 var errInstanceNotFound = &inProcessError{Code: "404", Message: "Instance not found"}
+
+// errNodeTornDown is the failure of a call on a node after Teardown of its
+// instance.
+var errNodeTornDown = errors.New("node torn down")
 
 // inProcessBackend runs managed servers in the service's own process. It
 // closes over the Service: ports come from its port range through reservePort
@@ -218,7 +224,7 @@ func (b *inProcessBackend) Provision(_ context.Context, plan *backend.InstancePl
 			return fail(&inProcessError{Code: "003", Message: fmt.Sprintf("Server creation failed: %v", err), Err: err})
 		}
 
-		node := &inProcessNode{name: n.Name, addrs: b.addresses(n, srv), cfgPath: cfgPath, srv: srv}
+		node := &inProcessNode{name: n.Name, addrs: b.addresses(n, srv), cfgPath: cfgPath, log: b.svc.log, srv: srv}
 
 		b.mu.Lock()
 		torn = rec.torn
@@ -341,10 +347,16 @@ func (b *inProcessBackend) Teardown(_ context.Context, instanceID string) error 
 	return nil
 }
 
-// stopNodes shuts down the server of each of nodes.
+// stopNodes marks each of nodes torn and shuts its server down. A Start of a
+// node that swaps in its server before the node is marked torn has it shut down
+// here, and one that would swap it in afterwards shuts it down itself.
 func (b *inProcessBackend) stopNodes(nodes []*inProcessNode) {
 	for _, n := range nodes {
-		srv := n.server()
+		n.mu.Lock()
+		n.torn = true
+		srv := n.srv
+		n.mu.Unlock()
+
 		srv.Shutdown()
 		srv.WaitForShutdown()
 		b.svc.log.Info("Stopped server", "server", srv.Name())
@@ -467,10 +479,17 @@ type inProcessNode struct {
 	name    string
 	addrs   []backend.Address
 	cfgPath string
+	log     *slog.Logger
 
-	// mu guards srv only, so reading it never waits behind a start or stop.
+	// mu guards srv and torn only, and is held only to read or swap them, so
+	// Status never waits behind a start or stop.
 	mu  sync.Mutex
 	srv *server.Server
+
+	// torn is set by stopNodes, from Teardown of the node's instance or a
+	// failed Provision. Every method that returns an error then fails with
+	// errNodeTornDown.
+	torn bool
 }
 
 // Name returns the node's plan name.
@@ -483,24 +502,94 @@ func (n *inProcessNode) Addresses() []backend.Address {
 	return n.addrs
 }
 
-// Status is not supported yet.
+// Status reads the node's state from its live server. A stopped server still
+// answers its name and cluster, and has no cluster listener.
 func (n *inProcessNode) Status(context.Context) (backend.NodeStatus, error) {
-	return backend.NodeStatus{}, backend.ErrUnsupported
+	n.mu.Lock()
+	srv, torn := n.srv, n.torn
+	n.mu.Unlock()
+
+	if torn {
+		return backend.NodeStatus{}, errNodeTornDown
+	}
+
+	st := backend.NodeStatus{
+		ServerName: srv.Name(),
+		Cluster:    srv.ClusterName(),
+		Running:    srv.Running(),
+		Version:    server.VERSION,
+	}
+
+	addr := srv.ClusterAddr()
+	if addr != nil {
+		st.ClusterPort = addr.Port
+	}
+
+	return st, nil
 }
 
-// Start is not supported yet.
+// Start starts a new server from the node's config and swaps it in for the
+// stopped one, since a server cannot be restarted in place after a shutdown.
+// When Teardown marked the node torn while the server was starting, it shuts
+// that server down and fails.
 func (n *inProcessNode) Start(context.Context) error {
-	return backend.ErrUnsupported
+	n.mu.Lock()
+	torn := n.torn
+	n.mu.Unlock()
+
+	if torn {
+		return errNodeTornDown
+	}
+
+	srv, err := startFromConfig(n.log, n.cfgPath)
+	if err != nil {
+		return err
+	}
+
+	n.mu.Lock()
+	torn = n.torn
+	if !torn {
+		n.srv = srv
+	}
+	n.mu.Unlock()
+
+	// Teardown has stopped the server the node held and will not see this one.
+	if torn {
+		srv.Shutdown()
+		srv.WaitForShutdown()
+		return errNodeTornDown
+	}
+
+	return nil
 }
 
-// Stop is not supported yet.
+// Stop shuts the node's server down and waits for it to finish.
 func (n *inProcessNode) Stop(context.Context) error {
-	return backend.ErrUnsupported
+	n.mu.Lock()
+	srv, torn := n.srv, n.torn
+	n.mu.Unlock()
+
+	if torn {
+		return errNodeTornDown
+	}
+
+	srv.Shutdown()
+	srv.WaitForShutdown()
+
+	return nil
 }
 
-// Reload is not supported yet.
+// Reload makes the node's server read its config again.
 func (n *inProcessNode) Reload(context.Context) error {
-	return backend.ErrUnsupported
+	n.mu.Lock()
+	srv, torn := n.srv, n.torn
+	n.mu.Unlock()
+
+	if torn {
+		return errNodeTornDown
+	}
+
+	return srv.Reload()
 }
 
 // Apply is not supported yet.
@@ -522,25 +611,6 @@ func (n *inProcessNode) Pause(context.Context) error {
 // Resume is not supported.
 func (n *inProcessNode) Resume(context.Context) error {
 	return backend.ErrUnsupported
-}
-
-// server returns the node's live server, nil for a nil node.
-func (n *inProcessNode) server() *server.Server {
-	if n == nil {
-		return nil
-	}
-
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	return n.srv
-}
-
-// setServer replaces the node's live server, after a start.
-func (n *inProcessNode) setServer(srv *server.Server) {
-	n.mu.Lock()
-	n.srv = srv
-	n.mu.Unlock()
 }
 
 // configPath returns the path of the node's config, empty for a nil node.

@@ -563,14 +563,16 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 
 		servers = append(servers, ms)
 
-		srv := ms.inProcess().server()
+		// A node a concurrent teardown has stopped fails its status, and shows
+		// as not running.
+		st, err := node.Status(ctx)
 		resp.Servers = append(resp.Servers, &api.ManagedServer{
 			Name:      n.Name,
 			Port:      client.External.Port,
 			Ports:     ports,
 			Cluster:   n.Cluster,
 			Advertise: spec.AdvertiseHost,
-			Running:   srv != nil && srv.Running(),
+			Running:   err == nil && st.Running,
 		})
 	}
 
@@ -881,21 +883,29 @@ func (s *Service) stopServer(req micro.Request) {
 		return
 	}
 
-	// Hold cfgMu so a concurrent start cannot replace the node's server while it
-	// is read and shut down here: startServer holds cfgMu across its swap.
+	// Hold cfgMu so a concurrent start cannot start the node while it is checked
+	// and stopped here: startServer holds cfgMu across its start.
 	ms.cfgMu.Lock()
 	defer ms.cfgMu.Unlock()
 
-	srv := ms.inProcess().server()
+	ctx := context.Background()
 
-	if !srv.Running() {
+	// A node whose instance a concurrent destroy tore down fails its status,
+	// and is not running.
+	st, err := ms.backendNode.Status(ctx)
+	if err != nil || !st.Running {
 		req.Error("003", "Server not running", nil)
 		return
 	}
 
-	srv.Shutdown()
-	srv.WaitForShutdown()
-	if srv.Running() {
+	err = ms.backendNode.Stop(ctx)
+	if err != nil {
+		req.Error("004", "Server did not shut down", nil)
+		return
+	}
+
+	st, err = ms.backendNode.Status(ctx)
+	if err == nil && st.Running {
 		req.Error("004", "Server did not shut down", nil)
 		return
 	}
@@ -925,46 +935,50 @@ func (s *Service) startServer(req micro.Request) {
 	}
 
 	// Hold cfgMu across the whole start: it keeps a concurrent start from
-	// replacing the node's server underneath the running check, keeps two
-	// callers from both passing that check and starting the same server twice,
-	// and keeps a concurrent update from being mid-write when ProcessConfigFile
-	// reads the config path.
+	// starting the node underneath the running check, keeps two callers from
+	// both passing that check and starting the same server twice, and keeps a
+	// concurrent update from being mid-write when the start reads the config
+	// path.
 	ms.cfgMu.Lock()
 	defer ms.cfgMu.Unlock()
 
-	node := ms.inProcess()
+	ctx := context.Background()
+	node := ms.backendNode
 
-	if node.server().Running() {
+	st, err := node.Status(ctx)
+	if err == nil && st.Running {
 		req.Error("003", "Server already running", nil)
 		return
 	}
 
-	if node.configPath() == "" {
+	if ms.inProcess().configPath() == "" {
 		req.Error("005", "Server cannot be restarted: no persisted config", nil)
 		return
 	}
 
-	srv, err := startFromConfig(s.log, node.configPath())
-	if err != nil {
-		req.Error("005", fmt.Sprintf("Server restart failed: %v", err), nil)
-		return
-	}
+	err = node.Start(ctx)
 
 	// A concurrent destroy or reset may have removed the instance while this
-	// server was starting. Its teardown has already shut down the old server and
-	// will never see this one, so shut it down here rather than leave it holding
-	// its port for the life of the process.
+	// node was starting. A start its teardown refused fails, and one that
+	// finished first is stopped here, rather than left holding its port for the
+	// life of the process.
 	s.mu.Lock()
 	_, alive := s.instances[ms.instanceID]
-	if alive {
-		node.setServer(srv)
-	}
 	s.mu.Unlock()
 
 	if !alive {
-		srv.Shutdown()
-		srv.WaitForShutdown()
+		if err == nil {
+			serr := node.Stop(ctx)
+			if serr != nil {
+				s.log.Warn("Could not stop server of a destroyed instance", "server", creq.Name, "err", serr)
+			}
+		}
 		req.Error("404", "Instance destroyed during start", nil)
+		return
+	}
+
+	if err != nil {
+		req.Error("005", fmt.Sprintf("Server restart failed: %v", err), nil)
 		return
 	}
 
@@ -1004,18 +1018,26 @@ func (s *Service) stopInstance(req micro.Request) {
 		return
 	}
 
+	ctx := context.Background()
+
 	results := make([]api.ServerStateResult, 0, len(servers))
 	for _, ms := range servers {
+		node := ms.backendNode
+
 		ms.cfgMu.Lock()
-		srv := ms.inProcess().server()
-		if srv != nil && srv.Running() {
-			srv.Shutdown()
-			srv.WaitForShutdown()
+		st, err := node.Status(ctx)
+		if err == nil && st.Running {
+			err = node.Stop(ctx)
+			if err != nil {
+				s.log.Warn("Could not stop server", "server", node.Name(), "err", err)
+			}
 		}
-		res := api.ServerStateResult{}
-		if srv != nil {
-			res.Name = srv.Name()
-			res.Running = srv.Running()
+		// The plan name stands in when a destroy tore the node down meanwhile.
+		res := api.ServerStateResult{Name: node.Name()}
+		st, err = node.Status(ctx)
+		if err == nil {
+			res.Name = st.ServerName
+			res.Running = st.Running
 		}
 		ms.cfgMu.Unlock()
 		results = append(results, res)
@@ -1057,59 +1079,68 @@ func (s *Service) startInstance(req micro.Request) {
 		return
 	}
 
+	ctx := context.Background()
+
 	results := make([]api.ServerStateResult, 0, len(servers))
 	for _, ms := range servers {
-		res := api.ServerStateResult{}
+		node := ms.backendNode
+		// The plan name stands in when a destroy tore the node down meanwhile.
+		res := api.ServerStateResult{Name: node.Name()}
 
 		ms.cfgMu.Lock()
-		node := ms.inProcess()
-		current := node.server()
-		if current != nil {
-			res.Name = current.Name()
+		st, err := node.Status(ctx)
+		if err == nil {
+			res.Name = st.ServerName
 		}
 
-		if current != nil && current.Running() {
+		if err == nil && st.Running {
 			res.Running = true
 			ms.cfgMu.Unlock()
 			results = append(results, res)
 			continue
 		}
 
-		if node.configPath() == "" {
+		if ms.inProcess().configPath() == "" {
 			ms.cfgMu.Unlock()
 			res.Error = "no persisted config"
 			results = append(results, res)
 			continue
 		}
 
-		srv, err := startFromConfig(s.log, node.configPath())
-		if err != nil {
+		err = node.Start(ctx)
+
+		// A concurrent destroy may have removed the instance while this node was
+		// starting. A start its teardown refused fails, and one that finished
+		// first is stopped here rather than leaked, and the request stops.
+		s.mu.Lock()
+		_, alive := s.instances[creq.InstanceID]
+		s.mu.Unlock()
+
+		if !alive {
+			if err == nil {
+				serr := node.Stop(ctx)
+				if serr != nil {
+					s.log.Warn("Could not stop server of a destroyed instance", "server", node.Name(), "err", serr)
+				}
+			}
 			ms.cfgMu.Unlock()
+			req.Error("404", "Instance destroyed during start", nil)
+			return
+		}
+
+		ms.cfgMu.Unlock()
+
+		if err != nil {
 			res.Error = err.Error()
 			results = append(results, res)
 			continue
 		}
 
-		// A concurrent destroy may have removed the instance while this node was
-		// starting. If so, shut the freshly-started server down rather than leak
-		// it, and stop.
-		s.mu.Lock()
-		_, alive := s.instances[creq.InstanceID]
-		if alive {
-			node.setServer(srv)
+		st, err = node.Status(ctx)
+		if err == nil {
+			res.Name = st.ServerName
+			res.Running = st.Running
 		}
-		s.mu.Unlock()
-		ms.cfgMu.Unlock()
-
-		if !alive {
-			srv.Shutdown()
-			srv.WaitForShutdown()
-			req.Error("404", "Instance destroyed during start", nil)
-			return
-		}
-
-		res.Name = srv.Name()
-		res.Running = srv.Running()
 		results = append(results, res)
 	}
 
@@ -1269,21 +1300,22 @@ func (s *Service) reloadServer(req micro.Request) {
 	}
 
 	// Hold cfgMu across both the running check and the reload: it keeps a
-	// concurrent start from replacing the node's server underneath them, keeps
-	// the server from stopping between the two, and stops Reload() (which
-	// re-reads the config path) observing a torn file mid-write from a
-	// concurrent update.
+	// concurrent start from starting the node underneath them, keeps the server
+	// from stopping between the two, and stops the reload (which re-reads the
+	// config path) observing a torn file mid-write from a concurrent update.
 	ms.cfgMu.Lock()
 	defer ms.cfgMu.Unlock()
 
-	srv := ms.inProcess().server()
+	ctx := context.Background()
 
-	if !srv.Running() {
+	st, err := ms.backendNode.Status(ctx)
+	if err != nil || !st.Running {
 		req.Error("002", "Server not running", nil)
 		return
 	}
 
-	if err := srv.Reload(); err != nil {
+	err = ms.backendNode.Reload(ctx)
+	if err != nil {
 		req.Error("010", fmt.Sprintf("reload failed: %v", err), nil)
 		return
 	}
@@ -1314,6 +1346,35 @@ func (s *Service) status(req micro.Request) {
 	for _, inst := range picked {
 		snapshots = append(snapshots, snapshotInstance(inst))
 	}
+	s.mu.Unlock()
+
+	// Read each node's status with the lock released. A node that fails it
+	// keeps the plan's name and cluster from the snapshot and shows as not
+	// running.
+	ctx := context.Background()
+	for i := range snapshots {
+		for j := range snapshots[i].servers {
+			ss := &snapshots[i].servers[j]
+
+			st, err := ss.node.Status(ctx)
+			if err != nil {
+				s.log.Warn("Could not read server status", "instance", snapshots[i].id, "server", ss.name, "err", err)
+				continue
+			}
+
+			ss.name = st.ServerName
+			ss.cluster = st.Cluster
+			ss.running = st.Running
+			ss.clusterPort = st.ClusterPort
+		}
+	}
+
+	// Leave out an instance a destroy or reset removed while its nodes were read.
+	s.mu.Lock()
+	snapshots = slices.DeleteFunc(snapshots, func(snap instanceSnapshot) bool {
+		_, ok := s.instances[snap.id]
+		return !ok
+	})
 	s.mu.Unlock()
 
 	if creq.InstanceID != "" && len(snapshots) == 0 {
@@ -1559,9 +1620,9 @@ type instanceSnapshot struct {
 	traceProxy CaptureProxy
 }
 
-// serverSnapshot is a managed server's reportable state, read out while the
-// caller holds s.mu. It holds no *server.Server: startServer and startInstance
-// replace that pointer under s.mu, so reading it afterwards would race them.
+// serverSnapshot is a managed server's reportable state. snapshotInstance reads
+// what the service holds while the caller holds s.mu; the status handler fills
+// in what node.Status reports once the lock is released.
 type serverSnapshot struct {
 	name          string
 	cluster       string
@@ -1570,27 +1631,29 @@ type serverSnapshot struct {
 	advertiseHost string
 	running       bool
 	clusterPort   int // 0 when the server has no cluster listener
+	node          backend.Node
 }
 
-// snapshotInstance reads an instance and its servers into plain values. The
-// caller must hold s.mu.
+// snapshotInstance reads an instance and its servers into plain values, with
+// each server's name and cluster from the instance's plan until its node
+// reports its own. The caller must hold s.mu.
 func snapshotInstance(inst *instance) instanceSnapshot {
 	srvs := make([]serverSnapshot, 0, len(inst.Servers))
 	for _, ms := range inst.Servers {
 		snap := serverSnapshot{
+			name: ms.backendNode.Name(),
 			// clientPort is captured at create time, so it survives a stop; the
 			// route/cluster port is reported separately as clusterPort.
 			clientPort:    ms.clientPort,
 			ports:         maps.Clone(ms.ports),
 			advertiseHost: ms.advertiseHost,
+			node:          ms.backendNode,
 		}
-		srv := ms.inProcess().server()
-		if srv != nil {
-			snap.name = srv.Name()
-			snap.cluster = srv.ClusterName()
-			snap.running = srv.Running()
-			if addr := srv.ClusterAddr(); addr != nil {
-				snap.clusterPort = addr.Port
+		if inst.plan != nil {
+			for _, np := range inst.plan.Nodes {
+				if np.Name == snap.name {
+					snap.cluster = np.Cluster
+				}
 			}
 		}
 		srvs = append(srvs, snap)
@@ -1617,19 +1680,27 @@ func traceProxyOf(servers []*managedServer) CaptureProxy {
 	return nil
 }
 
-// findServerByName scans every instance for a server whose runtime name matches.
-// Server names are made globally unique by the short-id prefix, so the first
-// match is always the right one.
+// findServerByName scans every instance for a server whose runtime name matches,
+// as its node's status reports it. The servers are read under s.mu and their
+// nodes asked with the lock released; a node that fails its status does not
+// match. Server names are made globally unique by the short-id prefix, so the
+// first match is always the right one.
 func (s *Service) findServerByName(name string) *managedServer {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	var servers []*managedServer
 	for _, inst := range s.instances {
-		for _, ms := range inst.Servers {
-			srv := ms.inProcess().server()
-			if srv != nil && srv.Name() == name {
-				return ms
-			}
+		servers = append(servers, inst.Servers...)
+	}
+	s.mu.Unlock()
+
+	ctx := context.Background()
+	for _, ms := range servers {
+		st, err := ms.backendNode.Status(ctx)
+		if err != nil {
+			continue
+		}
+		if st.ServerName == name {
+			return ms
 		}
 	}
 	return nil
@@ -1740,10 +1811,10 @@ func runServerWithConfig(log *slog.Logger, config []byte, rootDir string, listen
 }
 
 // startFromConfig rebuilds and starts a server from a previously-written config
-// file. Used by tester.start.server to bring a stopped server back online; the
-// underlying *server.Server cannot be restarted in place after Shutdown. A
-// server that fails to start is shut down and not retried: its ports are fixed
-// in the config its peers know.
+// file. Used by the in-process node's Start to bring a stopped server back
+// online; the underlying *server.Server cannot be restarted in place after
+// Shutdown. A server that fails to start is shut down and not retried: its
+// ports are fixed in the config its peers know.
 func startFromConfig(log *slog.Logger, configPath string) (*server.Server, error) {
 	opts, err := server.ProcessConfigFile(configPath)
 	if err != nil {

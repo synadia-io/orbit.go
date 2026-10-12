@@ -231,8 +231,7 @@ type managedServer struct {
 }
 
 // inProcess returns the server's node when the in-process backend runs it, or
-// nil. The handlers that still reach the live server or the config path do so
-// through it.
+// nil. The handlers that reach the config path do so through it.
 func (ms *managedServer) inProcess() *inProcessNode {
 	n, _ := ms.backendNode.(*inProcessNode)
 	return n
