@@ -16,19 +16,25 @@ package ntf
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 )
 
 // fakeBackend runs nothing. It records the options its factory was handed and
-// whether it was closed.
+// whether it was closed, and declares the capabilities it was built with.
 type fakeBackend struct {
 	mu     sync.Mutex
 	opts   backend.Options
 	closed bool
+
+	// capabilities is what Capabilities returns. It is set before the backend
+	// is registered and never changed.
+	capabilities []backend.Capability
 }
 
 // factory returns a backend.Factory that records its options on b and hands b
@@ -43,7 +49,7 @@ func (b *fakeBackend) factory() backend.Factory {
 	}
 }
 
-func (b *fakeBackend) Capabilities() []backend.Capability { return nil }
+func (b *fakeBackend) Capabilities() []backend.Capability { return b.capabilities }
 func (b *fakeBackend) DefaultVersion() string             { return "0.0.0" }
 
 func (b *fakeBackend) Placement(context.Context, string) (backend.Placement, error) {
@@ -152,5 +158,34 @@ func TestCloseClosesBackend(t *testing.T) {
 
 	if !closed {
 		t.Error("Close did not close the backend")
+	}
+}
+
+// TestStatusReportsBackendCapabilities proves status reports the name the
+// selected backend was registered under and the capabilities it declares, in
+// its order. The fake backend cannot create an instance, so the test registers
+// one with no servers the way create does before placement.
+func TestStatusReportsBackendCapabilities(t *testing.T) {
+	fake := &fakeBackend{capabilities: []backend.Capability{backend.CapabilityVersionChange, backend.CapabilityKill}}
+	svc := startTestService(t, func(o *Options) {
+		o.Backends = map[string]backend.Factory{"fake": fake.factory()}
+		o.Backend = "fake"
+	})
+
+	inst := svc.newInstance("server", "")
+
+	var status api.StatusResponse
+	mustRequest(t, svc.nc, "tester.status", api.StatusRequest{InstanceID: inst.ID}, &status)
+	if len(status.Instances) != 1 {
+		t.Fatalf("status returned %d instances, want 1", len(status.Instances))
+	}
+
+	got := status.Instances[0]
+	if got.Backend != "fake" {
+		t.Errorf("backend = %q, want fake", got.Backend)
+	}
+	want := []string{"version-change", "kill"}
+	if !reflect.DeepEqual(got.Capabilities, want) {
+		t.Errorf("capabilities = %v, want %v", got.Capabilities, want)
 	}
 }

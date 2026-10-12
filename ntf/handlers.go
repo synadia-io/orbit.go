@@ -1352,6 +1352,7 @@ func (s *Service) status(req micro.Request) {
 			ss.cluster = st.Cluster
 			ss.running = st.Running
 			ss.clusterPort = st.ClusterPort
+			ss.version = st.Version
 		}
 	}
 
@@ -1368,13 +1369,22 @@ func (s *Service) status(req micro.Request) {
 		return
 	}
 
+	// One backend runs every instance, so each reports its name and the
+	// capabilities it declares, in its order.
+	var capabilities []string
+	for _, c := range s.backend.Capabilities() {
+		capabilities = append(capabilities, string(c))
+	}
+
 	resp := api.StatusResponse{Instances: make([]api.InstanceStatus, 0, len(snapshots))}
 	for _, snap := range snapshots {
 		ist := api.InstanceStatus{
-			ID:          snap.id,
-			Description: snap.description,
-			Kind:        snap.kind,
-			Servers:     make([]api.ManagedServer, 0, len(snap.servers)),
+			ID:           snap.id,
+			Description:  snap.description,
+			Kind:         snap.kind,
+			Servers:      make([]api.ManagedServer, 0, len(snap.servers)),
+			Backend:      s.backendName,
+			Capabilities: capabilities,
 		}
 		for _, ms := range snap.servers {
 			// Port is the client port; the route/cluster port is exposed under
@@ -1393,6 +1403,7 @@ func (s *Service) status(req micro.Request) {
 				Ports:     ports,
 				Advertise: ms.advertiseHost,
 				Running:   ms.running,
+				Version:   ms.version,
 			})
 		}
 		ist.ShapingSets = s.shapingSetIDs(snap.id, snap.traceProxy)
@@ -1616,7 +1627,8 @@ type serverSnapshot struct {
 	ports         map[string]int
 	advertiseHost string
 	running       bool
-	clusterPort   int // 0 when the server has no cluster listener
+	clusterPort   int    // 0 when the server has no cluster listener
+	version       string // empty when node.Status failed
 	node          backend.Node
 }
 

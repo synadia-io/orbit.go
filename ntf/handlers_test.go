@@ -894,6 +894,35 @@ func TestStatusReportsClientPort(t *testing.T) {
 	}
 }
 
+// TestStatusReportsBackend proves status reports, per instance, the in-process
+// backend's name and its empty capabilities, and per server the version the
+// node runs.
+func TestStatusReportsBackend(t *testing.T) {
+	ms := startTestService(t)
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 3}, &created)
+
+	var status api.StatusResponse
+	mustRequest(t, ms.nc, "tester.status", api.StatusRequest{InstanceID: created.ID}, &status)
+	if len(status.Instances) != 1 || len(status.Instances[0].Servers) != 3 {
+		t.Fatalf("unexpected status shape: %+v", status)
+	}
+
+	inst := status.Instances[0]
+	if inst.Backend != inProcessBackendName {
+		t.Errorf("backend = %q, want %q", inst.Backend, inProcessBackendName)
+	}
+	if len(inst.Capabilities) != 0 {
+		t.Errorf("capabilities = %v, want none", inst.Capabilities)
+	}
+	for _, srv := range inst.Servers {
+		if srv.Version != server.VERSION {
+			t.Errorf("server %q version = %q, want %q", srv.Name, srv.Version, server.VERSION)
+		}
+	}
+}
+
 // TestStopStartInstance covers the instance-level lifecycle: a stop shuts every
 // node down while keeping the persisted client port queryable, and a start revives
 // them. Both are idempotent.

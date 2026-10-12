@@ -164,6 +164,8 @@ type Service struct {
 
 	// backend runs the managed servers of every instance.
 	backend backend.Backend
+	// backendName is the name backend was registered under. Status reports it.
+	backendName string
 
 	mu        sync.Mutex
 	instances map[string]*instance
@@ -305,6 +307,7 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		return fail(fmt.Errorf("could not create the %q backend: %w", backendName, err))
 	}
 	s.backend = be
+	s.backendName = backendName
 	unwind = append(unwind, func() { be.Close() })
 
 	switch {
