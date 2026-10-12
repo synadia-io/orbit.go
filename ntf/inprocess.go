@@ -79,6 +79,10 @@ var errNoPersistedConfig = errors.New("no persisted config")
 // changes the node's identity.
 var errIdentityChange = errors.New("revision changes the node's identity")
 
+// errPathOutsideNode is the cause of an Apply refused because a file of the
+// revision does not lie in the node's directory.
+var errPathOutsideNode = errors.New("file path outside the node's directory")
+
 // inProcessBackend runs managed servers in the service's own process. It
 // closes over the Service: ports come from its port range through reservePort
 // and are recorded on the service's instance, and directories live under its
@@ -558,6 +562,22 @@ func identityChange(cur, next *backend.NodePlan) string {
 	}
 }
 
+// pathInDir reports whether path, relative to the instance directory, is local
+// and, once cleaned, is dir itself or lies under it. A sibling sharing dir's
+// prefix, such as n1x for n1, is not under it.
+func pathInDir(dir, path string) bool {
+	if !filepath.IsLocal(path) {
+		return false
+	}
+
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+
+	return filepath.IsLocal(rel)
+}
+
 // Name returns the node's plan name.
 func (n *inProcessNode) Name() string {
 	return n.name
@@ -681,10 +701,11 @@ func (n *inProcessNode) Reload(context.Context) error {
 //
 // It refuses a revision that changes the node's name, directory, cluster,
 // listeners or persistent paths with an error wrapping errIdentityChange that
-// names the field, and one that changes the version with
-// backend.ErrUnsupported, since the backend does not declare
-// CapabilityVersionChange. A failed write is an *inProcessError carrying 009
-// and the message an update answers it with.
+// names the field, one with a file outside the node's Dir with an error
+// wrapping errPathOutsideNode that names the path, and one that changes the
+// version with backend.ErrUnsupported, since the backend does not declare
+// CapabilityVersionChange. A refused revision writes nothing. A failed write is
+// an *inProcessError carrying 009 and the message an update answers it with.
 func (n *inProcessNode) Apply(_ context.Context, plan *backend.NodePlan) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -696,6 +717,12 @@ func (n *inProcessNode) Apply(_ context.Context, plan *backend.NodePlan) error {
 	field := identityChange(&n.identity, plan)
 	if field != "" {
 		return fmt.Errorf("%w: %s differs", errIdentityChange, field)
+	}
+
+	for _, f := range plan.Files {
+		if !pathInDir(plan.Dir, f.Path) {
+			return fmt.Errorf("%w: %s", errPathOutsideNode, f.Path)
+		}
 	}
 
 	if plan.Version != n.identity.Version {

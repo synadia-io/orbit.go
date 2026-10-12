@@ -320,6 +320,78 @@ func TestInProcessApplyWritesConfigAndKeepsFiles(t *testing.T) {
 	}
 }
 
+// TestInProcessApplyRefusesPathOutsideNode proves Apply refuses a revision with
+// a file outside the node's directory, naming the path, and writes nothing: the
+// config and an existing file are unchanged, and neither the revision's valid
+// file nor the refused one appears.
+func TestInProcessApplyRefusesPathOutsideNode(t *testing.T) {
+	const top = "# top as created\n"
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"escapes the instance", filepath.Join("..", "x")},
+		{"absolute", filepath.Join(t.TempDir(), "x")},
+		{"another node", filepath.Join("n2", "snippets", "x.conf")},
+		{"sibling prefix", filepath.Join("n1x", "snippets", "x.conf")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, node := provisionServer(t, map[string]string{"top": top})
+
+			cfgBefore, err := os.ReadFile(node.cfgPath)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+
+			rev := *plan.Nodes[0]
+			rev.Config = []byte("# the revised config\n")
+			valid := filepath.Join(rev.Dir, "snippets", "accounts.conf")
+			rev.Files = []backend.File{
+				{Path: valid, Data: []byte("# accounts\n"), Mode: 0600},
+				{Path: tt.path, Data: []byte("# outside\n"), Mode: 0600},
+			}
+
+			err = node.Apply(t.Context(), &rev)
+			if !errors.Is(err, errPathOutsideNode) {
+				t.Fatalf("Apply = %v, want a path outside the node", err)
+			}
+			if !strings.Contains(err.Error(), tt.path) {
+				t.Errorf("error %q does not name %s", err, tt.path)
+			}
+
+			cfg, err := os.ReadFile(node.cfgPath)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+			if string(cfg) != string(cfgBefore) {
+				t.Errorf("config = %q, want it unchanged %q", cfg, cfgBefore)
+			}
+
+			kept, err := os.ReadFile(filepath.Join(node.instDir, rev.Dir, "snippets", "top.conf"))
+			if err != nil {
+				t.Fatalf("read existing file: %v", err)
+			}
+			if string(kept) != top {
+				t.Errorf("existing file = %q, want %q", kept, top)
+			}
+
+			absent := []string{filepath.Join(node.instDir, valid), filepath.Join(node.instDir, tt.path)}
+			if filepath.IsAbs(tt.path) {
+				absent = append(absent, tt.path)
+			}
+			for _, path := range absent {
+				_, err := os.Stat(path)
+				if !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("%s exists after a refused Apply: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
 // TestStartRacedByDestroyAnswersNotFound stalls a tester.start.server of a
 // stopped server just before its server starts, destroys the instance
 // meanwhile, and proves the destroy waits for the start, the start answers 404,
