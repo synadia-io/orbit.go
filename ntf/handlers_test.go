@@ -55,11 +55,11 @@ func TestPlanInstanceTemplateDataAdvertiseHost(t *testing.T) {
 				AdvertiseHost: tt.advertiseHost,
 			}
 
-			plan, err := planInstance(spec, id, newFakePlacement(id))
+			plan, err := planInstance(spec, id, newFakePlacement(id), server.VERSION)
 			if err != nil {
 				t.Fatalf("planInstance: %v", err)
 			}
-			td := plan.Nodes[0].TemplateData
+			td := plan.nodes[0].TemplateData
 
 			if td.AdvertiseHost != tt.advertiseHost {
 				t.Fatalf("AdvertiseHost: got %q, want %q", td.AdvertiseHost, tt.advertiseHost)

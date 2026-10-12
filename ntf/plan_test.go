@@ -47,28 +47,33 @@ func TestInProcessPlacementListenerAddress(t *testing.T) {
 	names := []string{"client", "cluster", "websocket"}
 	var ports []int
 	for _, name := range names {
-		l, ln, err := p.listenerAddress(shortID(inst.ID)+"-n1", name)
+		node := shortID(inst.ID) + "-n1"
+		l, err := p.ListenerAddress(node, name)
 		if err != nil {
-			t.Fatalf("listenerAddress %s: %v", name, err)
+			t.Fatalf("ListenerAddress %s: %v", name, err)
+		}
+		ln := p.takeHeld(node, name)
+		if ln == nil {
+			t.Fatalf("listener %s is not held", name)
 		}
 		defer ln.Close()
 
 		if l.Name != name {
 			t.Errorf("listener name = %q, want %q", l.Name, name)
 		}
-		if l.Host != "localhost" {
-			t.Errorf("listener %s host = %q, want localhost", name, l.Host)
+		if l.Endpoint.Host != "localhost" {
+			t.Errorf("listener %s host = %q, want localhost", name, l.Endpoint.Host)
 		}
-		if l.Port < r.Low || l.Port > r.High {
-			t.Errorf("listener %s port %d outside range %d-%d", name, l.Port, r.Low, r.High)
+		if l.Endpoint.Port < r.Low || l.Endpoint.Port > r.High {
+			t.Errorf("listener %s port %d outside range %d-%d", name, l.Endpoint.Port, r.Low, r.High)
 		}
-		if ln.Addr().(*net.TCPAddr).Port != l.Port {
-			t.Errorf("listener %s held on port %d, want %d", name, ln.Addr().(*net.TCPAddr).Port, l.Port)
+		if ln.Addr().(*net.TCPAddr).Port != l.Endpoint.Port {
+			t.Errorf("listener %s held on port %d, want %d", name, ln.Addr().(*net.TCPAddr).Port, l.Endpoint.Port)
 		}
-		if slices.Contains(ports, l.Port) {
-			t.Errorf("listener %s port %d handed out twice", name, l.Port)
+		if slices.Contains(ports, l.Endpoint.Port) {
+			t.Errorf("listener %s port %d handed out twice", name, l.Endpoint.Port)
 		}
-		ports = append(ports, l.Port)
+		ports = append(ports, l.Endpoint.Port)
 	}
 
 	s.mu.Lock()
@@ -88,38 +93,39 @@ func TestInProcessPlacementReleasesOnTeardown(t *testing.T) {
 	inst := s.newInstance("server", "")
 	p := s.newInProcessPlacement(inst)
 
-	l, ln, err := p.listenerAddress(shortID(inst.ID)+"-n1", "client")
+	node := shortID(inst.ID) + "-n1"
+	l, err := p.ListenerAddress(node, "client")
 	if err != nil {
-		t.Fatalf("listenerAddress: %v", err)
+		t.Fatalf("ListenerAddress: %v", err)
 	}
-	ln.Close()
+	p.takeHeld(node, "client").Close()
 
 	s.dropInstance(inst.ID)
 
 	if inst.ports != nil {
 		t.Errorf("instance ports = %v after teardown, want none", inst.ports)
 	}
-	if !portFree(s.ports, l.Port) {
-		t.Errorf("port %d still in use after teardown", l.Port)
+	if !portFree(s.ports, l.Endpoint.Port) {
+		t.Errorf("port %d still in use after teardown", l.Endpoint.Port)
 	}
 
-	late, ln, err := p.listenerAddress(shortID(inst.ID)+"-n1", "cluster")
+	late, err := p.ListenerAddress(node, "cluster")
 	if err != nil {
-		t.Fatalf("listenerAddress after teardown: %v", err)
+		t.Fatalf("ListenerAddress after teardown: %v", err)
 	}
-	ln.Close()
+	p.takeHeld(node, "cluster").Close()
 
 	if inst.ports != nil {
 		t.Errorf("instance ports = %v after a late reservation, want none", inst.ports)
 	}
-	if !portFree(s.ports, late.Port) {
-		t.Errorf("port %d reserved after teardown was not given back", late.Port)
+	if !portFree(s.ports, late.Endpoint.Port) {
+		t.Errorf("port %d reserved after teardown was not given back", late.Endpoint.Port)
 	}
 }
 
 // TestInProcessPlacementDirectories proves the in-process placement returns
 // today's directory layout: <Dir>/<id> for the instance, and n<i> or c<c>_s<i>
-// under it for a node.
+// under it as a node's store directory, which is the node's directory.
 func TestInProcessPlacementDirectories(t *testing.T) {
 	s := placementService(t, freeRange(t, 1))
 	inst := s.newInstance("super-cluster", "")
@@ -127,8 +133,8 @@ func TestInProcessPlacementDirectories(t *testing.T) {
 	short := shortID(inst.ID)
 	root := filepath.Join(s.Dir(), inst.ID)
 
-	if p.instanceDir() != root {
-		t.Errorf("instanceDir = %q, want %q", p.instanceDir(), root)
+	if p.InstanceDir() != root {
+		t.Errorf("InstanceDir = %q, want %q", p.InstanceDir(), root)
 	}
 
 	cases := map[string]string{
@@ -138,9 +144,9 @@ func TestInProcessPlacementDirectories(t *testing.T) {
 		short + "-c2_s3": filepath.Join(root, "c2_s3"),
 	}
 	for node, want := range cases {
-		got := p.nodeDir(node)
+		got := p.StoreDir(node)
 		if got != want {
-			t.Errorf("nodeDir(%q) = %q, want %q", node, got, want)
+			t.Errorf("StoreDir(%q) = %q, want %q", node, got, want)
 		}
 	}
 }

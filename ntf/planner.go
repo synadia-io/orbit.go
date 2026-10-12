@@ -18,13 +18,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"text/template"
 
 	"github.com/synadia-io/orbit.go/ntf/api"
+	"github.com/synadia-io/orbit.go/ntf/backend"
 )
 
 // planErrorKind is the kind of failure planning an instance hit. The create
@@ -90,24 +90,28 @@ func (e *planError) Unwrap() error {
 }
 
 // planInstance turns spec into the plan of the instance id, asking place for
-// every listener address and directory. It renders every file in memory: it
-// writes nothing and starts nothing.
+// every listener address and directory, and gives every node the server
+// version version. It renders every file in memory: it writes nothing and
+// starts nothing.
 //
-// The node listeners place hands back stay held on the plan's nodes. When
-// planning fails part way, every one of them is closed and the error is a
-// *planError naming the kind of failure, apart from an unknown spec.Kind.
-func planInstance(spec instanceSpec, id string, place placement) (*instancePlan, error) {
+// When place is a portHolder, the listeners holding the ports it hands out
+// stay held on the plan's nodes. When planning fails part way, every one of
+// them is closed and the error is a *planError naming the kind of failure,
+// apart from an unknown spec.Kind.
+func planInstance(spec instanceSpec, id string, place backend.Placement, version string) (*instancePlan, error) {
 	short := shortID(id)
 
 	plan := &instancePlan{
-		ID:          id,
-		ShortID:     short,
-		Kind:        spec.Kind,
-		Description: spec.Description,
+		InstancePlan: backend.InstancePlan{
+			ID:          id,
+			ShortID:     short,
+			Kind:        spec.Kind,
+			Description: spec.Description,
+		},
 	}
 
 	fail := func(kind planErrorKind, err error) (*instancePlan, error) {
-		for _, n := range plan.Nodes {
+		for _, n := range plan.nodes {
 			closeListeners(n.Held)
 		}
 		return nil, &planError{Kind: kind, Err: err}
@@ -117,30 +121,32 @@ func planInstance(spec instanceSpec, id string, place placement) (*instancePlan,
 	var tlsFiles *tlsInstanceFiles
 	if spec.TLS {
 		var err error
-		tlsFiles, err = planTLS(plan, spec, place.instanceDir())
+		tlsFiles, err = planTLS(plan, spec, place.InstanceDir())
 		if err != nil {
 			return fail(planErrTLSSetup, err)
 		}
 	}
 
-	// 2. The clusters and nodes, in start order. dirs holds each node's
-	// directory name, the prefix of its files' paths.
-	var dirs []string
-	addNode := func(n *nodePlan, dir string) {
-		plan.Nodes = append(plan.Nodes, n)
-		dirs = append(dirs, dir)
+	// 2. The clusters and nodes, in start order. Each node's Dir is its
+	// directory relative to the instance directory, the prefix of its files'
+	// paths.
+	addNode := func(n backend.NodePlan) {
+		n.Version = version
+		wrapped := &nodePlan{NodePlan: n}
+		plan.nodes = append(plan.nodes, wrapped)
+		plan.Nodes = append(plan.Nodes, &wrapped.NodePlan)
 	}
 
 	switch spec.Kind {
 	case "server":
-		addNode(&nodePlan{Name: short + "-n1", ServerIndex: 1}, "n1")
+		addNode(backend.NodePlan{Name: short + "-n1", Dir: "n1", ServerIndex: 1})
 
 	case "cluster":
 		cluster := "C_" + short
 		plan.Clusters = []string{cluster}
 		for i := 1; i <= spec.Servers; i++ {
 			dir := fmt.Sprintf("n%d", i)
-			addNode(&nodePlan{Name: short + "-" + dir, ServerIndex: i, Cluster: cluster}, dir)
+			addNode(backend.NodePlan{Name: short + "-" + dir, Dir: dir, ServerIndex: i, Cluster: cluster})
 		}
 
 	case "super-cluster":
@@ -149,7 +155,7 @@ func planInstance(spec instanceSpec, id string, place placement) (*instancePlan,
 			plan.Clusters = append(plan.Clusters, cluster)
 			for i := 1; i <= spec.Servers; i++ {
 				dir := fmt.Sprintf("c%d_s%d", c, i)
-				addNode(&nodePlan{Name: short + "-" + dir, ServerIndex: i, ClusterIndex: c, Cluster: cluster}, dir)
+				addNode(backend.NodePlan{Name: short + "-" + dir, Dir: dir, ServerIndex: i, ClusterIndex: c, Cluster: cluster})
 			}
 		}
 
@@ -167,15 +173,18 @@ func planInstance(spec instanceSpec, id string, place placement) (*instancePlan,
 	// 4. The links between the nodes.
 	plan.Links = planLinks(plan)
 
-	for i, n := range plan.Nodes {
-		// 5. The node's template data.
-		td := planTemplateData(plan, n, spec, place.nodeDir(n.Name))
+	for _, n := range plan.nodes {
+		// 5. The node's store directory, which survives a revision, and its
+		// template data.
+		storeDir := place.StoreDir(n.Name)
+		n.Persistent = []string{storeDir}
+		td := planTemplateData(plan, n, spec, filepath.Join(place.InstanceDir(), n.Dir), storeDir)
 
 		// 6. The node's snippets.
 		if tlsFiles != nil {
 			n.TLS = tlsFiles
-			n.Files = append(n.Files, file{
-				Path: filepath.Join(dirs[i], "snippets", "_tls_managed.conf"),
+			n.Files = append(n.Files, backend.File{
+				Path: filepath.Join(n.Dir, "snippets", "_tls_managed.conf"),
 				Data: renderTLSSnippet(tlsFiles),
 				Mode: 0600,
 			})
@@ -187,7 +196,7 @@ func planInstance(spec instanceSpec, id string, place placement) (*instancePlan,
 			}
 		}
 
-		snippets, err := renderSnippets(td, spec.Snippets, filepath.Join(dirs[i], "snippets"))
+		snippets, err := renderSnippets(td, spec.Snippets, filepath.Join(n.Dir, "snippets"))
 		if err != nil {
 			return fail(planErrSnippet, err)
 		}
@@ -203,7 +212,7 @@ func planInstance(spec instanceSpec, id string, place placement) (*instancePlan,
 
 	// 8. The node the capture proxy fronts.
 	if spec.Proxy {
-		plan.ProxyNode = plan.Nodes[0].Name
+		plan.ProxyNode = plan.nodes[0].Name
 	}
 
 	return plan, nil
@@ -221,9 +230,9 @@ func planTLS(plan *instancePlan, spec instanceSpec, instanceDir string) (*tlsIns
 	}
 
 	plan.Files = append(plan.Files,
-		file{Path: filepath.Join("tls", "ca.pem"), Data: mat.CAPEM, Mode: 0644},
-		file{Path: filepath.Join("tls", "server.crt"), Data: mat.ServerCertPEM, Mode: 0644},
-		file{Path: filepath.Join("tls", "server.key"), Data: mat.ServerKeyPEM, Mode: 0600},
+		backend.File{Path: filepath.Join("tls", "ca.pem"), Data: mat.CAPEM, Mode: 0644},
+		backend.File{Path: filepath.Join("tls", "server.crt"), Data: mat.ServerCertPEM, Mode: 0644},
+		backend.File{Path: filepath.Join("tls", "server.key"), Data: mat.ServerKeyPEM, Mode: 0600},
 	)
 
 	plan.TLS = &api.TLSMaterial{CAPEM: string(mat.CAPEM)}
@@ -254,17 +263,22 @@ func planTLS(plan *instancePlan, spec instanceSpec, instanceDir string) (*tlsIns
 //     cluster that cluster's cluster listeners followed by its nodes' client and
 //     snippet listeners, node by node.
 //
-// Each node's listeners and held listeners are added to it as they are handed
-// back.
-func reserveListeners(plan *instancePlan, spec instanceSpec, place placement) error {
+// Each node's listeners are added to it as they are handed back, and so are the
+// listeners holding their ports when place is a portHolder.
+func reserveListeners(plan *instancePlan, spec instanceSpec, place backend.Placement) error {
 	snippetListeners := listenersForSnippets(spec.Snippets)
+	holder, holds := place.(portHolder)
 
 	reserve := func(n *nodePlan, name string) error {
-		l, ln, err := place.listenerAddress(n.Name, name)
+		l, err := place.ListenerAddress(n.Name, name)
 		if err != nil {
 			return err
 		}
 		n.Listeners = append(n.Listeners, l)
+		if !holds {
+			return nil
+		}
+		ln := holder.takeHeld(n.Name, name)
 		if ln != nil {
 			n.Held = append(n.Held, ln)
 		}
@@ -311,13 +325,13 @@ func reserveListeners(plan *instancePlan, spec instanceSpec, place placement) er
 
 	switch plan.Kind {
 	case "server":
-		return reserveNode(plan.Nodes[0])
+		return reserveNode(plan.nodes[0])
 
 	case "cluster":
-		return reserveCluster(plan.Nodes)
+		return reserveCluster(plan.nodes)
 
 	default:
-		err := reserveAll(plan.Nodes, "gateway")
+		err := reserveAll(plan.nodes, "gateway")
 		if err != nil {
 			return err
 		}
@@ -335,23 +349,23 @@ func reserveListeners(plan *instancePlan, spec instanceSpec, place placement) er
 // every other node of its cluster and, in a super-cluster, a gateway link to
 // every other node of every cluster. Each dials the peer's cluster or gateway
 // listener.
-func planLinks(plan *instancePlan) []link {
-	var links []link
+func planLinks(plan *instancePlan) []backend.Link {
+	var links []backend.Link
 
-	for _, n := range plan.Nodes {
-		for _, peer := range plan.Nodes {
+	for _, n := range plan.nodes {
+		for _, peer := range plan.nodes {
 			if peer == n {
 				continue
 			}
 
 			if peer.Cluster == n.Cluster && n.Cluster != "" {
 				l := listenerOf(peer, "cluster")
-				links = append(links, link{Node: n.Name, Peer: peer.Name, Kind: "route", Host: l.Host, Port: l.Port})
+				links = append(links, backend.Link{Node: n.Name, Peer: peer.Name, Kind: "route", Dial: l.Endpoint})
 			}
 
 			if plan.Kind == "super-cluster" {
 				l := listenerOf(peer, "gateway")
-				links = append(links, link{Node: n.Name, Peer: peer.Name, Kind: "gateway", Host: l.Host, Port: l.Port})
+				links = append(links, backend.Link{Node: n.Name, Peer: peer.Name, Kind: "gateway", Dial: l.Endpoint})
 			}
 		}
 	}
@@ -362,8 +376,8 @@ func planLinks(plan *instancePlan) []link {
 // planTemplateData returns the template data node n of plan renders its
 // snippets and config with, short of the managed TLS settings. A node's own
 // .Routes and .Gateways entries come from its own listeners, every other entry
-// from its links.
-func planTemplateData(plan *instancePlan, n *nodePlan, spec instanceSpec, dir string) *templateData {
+// from its links. dir is the node's directory and storeDir its store directory.
+func planTemplateData(plan *instancePlan, n *nodePlan, spec instanceSpec, dir, storeDir string) *templateData {
 	td := defaultTemplateData()
 
 	td.ServerName = n.Name
@@ -371,11 +385,11 @@ func planTemplateData(plan *instancePlan, n *nodePlan, spec instanceSpec, dir st
 	td.InstanceID = plan.ID
 	td.ServerIndex = n.ServerIndex
 	td.ServerDir = dir
-	td.StoreDir = dir
+	td.StoreDir = storeDir
 	td.LogFile = filepath.Join(dir, "server.log")
 	td.Host = "localhost"
 	td.AdvertiseHost = spec.AdvertiseHost
-	td.ClientPort = listenerOf(n, "client").Port
+	td.ClientPort = listenerOf(n, "client").Endpoint.Port
 	td.JetStream = spec.JetStream
 
 	td.Description = plan.Description
@@ -384,13 +398,13 @@ func planTemplateData(plan *instancePlan, n *nodePlan, spec instanceSpec, dir st
 	if n.Cluster != "" {
 		td.ClusterName = n.Cluster
 		td.ClusterIndex = n.ClusterIndex
-		td.ClusterPort = listenerOf(n, "cluster").Port
+		td.ClusterPort = listenerOf(n, "cluster").Endpoint.Port
 		td.Routes = dialAddresses(plan, n, nodesOf(plan, n.Cluster), "cluster", "route")
 		td.ClusterSize = spec.Servers
 	}
 
 	if plan.Kind == "super-cluster" {
-		td.GatewayPort = listenerOf(n, "gateway").Port
+		td.GatewayPort = listenerOf(n, "gateway").Endpoint.Port
 		td.Clusters = plan.Clusters
 		td.Gateways = map[string][]string{}
 		for _, cluster := range plan.Clusters {
@@ -401,7 +415,7 @@ func planTemplateData(plan *instancePlan, n *nodePlan, spec instanceSpec, dir st
 	for _, name := range portBearingSnippets {
 		l, ok := findListener(n, name)
 		if ok {
-			td.Ports[name] = l.Port
+			td.Ports[name] = l.Endpoint.Port
 		}
 	}
 
@@ -416,14 +430,13 @@ func dialAddresses(plan *instancePlan, n *nodePlan, peers []*nodePlan, listenerN
 
 	for _, peer := range peers {
 		if peer == n {
-			l := listenerOf(n, listenerName)
-			addrs = append(addrs, net.JoinHostPort(l.Host, strconv.Itoa(l.Port)))
+			addrs = append(addrs, listenerOf(n, listenerName).Endpoint.String())
 			continue
 		}
 
 		for _, lk := range plan.Links {
 			if lk.Node == n.Name && lk.Peer == peer.Name && lk.Kind == linkKind {
-				addrs = append(addrs, net.JoinHostPort(lk.Host, strconv.Itoa(lk.Port)))
+				addrs = append(addrs, lk.Dial.String())
 				break
 			}
 		}
@@ -435,7 +448,7 @@ func dialAddresses(plan *instancePlan, n *nodePlan, peers []*nodePlan, listenerN
 // nodesOf returns the nodes of plan in the named cluster, in index order.
 func nodesOf(plan *instancePlan, cluster string) []*nodePlan {
 	var nodes []*nodePlan
-	for _, n := range plan.Nodes {
+	for _, n := range plan.nodes {
 		if n.Cluster == cluster {
 			nodes = append(nodes, n)
 		}
@@ -444,17 +457,17 @@ func nodesOf(plan *instancePlan, cluster string) []*nodePlan {
 }
 
 // findListener returns n's listener of the given name, and whether it has one.
-func findListener(n *nodePlan, name string) (listener, bool) {
-	i := slices.IndexFunc(n.Listeners, func(l listener) bool { return l.Name == name })
+func findListener(n *nodePlan, name string) (backend.Listener, bool) {
+	i := slices.IndexFunc(n.Listeners, func(l backend.Listener) bool { return l.Name == name })
 	if i < 0 {
-		return listener{}, false
+		return backend.Listener{}, false
 	}
 	return n.Listeners[i], true
 }
 
 // listenerOf returns n's listener of the given name, or the zero listener when
 // it has none.
-func listenerOf(n *nodePlan, name string) listener {
+func listenerOf(n *nodePlan, name string) backend.Listener {
 	l, _ := findListener(n, name)
 	return l
 }
@@ -493,8 +506,8 @@ func renderTLSSnippet(files *tlsInstanceFiles) []byte {
 // 0600, where snippetsDir is relative to the instance directory. It sets
 // td.Snippets[name] to the snippet's include path relative to the node's
 // directory, where its config lives: snippets/<name>.conf.
-func renderSnippets(td *templateData, snippets map[string]string, snippetsDir string) ([]file, error) {
-	var files []file
+func renderSnippets(td *templateData, snippets map[string]string, snippetsDir string) ([]backend.File, error) {
+	var files []backend.File
 
 	for _, name := range slices.Sorted(maps.Keys(snippets)) {
 		t, err := template.New("snippet-" + name).Parse(snippets[name])
@@ -508,7 +521,7 @@ func renderSnippets(td *templateData, snippets map[string]string, snippetsDir st
 			return nil, fmt.Errorf("snippet %q render: %w", name, err)
 		}
 
-		files = append(files, file{Path: filepath.Join(snippetsDir, name+".conf"), Data: out.Bytes(), Mode: 0600})
+		files = append(files, backend.File{Path: filepath.Join(snippetsDir, name+".conf"), Data: out.Bytes(), Mode: 0600})
 		td.Snippets[name] = filepath.Join(filepath.Base(snippetsDir), name+".conf")
 	}
 

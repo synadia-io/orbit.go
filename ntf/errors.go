@@ -13,7 +13,11 @@
 
 package ntf
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/synadia-io/orbit.go/ntf/backend"
+)
 
 var (
 	// ErrInvalidPortRange means Options.PortRange is not a usable range: both ends
@@ -35,5 +39,5 @@ var (
 
 	// ErrServerListen means a managed server could not bind one of its ports,
 	// usually because another program took it after the service reserved it.
-	ErrServerListen = errors.New("managed server could not listen")
+	ErrServerListen = backend.ErrListen
 )

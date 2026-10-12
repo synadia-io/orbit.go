@@ -35,6 +35,7 @@ import (
 	"github.com/nats-io/nats.go/micro"
 
 	"github.com/synadia-io/orbit.go/ntf/api"
+	"github.com/synadia-io/orbit.go/ntf/backend"
 )
 
 // Sanity limits on how much a single request may ask for. A super-cluster
@@ -465,7 +466,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	place := s.newInProcessPlacement(inst)
 
 	// The planner closes every listener it reserved when it fails.
-	plan, err := planInstance(spec, inst.ID, place)
+	plan, err := planInstance(spec, inst.ID, place, server.VERSION)
 	if err != nil {
 		s.dropInstance(inst.ID)
 		req.Error(planErrorCode(err), err.Error(), nil)
@@ -473,9 +474,9 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	}
 
 	// The nodes in start order. Once the plan is kept on the instance, an update
-	// may replace entries of plan.Nodes under s.mu, so this function works from
-	// its own copy of the slice.
-	nodes := slices.Clone(plan.Nodes)
+	// may replace entries of plan.nodes and plan.Nodes under s.mu, so this
+	// function works from its own copy of the slice.
+	nodes := slices.Clone(plan.nodes)
 
 	// Each node's held listeners are closed inside runServerWithConfig and
 	// cleared from its plan as it starts, before it is published, so only the
@@ -514,7 +515,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	s.mu.Unlock()
 
 	for _, n := range nodes {
-		dir := place.nodeDir(n.Name)
+		dir := filepath.Join(place.InstanceDir(), n.Dir)
 
 		srv, cfgPath, err := runServerWithConfig(s.log, n.Config, dir, n.Held)
 		n.Held = nil
@@ -620,8 +621,8 @@ var tlsFileLabels = map[string]string{
 // It reports whether every write succeeded. On a failure it calls rollback and
 // answers req itself: 008 for a TLS file or the managed TLS snippet, 002 for
 // anything else.
-func (s *Service) writePlan(req micro.Request, plan *instancePlan, place placement, rollback func()) bool {
-	instDir := place.instanceDir()
+func (s *Service) writePlan(req micro.Request, plan *instancePlan, place backend.Placement, rollback func()) bool {
+	instDir := place.InstanceDir()
 
 	err := os.MkdirAll(instDir, 0700)
 	if err != nil {
@@ -640,7 +641,7 @@ func (s *Service) writePlan(req micro.Request, plan *instancePlan, place placeme
 	}
 
 	for _, n := range plan.Nodes {
-		err := os.MkdirAll(filepath.Join(place.nodeDir(n.Name), "snippets"), 0700)
+		err := os.MkdirAll(filepath.Join(instDir, n.Dir, "snippets"), 0700)
 		if err != nil {
 			rollback()
 			req.Error("002", "Failed to create server directory", nil)
@@ -1270,9 +1271,10 @@ func (s *Service) updateServer(req micro.Request) {
 	s.mu.Lock()
 	inst := s.instances[ms.instanceID]
 	if inst != nil && inst.plan != nil {
-		i := slices.Index(inst.plan.Nodes, node)
+		i := slices.Index(inst.plan.nodes, node)
 		if i >= 0 {
-			inst.plan.Nodes[i] = &next
+			inst.plan.nodes[i] = &next
+			inst.plan.Nodes[i] = &next.NodePlan
 		}
 	}
 	s.mu.Unlock()
