@@ -14,10 +14,6 @@
 package ntf
 
 import (
-	"net"
-	"path/filepath"
-	"strings"
-
 	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 )
@@ -134,8 +130,7 @@ func (n *nodePlan) dropContents() {
 // under a random *.cfg name in the node's directory.
 //
 // It embeds the node plan a backend runs and adds the inputs Config was
-// rendered from and the listeners holding the node's reserved ports. A backend
-// only ever sees the embedded NodePlan.
+// rendered from. A backend only ever sees the embedded NodePlan.
 type nodePlan struct {
 	backend.NodePlan
 
@@ -146,79 +141,4 @@ type nodePlan struct {
 	// the generated material and the verify, handshake first and timeout
 	// settings. Nil when the instance has no generated TLS.
 	TLS *tlsInstanceFiles
-
-	// Held are the listeners that keep the node's ports reserved until it
-	// starts. The runtime closes them just before the node starts. Empty when
-	// the placement reserves no ports.
-	Held []*net.TCPListener
 }
-
-// portHolder is implemented by a placement that reserves each port it hands
-// out by holding a listener on it. The planner takes each held listener as soon
-// as ListenerAddress returns, and keeps it on the node until the node starts.
-type portHolder interface {
-	// takeHeld returns the listener holding the port the last ListenerAddress
-	// call for the named listener of the named node reserved, and forgets it.
-	// It returns nil when it holds none.
-	takeHeld(node, listener string) *net.TCPListener
-}
-
-// inProcessPlacement places an instance on this host, for nodes that run in the
-// service's own process. Ports come from the service's port range and are
-// recorded on the instance, so they return to the range when the instance is
-// torn down. Directories live under the service's directory.
-type inProcessPlacement struct {
-	svc  *Service
-	inst *instance
-
-	// held are the listeners holding the ports ListenerAddress reserved, keyed
-	// by node and listener name, until takeHeld hands them over.
-	held map[[2]string]*net.TCPListener
-}
-
-// newInProcessPlacement returns the in-process placement for inst, which must
-// have been registered with newInstance.
-func (s *Service) newInProcessPlacement(inst *instance) *inProcessPlacement {
-	return &inProcessPlacement{svc: s, inst: inst, held: map[[2]string]*net.TCPListener{}}
-}
-
-// ListenerAddress reserves a port from the service's port range and returns it
-// on localhost. The listener holding the port is kept for takeHeld. The node
-// and listener names do not affect the port. An exhausted range returns an
-// error wrapping ErrPortRangeExhausted.
-func (p *inProcessPlacement) ListenerAddress(node, name string) (backend.Listener, error) {
-	port, ln, err := p.svc.reservePort(p.inst)
-	if err != nil {
-		return backend.Listener{}, err
-	}
-
-	p.held[[2]string{node, name}] = ln
-
-	return backend.Listener{Name: name, Endpoint: backend.Endpoint{Host: inProcessHost, Port: port}}, nil
-}
-
-// takeHeld returns the listener holding the port ListenerAddress reserved for
-// the named listener of the named node, and forgets it.
-func (p *inProcessPlacement) takeHeld(node, name string) *net.TCPListener {
-	key := [2]string{node, name}
-	ln := p.held[key]
-	delete(p.held, key)
-	return ln
-}
-
-// InstanceDir returns <Dir>/<id>.
-func (p *inProcessPlacement) InstanceDir() string {
-	return p.inst.RootDir
-}
-
-// StoreDir returns the node's directory under the instance directory: n<i> for
-// a single server or a cluster node, c<c>_s<i> for a super-cluster node. It is
-// the node's name without the "<short id>-" prefix the planner gives it.
-func (p *inProcessPlacement) StoreDir(node string) string {
-	return filepath.Join(p.InstanceDir(), strings.TrimPrefix(node, shortID(p.inst.ID)+"-"))
-}
-
-var (
-	_ backend.Placement = (*inProcessPlacement)(nil)
-	_ portHolder        = (*inProcessPlacement)(nil)
-)

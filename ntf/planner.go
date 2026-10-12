@@ -94,10 +94,9 @@ func (e *planError) Unwrap() error {
 // version version. It renders every file in memory: it writes nothing and
 // starts nothing.
 //
-// When place is a portHolder, the listeners holding the ports it hands out
-// stay held on the plan's nodes. When planning fails part way, every one of
-// them is closed and the error is a *planError naming the kind of failure,
-// apart from an unknown spec.Kind.
+// When planning fails part way, the error is a *planError naming the kind of
+// failure, apart from an unknown spec.Kind. What place reserved is left to the
+// backend's Teardown.
 func planInstance(spec instanceSpec, id string, place backend.Placement, version string) (*instancePlan, error) {
 	short := shortID(id)
 
@@ -111,9 +110,6 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 	}
 
 	fail := func(kind planErrorKind, err error) (*instancePlan, error) {
-		for _, n := range plan.nodes {
-			closeListeners(n.Held)
-		}
 		return nil, &planError{Kind: kind, Err: err}
 	}
 
@@ -263,11 +259,9 @@ func planTLS(plan *instancePlan, spec instanceSpec, instanceDir string) (*tlsIns
 //     cluster that cluster's cluster listeners followed by its nodes' client and
 //     snippet listeners, node by node.
 //
-// Each node's listeners are added to it as they are handed back, and so are the
-// listeners holding their ports when place is a portHolder.
+// Each node's listeners are added to it as they are handed back.
 func reserveListeners(plan *instancePlan, spec instanceSpec, place backend.Placement) error {
 	snippetListeners := listenersForSnippets(spec.Snippets)
-	holder, holds := place.(portHolder)
 
 	reserve := func(n *nodePlan, name string) error {
 		l, err := place.ListenerAddress(n.Name, name)
@@ -275,13 +269,6 @@ func reserveListeners(plan *instancePlan, spec instanceSpec, place backend.Place
 			return err
 		}
 		n.Listeners = append(n.Listeners, l)
-		if !holds {
-			return nil
-		}
-		ln := holder.takeHeld(n.Name, name)
-		if ln != nil {
-			n.Held = append(n.Held, ln)
-		}
 		return nil
 	}
 

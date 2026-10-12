@@ -14,6 +14,7 @@
 package ntf
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"path/filepath"
@@ -22,17 +23,33 @@ import (
 )
 
 // placementService returns a Service with just enough state for an in-process
-// placement: a directory, a port allocator over r and an empty instance table.
-// It starts no server.
+// placement: a directory, a port allocator over r, an empty instance table and
+// the in-process backend. It starts no server.
 func placementService(t *testing.T, r PortRange) *Service {
 	t.Helper()
 
-	return &Service{
+	s := &Service{
 		log:       slog.New(slog.DiscardHandler),
 		dir:       t.TempDir(),
 		ports:     newPortAllocator(r),
 		instances: map[string]*instance{},
 	}
+	s.backend = newInProcessBackend(s)
+
+	return s
+}
+
+// placeInstance returns the in-process placement of inst, which s must have
+// registered.
+func placeInstance(t *testing.T, s *Service, inst *instance) *inProcessPlacement {
+	t.Helper()
+
+	place, err := s.backend.Placement(t.Context(), inst.ID)
+	if err != nil {
+		t.Fatalf("Placement: %v", err)
+	}
+
+	return place.(*inProcessPlacement)
 }
 
 // TestInProcessPlacementListenerAddress proves the in-process placement hands
@@ -42,7 +59,8 @@ func TestInProcessPlacementListenerAddress(t *testing.T) {
 	r := freeRange(t, 4)
 	s := placementService(t, r)
 	inst := s.newInstance("cluster", "")
-	p := s.newInProcessPlacement(inst)
+	p := placeInstance(t, s, inst)
+	t.Cleanup(func() { s.dropInstance(inst) })
 
 	names := []string{"client", "cluster", "websocket"}
 	var ports []int
@@ -52,11 +70,10 @@ func TestInProcessPlacementListenerAddress(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ListenerAddress %s: %v", name, err)
 		}
-		ln := p.takeHeld(node, name)
+		ln := p.rec.held[[2]string{node, name}]
 		if ln == nil {
 			t.Fatalf("listener %s is not held", name)
 		}
-		defer ln.Close()
 
 		if l.Name != name {
 			t.Errorf("listener name = %q, want %q", l.Name, name)
@@ -86,21 +103,22 @@ func TestInProcessPlacementListenerAddress(t *testing.T) {
 }
 
 // TestInProcessPlacementReleasesOnTeardown proves the ports the in-process
-// placement hands out return to the range when the instance is torn down, and
-// that a port handed out after a concurrent destroy is given back at once.
+// placement hands out return to the range and their listeners are closed when
+// the instance is torn down, and that a port handed out after a concurrent
+// destroy is given back, and its listener closed, at once.
 func TestInProcessPlacementReleasesOnTeardown(t *testing.T) {
 	s := placementService(t, freeRange(t, 4))
 	inst := s.newInstance("server", "")
-	p := s.newInProcessPlacement(inst)
+	p := placeInstance(t, s, inst)
 
 	node := shortID(inst.ID) + "-n1"
 	l, err := p.ListenerAddress(node, "client")
 	if err != nil {
 		t.Fatalf("ListenerAddress: %v", err)
 	}
-	p.takeHeld(node, "client").Close()
+	ln := p.rec.held[[2]string{node, "client"}]
 
-	s.dropInstance(inst.ID)
+	s.dropInstance(inst)
 
 	if inst.ports != nil {
 		t.Errorf("instance ports = %v after teardown, want none", inst.ports)
@@ -108,12 +126,21 @@ func TestInProcessPlacementReleasesOnTeardown(t *testing.T) {
 	if !portFree(s.ports, l.Endpoint.Port) {
 		t.Errorf("port %d still in use after teardown", l.Endpoint.Port)
 	}
+	err = ln.Close()
+	if !errors.Is(err, net.ErrClosed) {
+		t.Errorf("listener on port %d left open after teardown", l.Endpoint.Port)
+	}
 
 	late, err := p.ListenerAddress(node, "cluster")
 	if err != nil {
 		t.Fatalf("ListenerAddress after teardown: %v", err)
 	}
-	p.takeHeld(node, "cluster").Close()
+	if p.rec.held != nil {
+		t.Errorf("listener of a late reservation kept after teardown")
+	}
+	if !portBindable(late.Endpoint.Port) {
+		t.Errorf("listener of port %d reserved after teardown left open", late.Endpoint.Port)
+	}
 
 	if inst.ports != nil {
 		t.Errorf("instance ports = %v after a late reservation, want none", inst.ports)
@@ -129,7 +156,7 @@ func TestInProcessPlacementReleasesOnTeardown(t *testing.T) {
 func TestInProcessPlacementDirectories(t *testing.T) {
 	s := placementService(t, freeRange(t, 1))
 	inst := s.newInstance("super-cluster", "")
-	p := s.newInProcessPlacement(inst)
+	p := placeInstance(t, s, inst)
 	short := shortID(inst.ID)
 	root := filepath.Join(s.Dir(), inst.ID)
 

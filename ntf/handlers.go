@@ -450,50 +450,45 @@ func setSpecTLS(spec *instanceSpec, opts *api.TLSOptions) {
 }
 
 // createFromSpec runs the part of a create attempt every kind of instance
-// shares, once the request is validated and inst is registered. It plans inst
-// from spec, writes the plan's files, starts the nodes in plan order and answers
-// req with the create response.
+// shares, once the request is validated and inst is registered. It asks the
+// backend for a placement, plans inst from spec against it, provisions the
+// plan, starts the capture proxy when the plan asks for one, publishes the
+// nodes and answers req with the create response.
 //
 // It answers req itself, unless a node could not listen and final is false: it
-// then rolls back everything the attempt started and returns true to have the
-// create run again, which plans the instance again from the spec with fresh
-// ports.
+// then tears down everything the attempt started and returns true to have the
+// create run again, which plans the instance again from the spec with a fresh
+// placement.
 func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, spec instanceSpec) (retry bool) {
 	if spec.TLS {
 		s.log.Info("Issuing TLS server cert", "instance", inst.ID, "sans", effectiveSANs(spec.TLSSANs, spec.AdvertiseHost))
 	}
 
-	place := s.newInProcessPlacement(inst)
+	ctx := context.Background()
 
-	// The planner closes every listener it reserved when it fails.
-	plan, err := planInstance(spec, inst.ID, place, server.VERSION)
+	place, err := s.backend.Placement(ctx, inst.ID)
 	if err != nil {
-		s.dropInstance(inst.ID)
+		s.dropInstance(inst)
+		code, msg := backendErrorResponse(err)
+		req.Error(code, msg, nil)
+		return false
+	}
+
+	plan, err := planInstance(spec, inst.ID, place, s.backend.DefaultVersion())
+	if err != nil {
+		s.dropInstance(inst)
 		req.Error(planErrorCode(err), err.Error(), nil)
 		return false
 	}
 
-	// The nodes in start order. Once the plan is kept on the instance, an update
-	// may replace entries of plan.nodes and plan.Nodes under s.mu, so this
-	// function works from its own copy of the slice.
-	nodes := slices.Clone(plan.nodes)
-
-	// Each node's held listeners are closed inside runServerWithConfig and
-	// cleared from its plan as it starts, before it is published, so only the
-	// nodes that have not started still hold listeners. rollback closes those
-	// and drops the instance, which stops the nodes already added to it. It
-	// leaves published node plans alone, since an update may be reading them.
-	rollback := func() {
-		for _, n := range nodes {
-			if n.Held != nil {
-				closeListeners(n.Held)
-				n.Held = nil
-			}
+	started, err := s.backend.Provision(ctx, &plan.InstancePlan)
+	if err != nil {
+		s.dropInstance(inst)
+		if s.retryAfter(err, final, inst.ID) {
+			return true
 		}
-		s.dropInstance(inst.ID)
-	}
-
-	if !s.writePlan(req, plan, place, rollback) {
+		code, msg := backendErrorResponse(err)
+		req.Error(code, msg, nil)
 		return false
 	}
 
@@ -505,32 +500,36 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		TLS:         plan.TLS,
 	}
 
-	// The instance's own files are written and resp holds the TLS material, so
-	// both can go before the plan is kept. The plan is kept before any node is
-	// published, so an update of a published node always finds it.
+	// The nodes in start order. Once the plan is kept on the instance, an update
+	// may replace entries of plan.nodes and plan.Nodes under s.mu, so this
+	// function works from its own copy of the slice.
+	nodes := slices.Clone(plan.nodes)
+
+	// Every file is written, every node runs its config and resp holds the TLS
+	// material, so the plan's contents can go before it is kept. The plan is
+	// kept before any node is published, so an update of a published node
+	// always finds it. A published node plan never changes; an update replaces
+	// it.
 	plan.dropContents()
+	for _, n := range nodes {
+		n.dropContents()
+	}
 
 	s.mu.Lock()
 	inst.plan = plan
 	s.mu.Unlock()
 
-	for _, n := range nodes {
-		dir := filepath.Join(place.InstanceDir(), n.Dir)
+	servers := make([]*managedServer, 0, len(nodes))
+	var proxy CaptureProxy
 
-		srv, cfgPath, err := runServerWithConfig(s.log, n.Config, dir, n.Held)
-		n.Held = nil
-		if err != nil {
-			rollback()
-			if s.retryAfter(err, final, inst.ID) {
-				return true
+	for i, n := range nodes {
+		node := started[i]
+
+		var client backend.Address
+		for _, a := range node.Addresses() {
+			if a.Name == "client" {
+				client = a
 			}
-			req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
-			return false
-		}
-
-		port, err := clientPortOf(srv)
-		if err != nil {
-			s.log.Warn("Could not parse client port", "server", n.Name, "err", err)
 		}
 
 		// The wire view of the node's listener ports. It is a map of its own, so
@@ -541,23 +540,20 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 			ports = maps.Clone(n.TemplateData.Ports)
 		}
 
-		ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: dir, configPath: cfgPath, ports: ports, clientPort: port, advertiseHost: spec.AdvertiseHost, node: n}
+		ms := &managedServer{backendNode: node, instanceID: inst.ID, rootDir: filepath.Join(place.InstanceDir(), n.Dir), ports: ports, clientPort: client.External.Port, advertiseHost: spec.AdvertiseHost, node: n}
 
-		// Front the node's client port with the capture proxy when the plan asks for
-		// it, before the node is published so its trace port and proxy are set
-		// atomically.
+		// Front the node's client listener with the capture proxy when the plan
+		// asks for it, before the node is published so its trace port and proxy
+		// are set atomically.
 		if n.Name == plan.ProxyNode {
-			proxy, tracePort, terr := s.startTraceProxy(inst, n.Name, port, spec.AdvertiseHost, spec.StoreCaptures)
+			p, tracePort, terr := s.startTraceProxy(inst, n.Name, client.Internal, spec.AdvertiseHost, spec.StoreCaptures)
 			if terr != nil {
-				// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
-				// shut it down here to avoid leaking the started server on trace failure.
-				srv.Shutdown()
-				srv.WaitForShutdown()
-				rollback()
+				s.dropInstance(inst)
 				req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
 				return false
 			}
-			ms.traceProxy = proxy
+			proxy = p
+			ms.traceProxy = p
 			if ports == nil {
 				ports = map[string]int{}
 			}
@@ -565,22 +561,44 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 			ms.ports = ports
 		}
 
-		// The node's files are written and its config is running, so its plan is
-		// complete. It never changes once published; an update replaces it.
-		n.dropContents()
+		servers = append(servers, ms)
 
-		s.mu.Lock()
-		inst.Servers = append(inst.Servers, ms)
-		s.mu.Unlock()
-
+		srv := ms.inProcess().server()
 		resp.Servers = append(resp.Servers, &api.ManagedServer{
 			Name:      n.Name,
-			Port:      port,
+			Port:      client.External.Port,
 			Ports:     ports,
 			Cluster:   n.Cluster,
 			Advertise: spec.AdvertiseHost,
-			Running:   srv.Running(),
+			Running:   srv != nil && srv.Running(),
 		})
+	}
+
+	// Publish every node in one step, and only while the instance is still
+	// registered. A destroy or reset that removed it meanwhile never saw the
+	// capture proxy, so stop it first, then tear down what this create started
+	// since. The proxy may have created its traces directory after that
+	// teardown removed the instance directory, so remove the directory again.
+	s.mu.Lock()
+	_, alive := s.instances[inst.ID]
+	if alive {
+		inst.Servers = servers
+	}
+	s.mu.Unlock()
+
+	if !alive {
+		if proxy != nil {
+			proxy.Stop()
+		}
+		s.dropInstance(inst)
+		if !s.preserve {
+			err := os.RemoveAll(inst.RootDir)
+			if err != nil {
+				s.log.Error("Failed to remove instance dir", "instance", inst.ID, "err", err)
+			}
+		}
+		req.Error("404", "Instance not found", nil)
+		return false
 	}
 
 	req.RespondJSON(resp)
@@ -606,76 +624,16 @@ func planErrorCode(err error) string {
 	}
 }
 
-// tlsFileLabels names each of an instance's TLS files, by its path in the plan,
-// in the message of a failed write.
-var tlsFileLabels = map[string]string{
-	filepath.Join("tls", "ca.pem"):     "ca",
-	filepath.Join("tls", "server.crt"): "server cert",
-	filepath.Join("tls", "server.key"): "server key",
-}
-
-// writePlan creates the instance directory, its tls directory when the plan
-// has TLS material, and each node's directory and snippets directory, all with
-// mode 0700, then writes every instance and node file with its mode.
-//
-// It reports whether every write succeeded. On a failure it calls rollback and
-// answers req itself: 008 for a TLS file or the managed TLS snippet, 002 for
-// anything else.
-func (s *Service) writePlan(req micro.Request, plan *instancePlan, place backend.Placement, rollback func()) bool {
-	instDir := place.InstanceDir()
-
-	err := os.MkdirAll(instDir, 0700)
-	if err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Failed to create instance dir: %v", err), nil)
-		return false
+// backendErrorResponse returns the response code and message a create answers
+// a backend failure with: those an in-process failure carries, or 003 and the
+// error's message for any other.
+func backendErrorResponse(err error) (string, string) {
+	var berr *inProcessError
+	if errors.As(err, &berr) {
+		return berr.Code, berr.Message
 	}
 
-	if plan.TLS != nil {
-		err := os.MkdirAll(filepath.Join(instDir, "tls"), 0700)
-		if err != nil {
-			rollback()
-			req.Error("008", fmt.Sprintf("TLS setup failed: tls dir: %v", err), nil)
-			return false
-		}
-	}
-
-	for _, n := range plan.Nodes {
-		err := os.MkdirAll(filepath.Join(instDir, n.Dir, "snippets"), 0700)
-		if err != nil {
-			rollback()
-			req.Error("002", "Failed to create server directory", nil)
-			return false
-		}
-	}
-
-	for _, f := range plan.Files {
-		err := os.WriteFile(filepath.Join(instDir, f.Path), f.Data, f.Mode)
-		if err != nil {
-			rollback()
-			req.Error("008", fmt.Sprintf("TLS setup failed: write %s: %v", tlsFileLabels[f.Path], err), nil)
-			return false
-		}
-	}
-
-	for _, n := range plan.Nodes {
-		for _, f := range n.Files {
-			err := os.WriteFile(filepath.Join(instDir, f.Path), f.Data, f.Mode)
-			if err != nil {
-				rollback()
-				name := filepath.Base(f.Path)
-				if name == "_tls_managed.conf" {
-					perr := &planError{Kind: planErrTLSSnippet, Err: err}
-					req.Error(planErrorCode(perr), perr.Error(), nil)
-					return false
-				}
-				req.Error("002", fmt.Sprintf("Snippet failure: snippet %q write: %v", strings.TrimSuffix(name, ".conf"), err), nil)
-				return false
-			}
-		}
-	}
-
-	return true
+	return "003", err.Error()
 }
 
 // traceSetupTimeout limits a Capturer's setup for one server, which may include
@@ -683,15 +641,16 @@ func (s *Service) writePlan(req micro.Request, plan *instancePlan, place backend
 const traceSetupTimeout = 30 * time.Second
 
 // startTraceProxy asks the configured Capturer to front a managed server's client
-// port with a capture proxy, and returns the proxy and the port clients reach it on.
+// listener, which it dials at client, with a capture proxy, and returns the proxy
+// and the port clients reach it on.
 //
 // advertiseHost becomes the proxy's listen host, so the advertised trace URL matches
 // the node's client_advertise. It must name a local interface or the capturer fails
 // to listen. Empty binds and advertises 0.0.0.0 (the no-advertise default). store
 // is passed to the capturer as CaptureRequest.Store: true keeps every connection's
-// capture, false forwards and shapes without keeping any. The caller must shut down
-// the backend server on failure: it is not yet tracked by the instance.
-func (s *Service) startTraceProxy(inst *instance, serverName string, clientPort int, advertiseHost string, store bool) (CaptureProxy, int, error) {
+// capture, false forwards and shapes without keeping any. The caller must tear the
+// instance down on failure.
+func (s *Service) startTraceProxy(inst *instance, serverName string, client backend.Endpoint, advertiseHost string, store bool) (CaptureProxy, int, error) {
 	if s.capturer == nil {
 		return nil, 0, fmt.Errorf("trace capture is not configured on this service")
 	}
@@ -707,7 +666,7 @@ func (s *Service) startTraceProxy(inst *instance, serverName string, clientPort 
 	proxy, err := s.capturer.Capture(ctx, CaptureRequest{
 		InstanceID: inst.ID,
 		ServerName: serverName,
-		Backend:    fmt.Sprintf("127.0.0.1:%d", clientPort),
+		Backend:    client.String(),
 		ListenHost: advertiseHost,
 		TmpDir:     tmpDir,
 		Store:      store,
@@ -922,19 +881,21 @@ func (s *Service) stopServer(req micro.Request) {
 		return
 	}
 
-	// Hold cfgMu so a concurrent start cannot replace ms.srv while it is read and
-	// shut down here: startServer holds cfgMu across its ms.srv store.
+	// Hold cfgMu so a concurrent start cannot replace the node's server while it
+	// is read and shut down here: startServer holds cfgMu across its swap.
 	ms.cfgMu.Lock()
 	defer ms.cfgMu.Unlock()
 
-	if !ms.srv.Running() {
+	srv := ms.inProcess().server()
+
+	if !srv.Running() {
 		req.Error("003", "Server not running", nil)
 		return
 	}
 
-	ms.srv.Shutdown()
-	ms.srv.WaitForShutdown()
-	if ms.srv.Running() {
+	srv.Shutdown()
+	srv.WaitForShutdown()
+	if srv.Running() {
 		req.Error("004", "Server did not shut down", nil)
 		return
 	}
@@ -964,24 +925,26 @@ func (s *Service) startServer(req micro.Request) {
 	}
 
 	// Hold cfgMu across the whole start: it keeps a concurrent start from
-	// replacing ms.srv underneath the running check, keeps two callers from both
-	// passing that check and starting the same server twice, and keeps a
-	// concurrent update from being mid-write when ProcessConfigFile reads
-	// configPath.
+	// replacing the node's server underneath the running check, keeps two
+	// callers from both passing that check and starting the same server twice,
+	// and keeps a concurrent update from being mid-write when ProcessConfigFile
+	// reads the config path.
 	ms.cfgMu.Lock()
 	defer ms.cfgMu.Unlock()
 
-	if ms.srv.Running() {
+	node := ms.inProcess()
+
+	if node.server().Running() {
 		req.Error("003", "Server already running", nil)
 		return
 	}
 
-	if ms.configPath == "" {
+	if node.configPath() == "" {
 		req.Error("005", "Server cannot be restarted: no persisted config", nil)
 		return
 	}
 
-	srv, err := startFromConfig(s.log, ms.configPath)
+	srv, err := startFromConfig(s.log, node.configPath())
 	if err != nil {
 		req.Error("005", fmt.Sprintf("Server restart failed: %v", err), nil)
 		return
@@ -994,7 +957,7 @@ func (s *Service) startServer(req micro.Request) {
 	s.mu.Lock()
 	_, alive := s.instances[ms.instanceID]
 	if alive {
-		ms.srv = srv
+		node.setServer(srv)
 	}
 	s.mu.Unlock()
 
@@ -1044,7 +1007,7 @@ func (s *Service) stopInstance(req micro.Request) {
 	results := make([]api.ServerStateResult, 0, len(servers))
 	for _, ms := range servers {
 		ms.cfgMu.Lock()
-		srv := ms.srv
+		srv := ms.inProcess().server()
 		if srv != nil && srv.Running() {
 			srv.Shutdown()
 			srv.WaitForShutdown()
@@ -1099,25 +1062,27 @@ func (s *Service) startInstance(req micro.Request) {
 		res := api.ServerStateResult{}
 
 		ms.cfgMu.Lock()
-		if ms.srv != nil {
-			res.Name = ms.srv.Name()
+		node := ms.inProcess()
+		current := node.server()
+		if current != nil {
+			res.Name = current.Name()
 		}
 
-		if ms.srv != nil && ms.srv.Running() {
+		if current != nil && current.Running() {
 			res.Running = true
 			ms.cfgMu.Unlock()
 			results = append(results, res)
 			continue
 		}
 
-		if ms.configPath == "" {
+		if node.configPath() == "" {
 			ms.cfgMu.Unlock()
 			res.Error = "no persisted config"
 			results = append(results, res)
 			continue
 		}
 
-		srv, err := startFromConfig(s.log, ms.configPath)
+		srv, err := startFromConfig(s.log, node.configPath())
 		if err != nil {
 			ms.cfgMu.Unlock()
 			res.Error = err.Error()
@@ -1131,7 +1096,7 @@ func (s *Service) startInstance(req micro.Request) {
 		s.mu.Lock()
 		_, alive := s.instances[creq.InstanceID]
 		if alive {
-			ms.srv = srv
+			node.setServer(srv)
 		}
 		s.mu.Unlock()
 		ms.cfgMu.Unlock()
@@ -1254,7 +1219,7 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
-	err = os.WriteFile(ms.configPath, rendered, 0600)
+	err = os.WriteFile(ms.inProcess().configPath(), rendered, 0600)
 	if err != nil {
 		req.Error("009", fmt.Sprintf("config write failed: %v", err), nil)
 		return
@@ -1304,18 +1269,21 @@ func (s *Service) reloadServer(req micro.Request) {
 	}
 
 	// Hold cfgMu across both the running check and the reload: it keeps a
-	// concurrent start from replacing ms.srv underneath them, keeps the server
-	// from stopping between the two, and stops Reload() (which re-reads
-	// configPath) observing a torn file mid-write from a concurrent update.
+	// concurrent start from replacing the node's server underneath them, keeps
+	// the server from stopping between the two, and stops Reload() (which
+	// re-reads the config path) observing a torn file mid-write from a
+	// concurrent update.
 	ms.cfgMu.Lock()
 	defer ms.cfgMu.Unlock()
 
-	if !ms.srv.Running() {
+	srv := ms.inProcess().server()
+
+	if !srv.Running() {
 		req.Error("002", "Server not running", nil)
 		return
 	}
 
-	if err := ms.srv.Reload(); err != nil {
+	if err := srv.Reload(); err != nil {
 		req.Error("010", fmt.Sprintf("reload failed: %v", err), nil)
 		return
 	}
@@ -1616,11 +1584,12 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 			ports:         maps.Clone(ms.ports),
 			advertiseHost: ms.advertiseHost,
 		}
-		if ms.srv != nil {
-			snap.name = ms.srv.Name()
-			snap.cluster = ms.srv.ClusterName()
-			snap.running = ms.srv.Running()
-			if addr := ms.srv.ClusterAddr(); addr != nil {
+		srv := ms.inProcess().server()
+		if srv != nil {
+			snap.name = srv.Name()
+			snap.cluster = srv.ClusterName()
+			snap.running = srv.Running()
+			if addr := srv.ClusterAddr(); addr != nil {
 				snap.clusterPort = addr.Port
 			}
 		}
@@ -1657,7 +1626,8 @@ func (s *Service) findServerByName(name string) *managedServer {
 
 	for _, inst := range s.instances {
 		for _, ms := range inst.Servers {
-			if ms.srv != nil && ms.srv.Name() == name {
+			srv := ms.inProcess().server()
+			if srv != nil && srv.Name() == name {
 				return ms
 			}
 		}
