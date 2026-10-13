@@ -701,12 +701,12 @@ func TestUpdateAndReloadServerRejections(t *testing.T) {
 	}
 }
 
-// TestUpdateTracedServer proves a server fronted by a capture proxy can still be
-// updated. The proxy's port rides in the wire-facing port map, so validating the
+// TestUpdateTracedServer proves a server fronted by an agent can still be
+// updated. The agent's port rides in the wire-facing port map, so validating the
 // listener set against that map rejected every such update; the check reads the
 // set the config was rendered with instead.
 func TestUpdateTracedServer(t *testing.T) {
-	ms := startTestService(t, withCapturer(&fakeCapturer{}))
+	ms := startTestService(t, withAgent(&fakeProvider{}))
 
 	var created api.CreateResponse
 	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)

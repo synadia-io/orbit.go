@@ -34,6 +34,7 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go/micro"
 
+	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 )
@@ -412,7 +413,7 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 		return
 	}
 
-	if proxied && s.capturer == nil {
+	if proxied && s.agents == nil {
 		req.Error("014", "trace capture is not configured on this service", nil)
 		return
 	}
@@ -452,7 +453,7 @@ func setSpecTLS(spec *instanceSpec, opts *api.TLSOptions) {
 // createFromSpec runs the part of a create attempt every kind of instance
 // shares, once the request is validated and inst is registered. It asks the
 // backend for a placement, plans inst from spec against it, provisions the
-// plan, starts the capture proxy when the plan asks for one, publishes the
+// plan, starts the agent when the plan asks for one, publishes the
 // nodes and answers req with the create response.
 //
 // It answers req itself, unless a node could not listen and final is false: it
@@ -520,7 +521,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	s.mu.Unlock()
 
 	servers := make([]*managedServer, 0, len(nodes))
-	var proxy CaptureProxy
+	var netAgent agent.Agent
 
 	for i, n := range nodes {
 		node := started[i]
@@ -529,6 +530,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		for _, a := range node.Addresses() {
 			if a.Name == "client" {
 				client = a
+				break
 			}
 		}
 
@@ -542,22 +544,22 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 
 		ms := &managedServer{backendNode: node, instanceID: inst.ID, rootDir: filepath.Join(place.InstanceDir(), n.Dir), ports: ports, clientPort: client.External.Port, advertiseHost: spec.AdvertiseHost, node: n}
 
-		// Front the node's client listener with the capture proxy when the plan
-		// asks for it, before the node is published so its trace port and proxy
-		// are set atomically.
+		// Front the node's client listener with the agent when the plan asks
+		// for it, before the node is published so its trace port and agent are
+		// set atomically.
 		if n.Name == plan.ProxyNode {
-			p, tracePort, terr := s.startTraceProxy(inst, n.Name, client.Internal, spec.AdvertiseHost, spec.StoreCaptures)
+			a, terr := s.startAgent(inst, n.Name, client.Internal, spec.AdvertiseHost, spec.StoreCaptures)
 			if terr != nil {
 				s.dropInstance(inst)
 				req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
 				return false
 			}
-			proxy = p
-			ms.traceProxy = p
+			netAgent = a
+			ms.agent = a
 			if ports == nil {
 				ports = map[string]int{}
 			}
-			ports["trace"] = tracePort
+			ports["trace"] = a.Endpoint().Port
 			ms.ports = ports
 		}
 
@@ -578,9 +580,9 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 
 	// Publish every node in one step, and only while the instance is still
 	// registered. A destroy or reset that removed it meanwhile never saw the
-	// capture proxy, so stop it first, then tear down what this create started
-	// since. The proxy may have created its traces directory after that
-	// teardown removed the instance directory, so remove the directory again.
+	// agent, so stop it first, then tear down what this create started since.
+	// The agent may have created its scratch directory after that teardown
+	// removed the instance directory, so remove the directory again.
 	s.mu.Lock()
 	_, alive := s.instances[inst.ID]
 	if alive {
@@ -589,8 +591,11 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	s.mu.Unlock()
 
 	if !alive {
-		if proxy != nil {
-			proxy.Stop()
+		if netAgent != nil {
+			err := netAgent.Stop(context.Background())
+			if err != nil {
+				s.log.Error("Failed to stop agent", "instance", inst.ID, "err", err)
+			}
 		}
 		s.dropInstance(inst)
 		if !s.preserve {
@@ -654,53 +659,41 @@ func revisionErrorMessage(err error) string {
 	return fmt.Sprintf("config render failed: %v", perr.Err)
 }
 
-// traceSetupTimeout limits a Capturer's setup for one server, which may include
+// traceSetupTimeout limits an agent's start for one server, which may include
 // first-use work such as creating the store captures are written to.
 const traceSetupTimeout = 30 * time.Second
 
-// startTraceProxy asks the configured Capturer to front a managed server's client
-// listener, which it dials at client, with a capture proxy, and returns the proxy
-// and the port clients reach it on.
+// startAgent asks the agent provider to front a managed server's client
+// listener, which it dials at client, and returns the agent. Its endpoint's
+// port is the one clients reach it on.
 //
-// advertiseHost becomes the proxy's listen host, so the advertised trace URL matches
-// the node's client_advertise. It must name a local interface or the capturer fails
-// to listen. Empty binds and advertises 0.0.0.0 (the no-advertise default). store
-// is passed to the capturer as CaptureRequest.Store: true keeps every connection's
-// capture, false forwards and shapes without keeping any. The caller must tear the
-// instance down on failure.
-func (s *Service) startTraceProxy(inst *instance, serverName string, client backend.Endpoint, advertiseHost string, store bool) (CaptureProxy, int, error) {
-	if s.capturer == nil {
-		return nil, 0, fmt.Errorf("trace capture is not configured on this service")
+// advertiseHost becomes the agent's listen host, so the advertised trace URL
+// matches the node's client_advertise. It must name a local interface or the
+// agent fails to listen. Empty binds all interfaces (the no-advertise default).
+// store is passed to the agent as Spec.Store: true keeps every connection's
+// capture, false forwards and shapes without keeping any. The caller must tear
+// the instance down on failure.
+func (s *Service) startAgent(inst *instance, serverName string, client backend.Endpoint, advertiseHost string, store bool) (agent.Agent, error) {
+	if s.agents == nil {
+		return nil, fmt.Errorf("trace capture is not configured on this service")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), traceSetupTimeout)
 	defer cancel()
 
-	tmpDir := filepath.Join(inst.RootDir, "traces")
-	if err := os.MkdirAll(tmpDir, 0700); err != nil {
-		return nil, 0, err
-	}
-
-	proxy, err := s.capturer.Capture(ctx, CaptureRequest{
+	a, err := s.agents.Start(ctx, agent.Spec{
 		InstanceID: inst.ID,
 		ServerName: serverName,
-		Backend:    client.String(),
+		Client:     client,
 		ListenHost: advertiseHost,
-		TmpDir:     tmpDir,
 		Store:      store,
 	})
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
-	// Empty advertiseHost binds 0.0.0.0 inside the proxy; mirror that here so the log
-	// reports the host actually bound.
-	host := advertiseHost
-	if host == "" {
-		host = "0.0.0.0"
-	}
-	s.log.Info("Trace proxy listening", "server", serverName, "address", net.JoinHostPort(host, strconv.Itoa(proxy.Port())))
-	return proxy, proxy.Port(), nil
+	s.log.Info("Trace proxy listening", "server", serverName, "address", a.Endpoint().String())
+	return a, nil
 }
 
 func (s *Service) createCluster(req micro.Request) {
@@ -757,7 +750,7 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		return
 	}
 
-	if proxied && s.capturer == nil {
+	if proxied && s.agents == nil {
 		req.Error("014", "trace capture is not configured on this service", nil)
 		return
 	}
@@ -842,7 +835,7 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		return
 	}
 
-	if proxied && s.capturer == nil {
+	if proxied && s.agents == nil {
 		req.Error("014", "trace capture is not configured on this service", nil)
 		return
 	}
@@ -1406,36 +1399,30 @@ func (s *Service) status(req micro.Request) {
 				Version:   ms.version,
 			})
 		}
-		ist.ShapingSets = s.shapingSetIDs(snap.id, snap.traceProxy)
+		ist.ShapingSets = s.shapingSetIDs(snap.id, snap.agent)
 		resp.Instances = append(resp.Instances, ist)
 	}
 
 	req.RespondJSON(resp)
 }
 
-// shapingSetIDs returns the ids of the shaping sets applied to proxy, in the order
-// the proxy reports them. A nil proxy or one that does not implement Shaper has
-// none. On a report error it logs the error and returns none, so status never
-// fails on it.
-func (s *Service) shapingSetIDs(instanceID string, proxy CaptureProxy) []string {
-	if proxy == nil {
-		return nil
-	}
-	shaper, ok := proxy.(Shaper)
-	if !ok {
+// shapingSetIDs returns the ids of the shaping sets applied to a, in the order
+// the agent reports them. A nil agent or one without shaping has none. On any
+// other error it logs the error and returns none, so status never fails on it.
+func (s *Service) shapingSetIDs(instanceID string, a agent.Agent) []string {
+	if a == nil {
 		return nil
 	}
 
-	reports, err := shaper.ShapingReport("")
+	ids, err := a.ShapingSets(context.Background())
+	if errors.Is(err, agent.ErrUnsupported) {
+		return nil
+	}
 	if err != nil {
 		s.log.Warn("Could not read shaping sets for status", "instance", instanceID, "err", err)
 		return nil
 	}
 
-	ids := make([]string, 0, len(reports))
-	for _, r := range reports {
-		ids = append(ids, r.ID)
-	}
 	return ids
 }
 
@@ -1488,10 +1475,9 @@ func (s *Service) list(req micro.Request) {
 	req.RespondJSON(resp)
 }
 
-// shaperFor finds the capture proxy fronting an instance and asserts it can shape
-// traffic. It answers the request itself on any failure and returns nil, so a
-// handler returns when it gets nil back.
-func (s *Service) shaperFor(req micro.Request, instanceID string) Shaper {
+// agentFor finds the agent fronting an instance. It answers the request itself
+// on any failure and returns nil, so a handler returns when it gets nil back.
+func (s *Service) agentFor(req micro.Request, instanceID string) agent.Agent {
 	if instanceID == "" {
 		req.Error("002", "Invalid request: instance_id is required", nil)
 		return nil
@@ -1510,19 +1496,25 @@ func (s *Service) shaperFor(req micro.Request, instanceID string) Shaper {
 		return nil
 	}
 
-	proxy := traceProxyOf(servers)
-	if proxy == nil {
+	a := agentOf(servers)
+	if a == nil {
 		req.Error("015", "Instance has no trace proxy", nil)
 		return nil
 	}
 
-	shaper, ok := proxy.(Shaper)
-	if !ok {
+	return a
+}
+
+// answerShapeError answers req with the error an agent's shaping call
+// returned: 016 when the agent has no shaping, 017 with the error's text
+// otherwise.
+func answerShapeError(req micro.Request, err error) {
+	if errors.Is(err, agent.ErrUnsupported) {
 		req.Error("016", "Shaping not supported by the trace capturer", nil)
-		return nil
+		return
 	}
 
-	return shaper
+	req.Error("017", err.Error(), nil)
 }
 
 func (s *Service) shapeSet(req micro.Request) {
@@ -1535,14 +1527,14 @@ func (s *Service) shapeSet(req micro.Request) {
 		return
 	}
 
-	shaper := s.shaperFor(req, creq.InstanceID)
-	if shaper == nil {
+	a := s.agentFor(req, creq.InstanceID)
+	if a == nil {
 		return
 	}
 
-	err = shaper.Shape(creq.Set)
+	err = a.Shape(context.Background(), creq.Set)
 	if err != nil {
-		req.Error("017", err.Error(), nil)
+		answerShapeError(req, err)
 		return
 	}
 
@@ -1559,14 +1551,14 @@ func (s *Service) shapeClear(req micro.Request) {
 		return
 	}
 
-	shaper := s.shaperFor(req, creq.InstanceID)
-	if shaper == nil {
+	a := s.agentFor(req, creq.InstanceID)
+	if a == nil {
 		return
 	}
 
-	cleared, err := shaper.ClearShaping(creq.Set)
+	cleared, err := a.ClearShaping(context.Background(), creq.Set)
 	if err != nil {
-		req.Error("017", err.Error(), nil)
+		answerShapeError(req, err)
 		return
 	}
 	if cleared == nil {
@@ -1586,14 +1578,14 @@ func (s *Service) shapeReport(req micro.Request) {
 		return
 	}
 
-	shaper := s.shaperFor(req, creq.InstanceID)
-	if shaper == nil {
+	a := s.agentFor(req, creq.InstanceID)
+	if a == nil {
 		return
 	}
 
-	sets, err := shaper.ShapingReport(creq.Set)
+	sets, err := a.ShapingReport(context.Background(), creq.Set)
 	if err != nil {
-		req.Error("017", err.Error(), nil)
+		answerShapeError(req, err)
 		return
 	}
 	if sets == nil {
@@ -1611,10 +1603,10 @@ type instanceSnapshot struct {
 	kind        string
 	description string
 	servers     []serverSnapshot
-	// traceProxy is the capture proxy fronting the instance, or nil when it has
-	// none. The status handler asks it for the applied shaping sets after the
-	// lock is released.
-	traceProxy CaptureProxy
+	// agent is the agent fronting the instance, or nil when it has none. The
+	// status handler asks it for the applied shaping sets after the lock is
+	// released.
+	agent agent.Agent
 }
 
 // serverSnapshot is a managed server's reportable state. snapshotInstance reads
@@ -1662,17 +1654,17 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 		kind:        inst.Kind,
 		description: inst.Description,
 		servers:     srvs,
-		traceProxy:  traceProxyOf(inst.Servers),
+		agent:       agentOf(inst.Servers),
 	}
 }
 
-// traceProxyOf returns the capture proxy fronting one of servers, or nil when none
-// is fronted. traceProxy is set before a server joins its instance and never
-// changes afterwards, so the caller may read the result without holding s.mu.
-func traceProxyOf(servers []*managedServer) CaptureProxy {
+// agentOf returns the agent fronting one of servers, or nil when none is
+// fronted. agent is set before a server joins its instance and never changes
+// afterwards, so the caller may read the result without holding s.mu.
+func agentOf(servers []*managedServer) agent.Agent {
 	for _, ms := range servers {
-		if ms.traceProxy != nil {
-			return ms.traceProxy
+		if ms.agent != nil {
+			return ms.agent
 		}
 	}
 	return nil
