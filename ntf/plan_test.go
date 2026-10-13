@@ -14,6 +14,7 @@
 package ntf
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"path/filepath"
@@ -22,17 +23,33 @@ import (
 )
 
 // placementService returns a Service with just enough state for an in-process
-// placement: a directory, a port allocator over r and an empty instance table.
-// It starts no server.
+// placement: a directory, a port allocator over r, an empty instance table and
+// the in-process backend. It starts no server.
 func placementService(t *testing.T, r PortRange) *Service {
 	t.Helper()
 
-	return &Service{
+	s := &Service{
 		log:       slog.New(slog.DiscardHandler),
 		dir:       t.TempDir(),
 		ports:     newPortAllocator(r),
 		instances: map[string]*instance{},
 	}
+	s.backend = newInProcessBackend(s)
+
+	return s
+}
+
+// placeInstance returns the in-process placement of inst, which s must have
+// registered.
+func placeInstance(t *testing.T, s *Service, inst *instance) *inProcessPlacement {
+	t.Helper()
+
+	place, err := s.backend.Placement(t.Context(), inst.ID)
+	if err != nil {
+		t.Fatalf("Placement: %v", err)
+	}
+
+	return place.(*inProcessPlacement)
 }
 
 // TestInProcessPlacementListenerAddress proves the in-process placement hands
@@ -42,33 +59,38 @@ func TestInProcessPlacementListenerAddress(t *testing.T) {
 	r := freeRange(t, 4)
 	s := placementService(t, r)
 	inst := s.newInstance("cluster", "")
-	p := s.newInProcessPlacement(inst)
+	p := placeInstance(t, s, inst)
+	t.Cleanup(func() { s.dropInstance(inst) })
 
 	names := []string{"client", "cluster", "websocket"}
 	var ports []int
 	for _, name := range names {
-		l, ln, err := p.listenerAddress(shortID(inst.ID)+"-n1", name)
+		node := shortID(inst.ID) + "-n1"
+		l, err := p.ListenerAddress(node, name)
 		if err != nil {
-			t.Fatalf("listenerAddress %s: %v", name, err)
+			t.Fatalf("ListenerAddress %s: %v", name, err)
 		}
-		defer ln.Close()
+		ln := p.rec.held[[2]string{node, name}]
+		if ln == nil {
+			t.Fatalf("listener %s is not held", name)
+		}
 
 		if l.Name != name {
 			t.Errorf("listener name = %q, want %q", l.Name, name)
 		}
-		if l.Host != "localhost" {
-			t.Errorf("listener %s host = %q, want localhost", name, l.Host)
+		if l.Endpoint.Host != "localhost" {
+			t.Errorf("listener %s host = %q, want localhost", name, l.Endpoint.Host)
 		}
-		if l.Port < r.Low || l.Port > r.High {
-			t.Errorf("listener %s port %d outside range %d-%d", name, l.Port, r.Low, r.High)
+		if l.Endpoint.Port < r.Low || l.Endpoint.Port > r.High {
+			t.Errorf("listener %s port %d outside range %d-%d", name, l.Endpoint.Port, r.Low, r.High)
 		}
-		if ln.Addr().(*net.TCPAddr).Port != l.Port {
-			t.Errorf("listener %s held on port %d, want %d", name, ln.Addr().(*net.TCPAddr).Port, l.Port)
+		if ln.Addr().(*net.TCPAddr).Port != l.Endpoint.Port {
+			t.Errorf("listener %s held on port %d, want %d", name, ln.Addr().(*net.TCPAddr).Port, l.Endpoint.Port)
 		}
-		if slices.Contains(ports, l.Port) {
-			t.Errorf("listener %s port %d handed out twice", name, l.Port)
+		if slices.Contains(ports, l.Endpoint.Port) {
+			t.Errorf("listener %s port %d handed out twice", name, l.Endpoint.Port)
 		}
-		ports = append(ports, l.Port)
+		ports = append(ports, l.Endpoint.Port)
 	}
 
 	s.mu.Lock()
@@ -81,54 +103,65 @@ func TestInProcessPlacementListenerAddress(t *testing.T) {
 }
 
 // TestInProcessPlacementReleasesOnTeardown proves the ports the in-process
-// placement hands out return to the range when the instance is torn down, and
-// that a port handed out after a concurrent destroy is given back at once.
+// placement hands out return to the range and their listeners are closed when
+// the instance is torn down, and that a port handed out after a concurrent
+// destroy is given back, and its listener closed, at once.
 func TestInProcessPlacementReleasesOnTeardown(t *testing.T) {
 	s := placementService(t, freeRange(t, 4))
 	inst := s.newInstance("server", "")
-	p := s.newInProcessPlacement(inst)
+	p := placeInstance(t, s, inst)
 
-	l, ln, err := p.listenerAddress(shortID(inst.ID)+"-n1", "client")
+	node := shortID(inst.ID) + "-n1"
+	l, err := p.ListenerAddress(node, "client")
 	if err != nil {
-		t.Fatalf("listenerAddress: %v", err)
+		t.Fatalf("ListenerAddress: %v", err)
 	}
-	ln.Close()
+	ln := p.rec.held[[2]string{node, "client"}]
 
-	s.dropInstance(inst.ID)
+	s.dropInstance(inst)
 
 	if inst.ports != nil {
 		t.Errorf("instance ports = %v after teardown, want none", inst.ports)
 	}
-	if !portFree(s.ports, l.Port) {
-		t.Errorf("port %d still in use after teardown", l.Port)
+	if !portFree(s.ports, l.Endpoint.Port) {
+		t.Errorf("port %d still in use after teardown", l.Endpoint.Port)
+	}
+	err = ln.Close()
+	if !errors.Is(err, net.ErrClosed) {
+		t.Errorf("listener on port %d left open after teardown", l.Endpoint.Port)
 	}
 
-	late, ln, err := p.listenerAddress(shortID(inst.ID)+"-n1", "cluster")
+	late, err := p.ListenerAddress(node, "cluster")
 	if err != nil {
-		t.Fatalf("listenerAddress after teardown: %v", err)
+		t.Fatalf("ListenerAddress after teardown: %v", err)
 	}
-	ln.Close()
+	if p.rec.held != nil {
+		t.Errorf("listener of a late reservation kept after teardown")
+	}
+	if !portBindable(late.Endpoint.Port) {
+		t.Errorf("listener of port %d reserved after teardown left open", late.Endpoint.Port)
+	}
 
 	if inst.ports != nil {
 		t.Errorf("instance ports = %v after a late reservation, want none", inst.ports)
 	}
-	if !portFree(s.ports, late.Port) {
-		t.Errorf("port %d reserved after teardown was not given back", late.Port)
+	if !portFree(s.ports, late.Endpoint.Port) {
+		t.Errorf("port %d reserved after teardown was not given back", late.Endpoint.Port)
 	}
 }
 
 // TestInProcessPlacementDirectories proves the in-process placement returns
 // today's directory layout: <Dir>/<id> for the instance, and n<i> or c<c>_s<i>
-// under it for a node.
+// under it as a node's store directory, which is the node's directory.
 func TestInProcessPlacementDirectories(t *testing.T) {
 	s := placementService(t, freeRange(t, 1))
 	inst := s.newInstance("super-cluster", "")
-	p := s.newInProcessPlacement(inst)
+	p := placeInstance(t, s, inst)
 	short := shortID(inst.ID)
 	root := filepath.Join(s.Dir(), inst.ID)
 
-	if p.instanceDir() != root {
-		t.Errorf("instanceDir = %q, want %q", p.instanceDir(), root)
+	if p.InstanceDir() != root {
+		t.Errorf("InstanceDir = %q, want %q", p.InstanceDir(), root)
 	}
 
 	cases := map[string]string{
@@ -138,9 +171,9 @@ func TestInProcessPlacementDirectories(t *testing.T) {
 		short + "-c2_s3": filepath.Join(root, "c2_s3"),
 	}
 	for node, want := range cases {
-		got := p.nodeDir(node)
+		got := p.StoreDir(node)
 		if got != want {
-			t.Errorf("nodeDir(%q) = %q, want %q", node, got, want)
+			t.Errorf("StoreDir(%q) = %q, want %q", node, got, want)
 		}
 	}
 }

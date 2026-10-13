@@ -151,3 +151,78 @@ func TestShapingSetExample(t *testing.T) {
 		t.Errorf("round trip gave %+v, want %+v", again, want)
 	}
 }
+
+// TestInstanceStatusBackendJSON proves the backend, capabilities and version
+// fields marshal under their wire names, survive a round trip, and are left out
+// when empty.
+func TestInstanceStatusBackendJSON(t *testing.T) {
+	full := InstanceStatus{
+		ID:           "abc",
+		Kind:         "server",
+		Servers:      []ManagedServer{{Name: "n1", Version: "2.12.0"}},
+		Backend:      "inprocess",
+		Capabilities: []string{"version-change", "kill"},
+	}
+
+	out, err := json.Marshal(full)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var fields map[string]any
+	err = json.Unmarshal(out, &fields)
+	if err != nil {
+		t.Fatalf("unmarshal %s: %v", out, err)
+	}
+	if fields["backend"] != "inprocess" {
+		t.Errorf("backend = %v in %s, want inprocess", fields["backend"], out)
+	}
+	if !reflect.DeepEqual(fields["capabilities"], []any{"version-change", "kill"}) {
+		t.Errorf("capabilities = %v in %s, want [version-change kill]", fields["capabilities"], out)
+	}
+	servers, ok := fields["servers"].([]any)
+	if !ok || len(servers) != 1 {
+		t.Fatalf("servers = %v in %s, want one server", fields["servers"], out)
+	}
+	server, ok := servers[0].(map[string]any)
+	if !ok || server["version"] != "2.12.0" {
+		t.Errorf("server = %v in %s, want version 2.12.0", servers[0], out)
+	}
+
+	var again InstanceStatus
+	err = json.Unmarshal(out, &again)
+	if err != nil {
+		t.Fatalf("unmarshal round trip: %v", err)
+	}
+	if !reflect.DeepEqual(again, full) {
+		t.Errorf("round trip gave %+v, want %+v", again, full)
+	}
+
+	empty := InstanceStatus{ID: "abc", Kind: "server", Servers: []ManagedServer{{Name: "n1"}}}
+	out, err = json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	fields = nil
+	err = json.Unmarshal(out, &fields)
+	if err != nil {
+		t.Fatalf("unmarshal %s: %v", out, err)
+	}
+	for _, key := range []string{"backend", "capabilities"} {
+		_, present := fields[key]
+		if present {
+			t.Errorf("%s present in %s, want it left out when empty", key, out)
+		}
+	}
+	servers, ok = fields["servers"].([]any)
+	if !ok || len(servers) != 1 {
+		t.Fatalf("servers = %v in %s, want one server", fields["servers"], out)
+	}
+	server, ok = servers[0].(map[string]any)
+	if !ok {
+		t.Fatalf("server = %v in %s, want an object", servers[0], out)
+	}
+	_, present := server["version"]
+	if present {
+		t.Errorf("version present in %s, want it left out when empty", out)
+	}
+}

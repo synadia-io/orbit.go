@@ -21,6 +21,10 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats-server/v2/server"
+
+	"github.com/synadia-io/orbit.go/ntf/backend"
 )
 
 func TestEffectiveSANs(t *testing.T) {
@@ -74,12 +78,12 @@ func TestPlanInstanceTLSAddsAdvertiseHostToSANs(t *testing.T) {
 		TLS:           true,
 	}
 
-	plan, err := planInstance(spec, id, newFakePlacement(id))
+	plan, err := planInstance(spec, id, newFakePlacement(id), server.VERSION)
 	if err != nil {
 		t.Fatalf("planInstance: %v", err)
 	}
 
-	i := slices.IndexFunc(plan.Files, func(f file) bool { return f.Path == filepath.Join("tls", "server.crt") })
+	i := slices.IndexFunc(plan.Files, func(f backend.File) bool { return f.Path == filepath.Join("tls", "server.crt") })
 	if i < 0 {
 		t.Fatalf("plan has no tls/server.crt: %v", plan.Files)
 	}

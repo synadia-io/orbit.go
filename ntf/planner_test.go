@@ -16,13 +16,15 @@ package ntf
 import (
 	"errors"
 	"fmt"
-	"net"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nuid"
+
+	"github.com/synadia-io/orbit.go/ntf/backend"
 )
 
 // fakePlacement places an instance at fixed ports and directories without
@@ -32,54 +34,39 @@ type fakePlacement struct {
 	id   string
 	next int
 
-	// calls records each listenerAddress call as <node dir>/<listener name>.
+	// calls records each ListenerAddress call as <node dir>/<listener name>.
 	calls []string
 
-	// failAt makes the listenerAddress call with this 1-based number fail with
+	// failAt makes the ListenerAddress call with this 1-based number fail with
 	// an error wrapping ErrPortRangeExhausted. Zero never fails.
 	failAt int
-
-	// hold makes every address come with a real listener on 127.0.0.1, kept in
-	// held, standing in for a reserved port.
-	hold bool
-	held []*net.TCPListener
 }
 
 func newFakePlacement(id string) *fakePlacement {
 	return &fakePlacement{id: id, next: goldenPorts.Low}
 }
 
-func (p *fakePlacement) listenerAddress(node, name string) (listener, *net.TCPListener, error) {
+func (p *fakePlacement) ListenerAddress(node, name string) (backend.Listener, error) {
 	p.calls = append(p.calls, strings.TrimPrefix(node, shortID(p.id)+"-")+"/"+name)
 	if len(p.calls) == p.failAt {
-		return listener{}, nil, fmt.Errorf("%w: fake", ErrPortRangeExhausted)
+		return backend.Listener{}, fmt.Errorf("%w: fake", ErrPortRangeExhausted)
 	}
 
-	l := listener{Name: name, Host: "localhost", Port: p.next}
+	l := backend.Listener{Name: name, Endpoint: backend.Endpoint{Host: "localhost", Port: p.next}}
 	p.next++
 
-	if !p.hold {
-		return l, nil, nil
-	}
-
-	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		return listener{}, nil, err
-	}
-	p.held = append(p.held, ln)
-
-	return l, ln, nil
+	return l, nil
 }
 
-func (p *fakePlacement) instanceDir() string {
+func (p *fakePlacement) InstanceDir() string {
 	return filepath.Join("/ntf-plan", p.id)
 }
 
-func (p *fakePlacement) nodeDir(node string) string {
-	return filepath.Join(p.instanceDir(), strings.TrimPrefix(node, shortID(p.id)+"-"))
+func (p *fakePlacement) StoreDir(node string) string {
+	return filepath.Join(p.InstanceDir(), strings.TrimPrefix(node, shortID(p.id)+"-"))
 }
 
-var _ placement = (*fakePlacement)(nil)
+var _ backend.Placement = (*fakePlacement)(nil)
 
 // TestPlanInstanceMatchesGoldenFiles plans each golden case at a fake placement
 // and compares the rendered configs and snippets with the golden files the
@@ -91,18 +78,14 @@ func TestPlanInstanceMatchesGoldenFiles(t *testing.T) {
 			id := nuid.Next()
 			place := newFakePlacement(id)
 
-			plan, err := planInstance(tc.spec, id, place)
+			plan, err := planInstance(tc.spec, id, place, server.VERSION)
 			if err != nil {
 				t.Fatalf("planInstance: %v", err)
 			}
 
 			rendered := map[string][]byte{}
 			for _, n := range plan.Nodes {
-				dir, err := filepath.Rel(place.instanceDir(), place.nodeDir(n.Name))
-				if err != nil {
-					t.Fatalf("node dir: %v", err)
-				}
-				rendered[filepath.Join(dir, "config.cfg")] = n.Config
+				rendered[filepath.Join(n.Dir, "config.cfg")] = n.Config
 
 				for _, f := range n.Files {
 					if f.Mode != 0600 {
@@ -112,7 +95,7 @@ func TestPlanInstanceMatchesGoldenFiles(t *testing.T) {
 				}
 			}
 
-			compareGolden(t, tc.name, normalizeRendered(rendered, place.instanceDir(), id))
+			compareGolden(t, tc.name, normalizeRendered(rendered, place.InstanceDir(), id))
 
 			if !tc.spec.TLS {
 				if len(plan.Files) != 0 || plan.TLS != nil {
@@ -142,8 +125,7 @@ func TestPlanInstanceMatchesGoldenFiles(t *testing.T) {
 }
 
 // TestPlanInstanceReservationOrder proves the planner asks for listener
-// addresses in the order the create handlers have always reserved ports, and
-// leaves each node holding its own listeners.
+// addresses in the order the create handlers have always reserved ports.
 func TestPlanInstanceReservationOrder(t *testing.T) {
 	snippets := map[string]string{"websocket": "", "leafnode": "", "top": ""}
 	node := func(dir string) []string {
@@ -186,27 +168,14 @@ func TestPlanInstanceReservationOrder(t *testing.T) {
 
 			id := nuid.Next()
 			place := newFakePlacement(id)
-			place.hold = true
-			defer closeListeners(place.held)
 
-			plan, err := planInstance(tt.spec, id, place)
+			_, err := planInstance(tt.spec, id, place, server.VERSION)
 			if err != nil {
 				t.Fatalf("planInstance: %v", err)
 			}
 
 			if !slices.Equal(place.calls, tt.want) {
 				t.Errorf("listener addresses asked for in order\n%v\nwant\n%v", place.calls, tt.want)
-			}
-
-			var held int
-			for _, n := range plan.Nodes {
-				if len(n.Held) != len(n.Listeners) {
-					t.Errorf("node %s holds %d listeners for %d listeners", n.Name, len(n.Held), len(n.Listeners))
-				}
-				held += len(n.Held)
-			}
-			if held != len(place.held) {
-				t.Errorf("nodes hold %d listeners, placement handed out %d", held, len(place.held))
 			}
 		})
 	}
@@ -222,7 +191,7 @@ func TestPlanInstanceNodesAndLinks(t *testing.T) {
 	place := newFakePlacement(id)
 	spec := instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: serverConfigTemplate, Proxy: true}
 
-	plan, err := planInstance(spec, id, place)
+	plan, err := planInstance(spec, id, place, server.VERSION)
 	if err != nil {
 		t.Fatalf("planInstance: %v", err)
 	}
@@ -233,7 +202,7 @@ func TestPlanInstanceNodesAndLinks(t *testing.T) {
 	}
 
 	var names []string
-	for _, n := range plan.Nodes {
+	for _, n := range plan.nodes {
 		names = append(names, n.Name)
 		wantCluster := wantClusters[n.ClusterIndex-1]
 		if n.Cluster != wantCluster {
@@ -249,7 +218,7 @@ func TestPlanInstanceNodesAndLinks(t *testing.T) {
 	}
 
 	byName := map[string]*nodePlan{}
-	for _, n := range plan.Nodes {
+	for _, n := range plan.nodes {
 		byName[n.Name] = n
 	}
 
@@ -261,7 +230,7 @@ func TestPlanInstanceNodesAndLinks(t *testing.T) {
 		}
 
 		peer := byName[lk.Peer]
-		var want listener
+		var want backend.Listener
 		switch lk.Kind {
 		case "route":
 			routes[lk.Node]++
@@ -276,8 +245,8 @@ func TestPlanInstanceNodesAndLinks(t *testing.T) {
 			t.Errorf("link from %s to %s has kind %q", lk.Node, lk.Peer, lk.Kind)
 		}
 
-		if lk.Host != want.Host || lk.Port != want.Port {
-			t.Errorf("%s link from %s to %s dials %s:%d, want %s:%d", lk.Kind, lk.Node, lk.Peer, lk.Host, lk.Port, want.Host, want.Port)
+		if lk.Dial != want.Endpoint {
+			t.Errorf("%s link from %s to %s dials %s, want %s", lk.Kind, lk.Node, lk.Peer, lk.Dial, want.Endpoint)
 		}
 	}
 	for _, name := range wantNames {
@@ -291,7 +260,7 @@ func TestPlanInstanceNodesAndLinks(t *testing.T) {
 	}
 
 	spec.Proxy = false
-	plan, err = planInstance(spec, id, newFakePlacement(id))
+	plan, err = planInstance(spec, id, newFakePlacement(id), server.VERSION)
 	if err != nil {
 		t.Fatalf("planInstance without the proxy: %v", err)
 	}
@@ -300,14 +269,90 @@ func TestPlanInstanceNodesAndLinks(t *testing.T) {
 	}
 }
 
+// TestPlanInstanceDirVersionPersistent proves the planner names each node's
+// directory as the in-process layout does and prefixes every one of its files
+// with it, gives every node the version it is asked for, and records the store
+// directory placement returns as the node's persistent path and its rendered
+// .StoreDir. The exported nodes are the wrappers' embedded plans.
+func TestPlanInstanceDirVersionPersistent(t *testing.T) {
+	tests := []struct {
+		name string
+		spec instanceSpec
+		dirs []string
+	}{
+		{
+			name: "server",
+			spec: instanceSpec{Kind: "server", Servers: 1},
+			dirs: []string{"n1"},
+		},
+		{
+			name: "cluster",
+			spec: instanceSpec{Kind: "cluster", Servers: 3},
+			dirs: []string{"n1", "n2", "n3"},
+		},
+		{
+			name: "super-cluster",
+			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2},
+			dirs: []string{"c1_s1", "c1_s2", "c2_s1", "c2_s2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.spec.MainTemplate = serverConfigTemplate
+			tt.spec.Snippets = map[string]string{"top": "", "websocket": ""}
+			tt.spec.TLS = true
+
+			id := nuid.Next()
+			place := newFakePlacement(id)
+
+			plan, err := planInstance(tt.spec, id, place, "9.8.7")
+			if err != nil {
+				t.Fatalf("planInstance: %v", err)
+			}
+
+			if len(plan.Nodes) != len(tt.dirs) || len(plan.nodes) != len(tt.dirs) {
+				t.Fatalf("plan has %d exported and %d wrapped nodes, want %d", len(plan.Nodes), len(plan.nodes), len(tt.dirs))
+			}
+
+			for i, n := range plan.nodes {
+				if plan.Nodes[i] != &n.NodePlan {
+					t.Errorf("exported node %d is not node %s's embedded plan", i, n.Name)
+				}
+				if n.Dir != tt.dirs[i] {
+					t.Errorf("node %s dir = %q, want %q", n.Name, n.Dir, tt.dirs[i])
+				}
+				if len(n.Files) == 0 {
+					t.Errorf("node %s has no files", n.Name)
+				}
+				for _, f := range n.Files {
+					if !strings.HasPrefix(f.Path, n.Dir+string(filepath.Separator)) {
+						t.Errorf("node %s file %s is not under its dir %s", n.Name, f.Path, n.Dir)
+					}
+				}
+				if n.Version != "9.8.7" {
+					t.Errorf("node %s version = %q, want 9.8.7", n.Name, n.Version)
+				}
+
+				store := place.StoreDir(n.Name)
+				if !slices.Equal(n.Persistent, []string{store}) {
+					t.Errorf("node %s persistent = %v, want [%s]", n.Name, n.Persistent, store)
+				}
+				if n.TemplateData.StoreDir != store {
+					t.Errorf("node %s renders store dir %q, want %q", n.Name, n.TemplateData.StoreDir, store)
+				}
+			}
+		})
+	}
+}
+
 // TestPlanInstanceErrors proves each kind of planning failure is returned with
-// the message the create handlers answer it with, and that every listener the
-// placement handed out is closed again.
+// the message the create handlers answer it with.
 func TestPlanInstanceErrors(t *testing.T) {
 	tests := []struct {
 		name string
 		spec instanceSpec
-		// failAt is the listenerAddress call that fails, 0 for none.
+		// failAt is the ListenerAddress call that fails, 0 for none.
 		failAt int
 		kind   planErrorKind
 		prefix string
@@ -367,12 +412,10 @@ func TestPlanInstanceErrors(t *testing.T) {
 
 			id := nuid.Next()
 			place := newFakePlacement(id)
-			place.hold = true
 			place.failAt = tt.failAt
 
-			plan, err := planInstance(tt.spec, id, place)
+			plan, err := planInstance(tt.spec, id, place, server.VERSION)
 			if err == nil {
-				closeListeners(place.held)
 				t.Fatal("planInstance succeeded, want an error")
 			}
 			if plan != nil {
@@ -391,16 +434,6 @@ func TestPlanInstanceErrors(t *testing.T) {
 			}
 			if tt.is != nil && !errors.Is(err, tt.is) {
 				t.Errorf("error %v does not wrap %v", err, tt.is)
-			}
-
-			if tt.failAt > 0 && len(place.held) != tt.failAt-1 {
-				t.Errorf("placement handed out %d listeners, want %d", len(place.held), tt.failAt-1)
-			}
-			for i, ln := range place.held {
-				err := ln.Close()
-				if !errors.Is(err, net.ErrClosed) {
-					t.Errorf("listener %d was left open after the failure", i+1)
-				}
 			}
 		})
 	}

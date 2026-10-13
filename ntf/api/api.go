@@ -124,6 +124,9 @@ type ManagedServer struct {
 	// TraceURL is the capture-proxy URL for a server created with trace capture
 	// enabled. Set client-side from Ports["trace"]; empty when not traced.
 	TraceURL string `json:"trace_url,omitempty"`
+	// Version is the server version the node runs, in its backend's own version
+	// string. Set by status only; empty when the node could not report it.
+	Version string `json:"version,omitempty"`
 }
 
 type CreateResponse struct {
@@ -217,6 +220,14 @@ type InstanceStatus struct {
 	// capture proxy, in the order they were applied. Empty when the instance has
 	// no proxy or the capturer does not shape.
 	ShapingSets []string `json:"shaping_sets,omitempty"`
+	// Backend is the name the backend running the instance's servers was
+	// registered under. Its presence is how a client tells a service whose
+	// backend declares no capabilities from an older service that reports none.
+	Backend string `json:"backend,omitempty"`
+	// Capabilities holds the capabilities the instance's backend declares, such
+	// as "kill", "pause" and "version-change", in the order it declares them.
+	// Empty when it declares none.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type StatusResponse struct {

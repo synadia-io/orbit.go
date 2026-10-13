@@ -55,11 +55,11 @@ func TestPlanInstanceTemplateDataAdvertiseHost(t *testing.T) {
 				AdvertiseHost: tt.advertiseHost,
 			}
 
-			plan, err := planInstance(spec, id, newFakePlacement(id))
+			plan, err := planInstance(spec, id, newFakePlacement(id), server.VERSION)
 			if err != nil {
 				t.Fatalf("planInstance: %v", err)
 			}
-			td := plan.Nodes[0].TemplateData
+			td := plan.nodes[0].TemplateData
 
 			if td.AdvertiseHost != tt.advertiseHost {
 				t.Fatalf("AdvertiseHost: got %q, want %q", td.AdvertiseHost, tt.advertiseHost)
@@ -778,6 +778,48 @@ func TestUpdateKeepsTLSTimeout(t *testing.T) {
 	}
 }
 
+// TestUpdateConfigRenderFailureWritesNothing proves an update whose config
+// fails to render answers 009 and leaves the node's snippets as they were, so a
+// later reload cannot apply half of the update.
+func TestUpdateConfigRenderFailureWritesNothing(t *testing.T) {
+	ms := startTestService(t)
+
+	const before = "# top before the update\n"
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{
+		Snippets: map[string]string{"top": before},
+	}, &created)
+	name := created.Servers[0].Name
+
+	payload, err := json.Marshal(api.UpdateServerRequest{
+		Name:     name,
+		Snippets: map[string]string{"top": "# top after the update\n"},
+		Template: "{{ .NoSuchField }}",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := ms.nc.Request("tester.update.server", payload, 30*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	code := msg.Header.Get("Nats-Service-Error-Code")
+	desc := msg.Header.Get("Nats-Service-Error")
+	if code != "009" || !strings.HasPrefix(desc, "config render failed: ") {
+		t.Errorf("answered %q %q, want 009 config render failed", code, desc)
+	}
+
+	snippet, err := os.ReadFile(filepath.Join(ms.findServerByName(name).rootDir, "snippets", "top.conf"))
+	if err != nil {
+		t.Fatalf("read top snippet: %v", err)
+	}
+	if string(snippet) != before {
+		t.Errorf("failed update rewrote the top snippet:\n%s", snippet)
+	}
+}
+
 // TestReloadStoppedServerIsRejected proves reload refuses a server that is not
 // running, rather than reporting a reload that cannot have happened.
 func TestReloadStoppedServerIsRejected(t *testing.T) {
@@ -849,6 +891,35 @@ func TestStatusReportsClientPort(t *testing.T) {
 	}
 	if got := status.Instances[0].Servers[0].Port; got != wantPort {
 		t.Fatalf("status Port = %d, want client port %d", got, wantPort)
+	}
+}
+
+// TestStatusReportsBackend proves status reports, per instance, the in-process
+// backend's name and its empty capabilities, and per server the version the
+// node runs.
+func TestStatusReportsBackend(t *testing.T) {
+	ms := startTestService(t)
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 3}, &created)
+
+	var status api.StatusResponse
+	mustRequest(t, ms.nc, "tester.status", api.StatusRequest{InstanceID: created.ID}, &status)
+	if len(status.Instances) != 1 || len(status.Instances[0].Servers) != 3 {
+		t.Fatalf("unexpected status shape: %+v", status)
+	}
+
+	inst := status.Instances[0]
+	if inst.Backend != inProcessBackendName {
+		t.Errorf("backend = %q, want %q", inst.Backend, inProcessBackendName)
+	}
+	if len(inst.Capabilities) != 0 {
+		t.Errorf("capabilities = %v, want none", inst.Capabilities)
+	}
+	for _, srv := range inst.Servers {
+		if srv.Version != server.VERSION {
+			t.Errorf("server %q version = %q, want %q", srv.Name, srv.Version, server.VERSION)
+		}
 	}
 }
 

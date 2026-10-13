@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
 	"github.com/nats-io/nuid"
+
+	"github.com/synadia-io/orbit.go/ntf/backend"
 )
 
 const (
@@ -106,6 +109,15 @@ type Options struct {
 
 	// NewCapturer supplies trace capture. Nil refuses requests that ask for it.
 	NewCapturer NewCapturerFunc
+
+	// Backends are backend factories to register, keyed by name, beside the
+	// built-in "inprocess" backend. New fails on an empty name or on
+	// "inprocess".
+	Backends map[string]backend.Factory
+
+	// Backend names the registered backend that runs managed servers. Empty
+	// uses "inprocess". New fails on a name that is not registered.
+	Backend string
 }
 
 // EmbeddedOptions configures the management server started when Options.Conn is nil.
@@ -150,6 +162,11 @@ type Service struct {
 	// ports hands out every port a managed server listens on.
 	ports *portAllocator
 
+	// backend runs the managed servers of every instance.
+	backend backend.Backend
+	// backendName is the name backend was registered under. Status reports it.
+	backendName string
+
 	mu        sync.Mutex
 	instances map[string]*instance
 }
@@ -168,18 +185,18 @@ type instance struct {
 	// return to the range when the instance is torn down. Guarded by Service.mu.
 	ports []int
 
-	// plan is the plan the instance was created from, set before its first node
-	// starts. It holds no TLS material and no contents of the instance's own
-	// files; each node's config and file contents are dropped once that node has
-	// started, before it is published. Guarded by Service.mu.
+	// plan is the plan the instance was created from, set once its nodes are
+	// provisioned and before they are published. It holds no TLS material and
+	// no contents of any file or config. Guarded by Service.mu.
 	plan *instancePlan
 }
 
 type managedServer struct {
-	srv        *server.Server
-	rootDir    string
-	configPath string
-	ports      map[string]int
+	// backendNode is the server as the backend runs it.
+	backendNode backend.Node
+
+	rootDir string
+	ports   map[string]int
 
 	// instanceID names the owning instance, so a handler holding only this
 	// server can ask whether that instance is still registered. A start that
@@ -210,7 +227,7 @@ type managedServer struct {
 	// (flushing in-flight captures) before the server is shut down on teardown.
 	traceProxy CaptureProxy
 
-	// cfgMu guards the server's config (configPath and its snippet
+	// cfgMu guards the server's config (its config path and its snippet
 	// files). Held by update, reload and start operations.
 	cfgMu sync.Mutex
 }
@@ -239,6 +256,31 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 	}
 	s.ports = newPortAllocator(portRange)
 
+	factories := map[string]backend.Factory{
+		inProcessBackendName: func(context.Context, backend.Options) (backend.Backend, error) {
+			return newInProcessBackend(s), nil
+		},
+	}
+	for name, factory := range opts.Backends {
+		if name == "" {
+			return nil, fmt.Errorf("%w: empty name", ErrBackendName)
+		}
+		_, exists := factories[name]
+		if exists {
+			return nil, fmt.Errorf("%w: %q is already registered", ErrBackendName, name)
+		}
+		factories[name] = factory
+	}
+
+	backendName := opts.Backend
+	if backendName == "" {
+		backendName = inProcessBackendName
+	}
+	factory, ok := factories[backendName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q, registered: %s", ErrUnknownBackend, backendName, strings.Join(slices.Sorted(maps.Keys(factories)), ", "))
+	}
+
 	// Anything started below is registered here so a later failure can undo it
 	// in reverse order.
 	var unwind []func()
@@ -259,6 +301,14 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		s.ownDir = true
 		unwind = append(unwind, func() { os.RemoveAll(dir) })
 	}
+
+	be, err := factory(ctx, backend.Options{Dir: s.dir, Preserve: s.preserve, Logger: log})
+	if err != nil {
+		return fail(fmt.Errorf("could not create the %q backend: %w", backendName, err))
+	}
+	s.backend = be
+	s.backendName = backendName
+	unwind = append(unwind, func() { be.Close() })
 
 	switch {
 	case opts.Conn != nil:
@@ -516,6 +566,11 @@ func (s *Service) Close() error {
 		errs = append(errs, err)
 	}
 
+	err := s.backend.Close()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("could not close the backend: %w", err))
+	}
+
 	if s.capturer != nil {
 		if err := s.capturer.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("could not close the trace capturer: %w", err))
@@ -560,56 +615,35 @@ func (s *Service) newInstance(kind, description string) *instance {
 	return inst
 }
 
-// dropInstance removes a partially-built instance after a create failure.
-// Shuts down whatever servers managed to start, removes the rootDir if not preserving.
-func (s *Service) dropInstance(id string) {
+// dropInstance removes a partially-built instance after a create failure and
+// tears it down. It tears it down even when a concurrent destroy or reset has
+// already removed it, since the create may have placed or started more since
+// that teardown.
+func (s *Service) dropInstance(inst *instance) {
 	s.mu.Lock()
-	inst, ok := s.instances[id]
-	if ok {
-		delete(s.instances, id)
-	}
+	delete(s.instances, inst.ID)
 	s.mu.Unlock()
-
-	if !ok {
-		return
-	}
 
 	s.tearDownInstance(inst)
 }
 
 func (s *Service) tearDownInstance(inst *instance) {
-	for _, ms := range inst.Servers {
-		// Stop the capture proxy first, while the connection the capturer stores
-		// through is still up, so in-flight captures flush before the backend
-		// server goes away.
+	s.mu.Lock()
+	servers := slices.Clone(inst.Servers)
+	s.mu.Unlock()
+
+	// Stop the capture proxies first, while the connection the capturer stores
+	// through is still up, so in-flight captures flush before the backend
+	// servers go away.
+	for _, ms := range servers {
 		if ms.traceProxy != nil {
 			ms.traceProxy.Stop()
 		}
-		if ms.srv != nil {
-			ms.srv.Shutdown()
-			ms.srv.WaitForShutdown()
-			s.log.Info("Stopped server", "server", ms.srv.Name())
-		}
 	}
 
-	s.mu.Lock()
-	ports := inst.ports
-	inst.ports = nil
-	s.mu.Unlock()
-	s.ports.release(ports...)
-
-	if inst.RootDir == "" {
-		return
-	}
-
-	if s.preserve {
-		s.log.Info("Preserving instance", "instance", inst.ID, "dir", inst.RootDir)
-		return
-	}
-
-	s.log.Info("Removing instance dir", "instance", inst.ID, "dir", inst.RootDir)
-	if err := os.RemoveAll(inst.RootDir); err != nil {
-		s.log.Error("Failed to remove instance dir", "instance", inst.ID, "err", err)
+	err := s.backend.Teardown(context.Background(), inst.ID)
+	if err != nil {
+		s.log.Error("Failed to tear down instance", "instance", inst.ID, "err", err)
 	}
 }
 
