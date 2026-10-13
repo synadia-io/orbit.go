@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 )
@@ -136,6 +137,70 @@ func TestRegistryRejectsBadNames(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err, tt.message)
 			}
 		})
+	}
+}
+
+// TestRegistryRejectsBadAgentNames proves New fails on an empty agent name with
+// ErrAgentName, and on an unknown one with ErrUnknownAgent naming the
+// registered agents.
+func TestRegistryRejectsBadAgentNames(t *testing.T) {
+	factory := func(context.Context, agent.Options) (agent.Provider, error) { return &fakeProvider{}, nil }
+
+	tests := []struct {
+		name   string
+		agents map[string]agent.Factory
+		agent  string
+		want   error
+		// message is text the error must contain, empty for none.
+		message string
+	}{
+		{name: "empty name", agents: map[string]agent.Factory{"": factory}, want: ErrAgentName},
+		{name: "nil factory", agents: map[string]agent.Factory{"one": nil}, agent: "one", want: ErrAgentName, message: `"one" has a nil factory`},
+		{name: "unknown", agents: map[string]agent.Factory{"two": factory, "one": factory}, agent: "nope", want: ErrUnknownAgent, message: `"nope", registered: one, two`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, err := New(t.Context(), Options{Dir: t.TempDir(), Agents: tt.agents, Agent: tt.agent})
+			if err == nil {
+				svc.Close()
+				t.Fatal("New succeeded, want an error")
+			}
+			if !errors.Is(err, tt.want) {
+				t.Errorf("error %v, want %v", err, tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.message) {
+				t.Errorf("error %q does not contain %q", err, tt.message)
+			}
+		})
+	}
+}
+
+// TestRegistryRejectsNilProvider proves New fails, rather than running with no
+// agent or panicking later, when the selected factory returns no provider.
+func TestRegistryRejectsNilProvider(t *testing.T) {
+	factory := func(context.Context, agent.Options) (agent.Provider, error) { return nil, nil }
+
+	svc, err := New(t.Context(), Options{Dir: t.TempDir(), Agents: map[string]agent.Factory{"one": factory}, Agent: "one"})
+	if err == nil {
+		svc.Close()
+		t.Fatal("New succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "returned no provider") {
+		t.Errorf("error %q does not say the factory returned no provider", err)
+	}
+}
+
+// TestRegistryNoAgentSelected proves a service with agents registered but none
+// selected refuses a traced create with 014.
+func TestRegistryNoAgentSelected(t *testing.T) {
+	svc := startTestService(t, func(o *Options) {
+		o.Agents = map[string]agent.Factory{"fake": func(context.Context, agent.Options) (agent.Provider, error) { return &fakeProvider{}, nil }}
+	})
+
+	got := errorCodeFor(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true})
+	if got != "014" {
+		t.Errorf("error code = %q, want 014", got)
 	}
 }
 

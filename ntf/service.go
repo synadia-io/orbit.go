@@ -32,6 +32,7 @@ import (
 	"github.com/nats-io/nats.go/micro"
 	"github.com/nats-io/nuid"
 
+	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 )
 
@@ -107,9 +108,6 @@ type Options struct {
 	// the default will not find the service.
 	Group string
 
-	// NewCapturer supplies trace capture. Nil refuses requests that ask for it.
-	NewCapturer NewCapturerFunc
-
 	// Backends are backend factories to register, keyed by name, beside the
 	// built-in "inprocess" backend. New fails on an empty name or on
 	// "inprocess".
@@ -118,6 +116,15 @@ type Options struct {
 	// Backend names the registered backend that runs managed servers. Empty
 	// uses "inprocess". New fails on a name that is not registered.
 	Backend string
+
+	// Agents are network agent factories to register, keyed by name. New
+	// fails on an empty name. There is no built-in agent.
+	Agents map[string]agent.Factory
+
+	// Agent names the registered agent that fronts managed servers for trace
+	// capture and shaping. Empty selects none, and requests that ask for trace
+	// capture are refused. New fails on a name that is not registered.
+	Agent string
 }
 
 // EmbeddedOptions configures the management server started when Options.Conn is nil.
@@ -149,9 +156,12 @@ type Service struct {
 	// ownConn reports whether Close may close nc.
 	ownConn bool
 
-	micro    micro.Service
-	log      *slog.Logger
-	capturer Capturer
+	micro micro.Service
+	log   *slog.Logger
+
+	// agents starts the network agents of instances created with trace
+	// capture, nil when no agent is selected.
+	agents agent.Provider
 
 	dir string
 	// ownDir reports whether Close may remove dir.
@@ -195,6 +205,8 @@ type managedServer struct {
 	// backendNode is the server as the backend runs it.
 	backendNode backend.Node
 
+	// rootDir is the server's directory under its placement. Only tests read
+	// it.
 	rootDir string
 	ports   map[string]int
 
@@ -222,10 +234,10 @@ type managedServer struct {
 	// swaps in a changed copy on success. Guarded by cfgMu.
 	node *nodePlan
 
-	// traceProxy is the capture proxy fronting this server's client port, set when
+	// agent is the network agent fronting this server's client port, set when
 	// the server was created with trace capture enabled. nil otherwise. Stopped
 	// (flushing in-flight captures) before the server is shut down on teardown.
-	traceProxy CaptureProxy
+	agent agent.Agent
 
 	// cfgMu guards the server's config (its config path and its snippet
 	// files). Held by update, reload and start operations.
@@ -281,6 +293,23 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		return nil, fmt.Errorf("%w: %q, registered: %s", ErrUnknownBackend, backendName, strings.Join(slices.Sorted(maps.Keys(factories)), ", "))
 	}
 
+	for name, f := range opts.Agents {
+		if name == "" {
+			return nil, fmt.Errorf("%w: empty name", ErrAgentName)
+		}
+		if f == nil {
+			return nil, fmt.Errorf("%w: %q has a nil factory", ErrAgentName, name)
+		}
+	}
+
+	var agentFactory agent.Factory
+	if opts.Agent != "" {
+		agentFactory, ok = opts.Agents[opts.Agent]
+		if !ok {
+			return nil, fmt.Errorf("%w: %q, registered: %s", ErrUnknownAgent, opts.Agent, strings.Join(slices.Sorted(maps.Keys(opts.Agents)), ", "))
+		}
+	}
+
 	// Anything started below is registered here so a later failure can undo it
 	// in reverse order.
 	var unwind []func()
@@ -334,6 +363,20 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		unwind = append(unwind, nc.Close)
 	}
 
+	// The agent is built before the endpoints go live, so no request finds the
+	// service without it.
+	if agentFactory != nil {
+		provider, err := agentFactory(ctx, agent.Options{Dir: s.dir, Preserve: s.preserve, Logger: log, Conn: s.nc, Server: s.srv})
+		if err != nil {
+			return fail(fmt.Errorf("could not create the %q agent: %w", opts.Agent, err))
+		}
+		if provider == nil {
+			return fail(fmt.Errorf("could not create the %q agent: the factory returned no provider", opts.Agent))
+		}
+		s.agents = provider
+		unwind = append(unwind, func() { provider.Close() })
+	}
+
 	group := opts.Group
 	if group == "" {
 		group = DefaultGroup
@@ -347,14 +390,6 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		return fail(err)
 	}
 	unwind = append(unwind, func() { s.micro.Stop() })
-
-	if opts.NewCapturer != nil {
-		capturer, err := opts.NewCapturer(ctx, s)
-		if err != nil {
-			return fail(fmt.Errorf("could not create the trace capturer: %w", err))
-		}
-		s.capturer = capturer
-	}
 
 	return s, nil
 }
@@ -550,7 +585,7 @@ func (s *Service) Reset() error {
 
 // Close stops serving and releases everything the service owns: it stops answering
 // requests, tears down every instance (flushing captures while the connection is
-// still up), closes the capturer, and shuts down the embedded server. A connection
+// still up), closes the agent provider, and shuts down the embedded server. A connection
 // supplied through Options is left open, as is a directory supplied through
 // Options.Dir.
 func (s *Service) Close() error {
@@ -571,9 +606,10 @@ func (s *Service) Close() error {
 		errs = append(errs, fmt.Errorf("could not close the backend: %w", err))
 	}
 
-	if s.capturer != nil {
-		if err := s.capturer.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("could not close the trace capturer: %w", err))
+	if s.agents != nil {
+		err := s.agents.Close()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("could not close the agent provider: %w", err))
 		}
 	}
 
@@ -632,12 +668,15 @@ func (s *Service) tearDownInstance(inst *instance) {
 	servers := slices.Clone(inst.Servers)
 	s.mu.Unlock()
 
-	// Stop the capture proxies first, while the connection the capturer stores
-	// through is still up, so in-flight captures flush before the backend
-	// servers go away.
+	// Stop the agents first, while the connection they may store through is
+	// still up, so in-flight captures flush before the backend servers go away.
 	for _, ms := range servers {
-		if ms.traceProxy != nil {
-			ms.traceProxy.Stop()
+		if ms.agent == nil {
+			continue
+		}
+		err := ms.agent.Stop(context.Background())
+		if err != nil {
+			s.log.Error("Failed to stop agent", "instance", inst.ID, "err", err)
 		}
 	}
 

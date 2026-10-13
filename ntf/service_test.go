@@ -18,13 +18,14 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/api"
+	"github.com/synadia-io/orbit.go/ntf/backend"
 )
 
 // startTestService starts a service on an embedded server with an OS-chosen port
@@ -130,181 +131,217 @@ func TestNewSuppliedConn(t *testing.T) {
 	}
 }
 
-// fakeCapturer records the requests it is handed and hands back proxies that
-// forward nothing; it covers the injection path without a real capture backend.
-// When shaper is set every Capture hands back that proxy, so a test can drive the
-// tester.shape.* endpoints against a proxy that implements Shaper.
-type fakeCapturer struct {
-	mu       sync.Mutex
-	requests []CaptureRequest
-	closed   bool
-	err      error
-	shaper   *fakeShapingProxy
+// fakeProvider records the specs it is handed and hands back agents that
+// forward nothing; it covers the agent path without a real agent. When agent is
+// set every Start hands back that agent, so a test can drive the tester.shape.*
+// endpoints against an agent with shaping. Otherwise each Start hands back a
+// new agent without shaping.
+type fakeProvider struct {
+	mu     sync.Mutex
+	specs  []agent.Spec
+	closed bool
+	err    error
+	agent  *fakeAgent
 }
 
-func (f *fakeCapturer) Capture(_ context.Context, req CaptureRequest) (CaptureProxy, error) {
+func (f *fakeProvider) Start(_ context.Context, spec agent.Spec) (agent.Agent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if f.err != nil {
 		return nil, f.err
 	}
-	f.requests = append(f.requests, req)
+	f.specs = append(f.specs, spec)
+	port := 45000 + len(f.specs)
 
-	if f.shaper != nil {
-		f.shaper.port = 45000 + len(f.requests)
-		return f.shaper, nil
+	if f.agent != nil {
+		f.agent.mu.Lock()
+		f.agent.port = port
+		f.agent.mu.Unlock()
+		return f.agent, nil
 	}
 
-	return &fakeProxy{port: 45000 + len(f.requests)}, nil
+	return &fakeAgent{port: port, noShaping: true}, nil
 }
 
-func (f *fakeCapturer) Close() error {
+func (f *fakeProvider) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed = true
 	return nil
 }
 
-func (f *fakeCapturer) snapshot() ([]CaptureRequest, bool) {
+func (f *fakeProvider) snapshot() ([]agent.Spec, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]CaptureRequest(nil), f.requests...), f.closed
+	return append([]agent.Spec(nil), f.specs...), f.closed
 }
 
-type fakeProxy struct {
-	port    int
-	stopped bool
+// fakeAgent records what each method was handed and answers with canned values.
+// noShaping refuses every shaping method with agent.ErrUnsupported; err, when
+// set, is returned by every shaping method otherwise.
+type fakeAgent struct {
+	mu        sync.Mutex
+	port      int
+	stopped   bool
+	noShaping bool
+	sets      []api.ShapingSet
+	cleared   []string
+	reported  []string
+	setsCalls int
+	err       error
+	reports   []api.ShapingReport
+	setIDs    []string
 }
 
-func (p *fakeProxy) Port() int { return p.port }
-func (p *fakeProxy) Stop()     { p.stopped = true }
-
-// fakeShapingProxy is a fakeProxy that implements Shaper, recording what each
-// method was handed and answering with canned values. err, when set, is returned
-// by every Shaper method.
-type fakeShapingProxy struct {
-	fakeProxy
-
-	mu       sync.Mutex
-	sets     []api.ShapingSet
-	cleared  []string
-	reported []string
-	err      error
-	reports  []api.ShapingReport
+func (a *fakeAgent) Endpoint() backend.Endpoint {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return backend.Endpoint{Host: "127.0.0.1", Port: a.port}
 }
 
-func (p *fakeShapingProxy) Shape(set api.ShapingSet) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (a *fakeAgent) Shape(_ context.Context, set api.ShapingSet) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	if p.err != nil {
-		return p.err
+	if a.noShaping {
+		return agent.ErrUnsupported
 	}
-	p.sets = append(p.sets, set)
+	if a.err != nil {
+		return a.err
+	}
+	a.sets = append(a.sets, set)
 	return nil
 }
 
-func (p *fakeShapingProxy) ClearShaping(set string) ([]string, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (a *fakeAgent) ClearShaping(_ context.Context, id string) ([]string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	if p.err != nil {
-		return nil, p.err
+	if a.noShaping {
+		return nil, agent.ErrUnsupported
 	}
-	p.cleared = append(p.cleared, set)
-	if set != "" {
-		return []string{set}, nil
+	if a.err != nil {
+		return nil, a.err
+	}
+	a.cleared = append(a.cleared, id)
+	if id != "" {
+		return []string{id}, nil
 	}
 
 	var ids []string
-	for _, s := range p.sets {
+	for _, s := range a.sets {
 		ids = append(ids, s.ID)
 	}
 	return ids, nil
 }
 
-func (p *fakeShapingProxy) ShapingReport(set string) ([]api.ShapingReport, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (a *fakeAgent) ShapingReport(_ context.Context, id string) ([]api.ShapingReport, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	if p.err != nil {
-		return nil, p.err
+	if a.noShaping {
+		return nil, agent.ErrUnsupported
 	}
-	p.reported = append(p.reported, set)
-	return p.reports, nil
+	if a.err != nil {
+		return nil, a.err
+	}
+	a.reported = append(a.reported, id)
+	return a.reports, nil
 }
 
-func withCapturer(c Capturer) func(*Options) {
+func (a *fakeAgent) ShapingSets(context.Context) ([]string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.noShaping {
+		return nil, agent.ErrUnsupported
+	}
+	if a.err != nil {
+		return nil, a.err
+	}
+	a.setsCalls++
+	return a.setIDs, nil
+}
+
+func (a *fakeAgent) Stop(context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stopped = true
+	return nil
+}
+
+var (
+	_ agent.Provider = (*fakeProvider)(nil)
+	_ agent.Agent    = (*fakeAgent)(nil)
+)
+
+// withAgent registers p as the "fake" agent and selects it.
+func withAgent(p *fakeProvider) func(*Options) {
 	return func(o *Options) {
-		o.NewCapturer = func(context.Context, *Service) (Capturer, error) { return c, nil }
+		o.Agents = map[string]agent.Factory{"fake": func(context.Context, agent.Options) (agent.Provider, error) { return p, nil }}
+		o.Agent = "fake"
 	}
 }
 
-// TestTraceUsesCapturer proves a traced create reaches the injected Capturer, that
-// the port it reports is published as the server's trace port, and that the
-// request describes the server being fronted.
-func TestTraceUsesCapturer(t *testing.T) {
-	capturer := &fakeCapturer{}
-	svc := startTestService(t, withCapturer(capturer))
+// TestTraceUsesAgent proves a traced create reaches the selected agent, that
+// the port of its endpoint is published as the server's trace port, and that
+// the spec describes the server being fronted.
+func TestTraceUsesAgent(t *testing.T) {
+	provider := &fakeProvider{}
+	svc := startTestService(t, withAgent(provider))
 
 	var created api.CreateResponse
 	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
 
-	reqs, _ := capturer.snapshot()
-	if len(reqs) != 1 {
-		t.Fatalf("capturer saw %d requests, want 1", len(reqs))
+	specs, _ := provider.snapshot()
+	if len(specs) != 1 {
+		t.Fatalf("provider saw %d specs, want 1", len(specs))
 	}
 
-	req := reqs[0]
-	if req.InstanceID != created.ID {
-		t.Errorf("InstanceID = %q, want %q", req.InstanceID, created.ID)
+	spec := specs[0]
+	if spec.InstanceID != created.ID {
+		t.Errorf("InstanceID = %q, want %q", spec.InstanceID, created.ID)
 	}
-	if req.ServerName != created.Servers[0].Name {
-		t.Errorf("ServerName = %q, want %q", req.ServerName, created.Servers[0].Name)
+	if spec.ServerName != created.Servers[0].Name {
+		t.Errorf("ServerName = %q, want %q", spec.ServerName, created.Servers[0].Name)
 	}
-	if want := filepath.Join(svc.Dir(), created.ID, "traces"); req.TmpDir != want {
-		t.Errorf("TmpDir = %q, want %q", req.TmpDir, want)
-	}
-	if _, err := os.Stat(req.TmpDir); err != nil {
-		t.Errorf("service did not create TmpDir: %v", err)
-	}
-	if !req.Store {
+	if !spec.Store {
 		t.Error("Store = false, want true for a traced create")
 	}
 
 	if got := created.Servers[0].Ports["trace"]; got != 45001 {
-		t.Errorf("trace port = %d, want the capturer's 45001", got)
+		t.Errorf("trace port = %d, want the agent's 45001", got)
 	}
 }
 
-// TestProxyUsesCapturerWithoutStore proves a create with Proxy and no Trace starts
-// the proxy with Store false and still publishes the trace port.
-func TestProxyUsesCapturerWithoutStore(t *testing.T) {
-	capturer := &fakeCapturer{}
-	svc := startTestService(t, withCapturer(capturer))
+// TestProxyUsesAgentWithoutStore proves a create with Proxy and no Trace starts
+// the agent with Store false and still publishes the trace port.
+func TestProxyUsesAgentWithoutStore(t *testing.T) {
+	provider := &fakeProvider{}
+	svc := startTestService(t, withAgent(provider))
 
 	var created api.CreateResponse
 	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Proxy: true}, &created)
 
-	reqs, _ := capturer.snapshot()
-	if len(reqs) != 1 {
-		t.Fatalf("capturer saw %d requests, want 1", len(reqs))
+	specs, _ := provider.snapshot()
+	if len(specs) != 1 {
+		t.Fatalf("provider saw %d specs, want 1", len(specs))
 	}
-	if reqs[0].Store {
+	if specs[0].Store {
 		t.Error("Store = true, want false for a proxy-only create")
 	}
 	if got := created.Servers[0].Ports["trace"]; got != 45001 {
-		t.Errorf("trace port = %d, want the capturer's 45001", got)
+		t.Errorf("trace port = %d, want the agent's 45001", got)
 	}
 }
 
 // TestStatusListsShapingSets proves tester.status reports the ids of the sets the
-// instance's proxy holds, in the proxy's order, and none for an instance without a
-// proxy.
+// instance's agent holds, in the agent's order, and none for an instance without an
+// agent.
 func TestStatusListsShapingSets(t *testing.T) {
-	proxy := &fakeShapingProxy{reports: []api.ShapingReport{{ID: "lost-ack-30"}, {ID: "slow-pub"}}}
-	svc := startTestService(t, withCapturer(&fakeCapturer{shaper: proxy}))
+	fake := &fakeAgent{setIDs: []string{"lost-ack-30", "slow-pub"}}
+	svc := startTestService(t, withAgent(&fakeProvider{agent: fake}))
 
 	var shaped api.CreateResponse
 	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Proxy: true}, &shaped)
@@ -319,11 +356,11 @@ func TestStatusListsShapingSets(t *testing.T) {
 	if got := status.Instances[0].ShapingSets; !reflect.DeepEqual(got, []string{"lost-ack-30", "slow-pub"}) {
 		t.Errorf("shaping sets = %v, want [lost-ack-30 slow-pub]", got)
 	}
-	proxy.mu.Lock()
-	reported := append([]string(nil), proxy.reported...)
-	proxy.mu.Unlock()
-	if !reflect.DeepEqual(reported, []string{""}) {
-		t.Errorf("proxy was asked to report %q, want the empty set meaning all", reported)
+	fake.mu.Lock()
+	setsCalls := fake.setsCalls
+	fake.mu.Unlock()
+	if setsCalls != 1 {
+		t.Errorf("agent was asked for its shaping sets %d times, want 1", setsCalls)
 	}
 
 	var plainStatus api.StatusResponse
@@ -332,13 +369,13 @@ func TestStatusListsShapingSets(t *testing.T) {
 		t.Fatalf("status returned %d instances, want 1", len(plainStatus.Instances))
 	}
 	if got := plainStatus.Instances[0].ShapingSets; len(got) != 0 {
-		t.Errorf("shaping sets = %v for an instance without a proxy, want none", got)
+		t.Errorf("shaping sets = %v for an instance without an agent, want none", got)
 	}
 }
 
-// TestTraceWithoutCapturerIsRefused proves a service with no capturer rejects a
+// TestTraceWithoutAgentIsRefused proves a service with no agent rejects a
 // traced create rather than failing later or ignoring the request.
-func TestTraceWithoutCapturerIsRefused(t *testing.T) {
+func TestTraceWithoutAgentIsRefused(t *testing.T) {
 	svc := startTestService(t)
 
 	payload, err := json.Marshal(api.CreateServerRequest{Trace: true})
@@ -355,13 +392,15 @@ func TestTraceWithoutCapturerIsRefused(t *testing.T) {
 	}
 }
 
-// TestCloseClosesCapturer proves the capturer is released with the service.
-func TestCloseClosesCapturer(t *testing.T) {
-	capturer := &fakeCapturer{}
+// TestCloseClosesAgentProvider proves the agent provider is released with the
+// service.
+func TestCloseClosesAgentProvider(t *testing.T) {
+	provider := &fakeProvider{}
 
-	svc, err := New(t.Context(), Options{Dir: t.TempDir(), NewCapturer: func(context.Context, *Service) (Capturer, error) {
-		return capturer, nil
-	}})
+	o := Options{Dir: t.TempDir()}
+	withAgent(provider)(&o)
+
+	svc, err := New(t.Context(), o)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -369,8 +408,8 @@ func TestCloseClosesCapturer(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if _, closed := capturer.snapshot(); !closed {
-		t.Error("Close did not close the capturer")
+	if _, closed := provider.snapshot(); !closed {
+		t.Error("Close did not close the agent provider")
 	}
 }
 
@@ -396,10 +435,10 @@ func exampleShapingSet() api.ShapingSet {
 	}
 }
 
-// TestShapeEndpointsReachShaper proves set, clear and report reach the traced
-// instance's proxy with the request's arguments and return what it answers.
-func TestShapeEndpointsReachShaper(t *testing.T) {
-	proxy := &fakeShapingProxy{reports: []api.ShapingReport{{
+// TestShapeEndpointsReachAgent proves set, clear and report reach the traced
+// instance's agent with the request's arguments and return what it answers.
+func TestShapeEndpointsReachAgent(t *testing.T) {
+	fake := &fakeAgent{reports: []api.ShapingReport{{
 		ID: "lost-ack-30",
 		Firings: []api.ShapingFiring{{
 			ConnectionUUID: "conn-1",
@@ -410,7 +449,7 @@ func TestShapeEndpointsReachShaper(t *testing.T) {
 			Time:           time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC),
 		}},
 	}}}
-	svc := startTestService(t, withCapturer(&fakeCapturer{shaper: proxy}))
+	svc := startTestService(t, withAgent(&fakeProvider{agent: fake}))
 
 	var created api.CreateResponse
 	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
@@ -421,26 +460,26 @@ func TestShapeEndpointsReachShaper(t *testing.T) {
 	if setResp.Set != set.ID {
 		t.Errorf("set response = %q, want %q", setResp.Set, set.ID)
 	}
-	proxy.mu.Lock()
-	sets := append([]api.ShapingSet(nil), proxy.sets...)
-	proxy.mu.Unlock()
+	fake.mu.Lock()
+	sets := append([]api.ShapingSet(nil), fake.sets...)
+	fake.mu.Unlock()
 	if len(sets) != 1 {
-		t.Fatalf("proxy saw %d sets, want 1", len(sets))
+		t.Fatalf("agent saw %d sets, want 1", len(sets))
 	}
 	if !reflect.DeepEqual(sets[0], set) {
-		t.Errorf("proxy got set %+v, want %+v", sets[0], set)
+		t.Errorf("agent got set %+v, want %+v", sets[0], set)
 	}
 
 	var report api.ShapeReportResponse
 	mustRequest(t, svc.nc, "tester.shape.report", api.ShapeReportRequest{InstanceID: created.ID, Set: set.ID}, &report)
-	if !reflect.DeepEqual(report.Sets, proxy.reports) {
-		t.Errorf("report = %+v, want %+v", report.Sets, proxy.reports)
+	if !reflect.DeepEqual(report.Sets, fake.reports) {
+		t.Errorf("report = %+v, want %+v", report.Sets, fake.reports)
 	}
-	proxy.mu.Lock()
-	reported := append([]string(nil), proxy.reported...)
-	proxy.mu.Unlock()
+	fake.mu.Lock()
+	reported := append([]string(nil), fake.reported...)
+	fake.mu.Unlock()
 	if !reflect.DeepEqual(reported, []string{set.ID}) {
-		t.Errorf("proxy was asked to report %v, want [%s]", reported, set.ID)
+		t.Errorf("agent was asked to report %v, want [%s]", reported, set.ID)
 	}
 
 	var cleared api.ShapeClearResponse
@@ -448,23 +487,23 @@ func TestShapeEndpointsReachShaper(t *testing.T) {
 	if !reflect.DeepEqual(cleared.Cleared, []string{set.ID}) {
 		t.Errorf("cleared = %v, want [%s]", cleared.Cleared, set.ID)
 	}
-	proxy.mu.Lock()
-	clearedArgs := append([]string(nil), proxy.cleared...)
-	proxy.mu.Unlock()
+	fake.mu.Lock()
+	clearedArgs := append([]string(nil), fake.cleared...)
+	fake.mu.Unlock()
 	if !reflect.DeepEqual(clearedArgs, []string{""}) {
-		t.Errorf("proxy was asked to clear %q, want the empty set meaning all", clearedArgs)
+		t.Errorf("agent was asked to clear %q, want the empty set meaning all", clearedArgs)
 	}
 }
 
-// TestShapeRefusals proves an unknown instance, an instance without a trace proxy
-// and a proxy that does not implement Shaper are each refused with their own code.
+// TestShapeRefusals proves an unknown instance, an instance without an agent and
+// an agent without shaping are each refused with their own code.
 func TestShapeRefusals(t *testing.T) {
-	svc := startTestService(t, withCapturer(&fakeCapturer{shaper: &fakeShapingProxy{}}))
+	svc := startTestService(t, withAgent(&fakeProvider{agent: &fakeAgent{}}))
 
 	var untraced api.CreateResponse
 	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{}, &untraced)
 
-	plain := startTestService(t, withCapturer(&fakeCapturer{}))
+	plain := startTestService(t, withAgent(&fakeProvider{}))
 	var traced api.CreateResponse
 	mustRequest(t, plain.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &traced)
 
@@ -476,7 +515,7 @@ func TestShapeRefusals(t *testing.T) {
 	}{
 		{"unknown instance", svc, "does-not-exist", "404"},
 		{"untraced instance", svc, untraced.ID, "015"},
-		{"proxy without shaping", plain, traced.ID, "016"},
+		{"agent without shaping", plain, traced.ID, "016"},
 	}
 
 	for _, tc := range cases {
@@ -495,11 +534,12 @@ func TestShapeRefusals(t *testing.T) {
 	}
 }
 
-// TestShapeErrorReachesCaller proves the text of a Shaper error is returned to the
-// caller, so a compile error naming the rule and field is readable at the client.
+// TestShapeErrorReachesCaller proves the text of an agent's shaping error is
+// returned to the caller, so a compile error naming the rule and field is
+// readable at the client.
 func TestShapeErrorReachesCaller(t *testing.T) {
-	proxy := &fakeShapingProxy{err: errors.New("rule drop-ack-30: subject grammar: unknown type")}
-	svc := startTestService(t, withCapturer(&fakeCapturer{shaper: proxy}))
+	fake := &fakeAgent{err: errors.New("rule drop-ack-30: subject grammar: unknown type")}
+	svc := startTestService(t, withAgent(&fakeProvider{agent: fake}))
 
 	var created api.CreateResponse
 	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
@@ -515,7 +555,7 @@ func TestShapeErrorReachesCaller(t *testing.T) {
 	if got := msg.Header.Get("Nats-Service-Error-Code"); got != "017" {
 		t.Errorf("error code = %q, want 017", got)
 	}
-	if got := msg.Header.Get("Nats-Service-Error"); got != proxy.err.Error() {
-		t.Errorf("error = %q, want %q", got, proxy.err.Error())
+	if got := msg.Header.Get("Nats-Service-Error"); got != fake.err.Error() {
+		t.Errorf("error = %q, want %q", got, fake.err.Error())
 	}
 }

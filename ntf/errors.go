@@ -47,4 +47,11 @@ var (
 
 	// ErrUnknownBackend means Options.Backend names no registered backend.
 	ErrUnknownBackend = errors.New("unknown backend")
+
+	// ErrAgentName means an agent in Options.Agents cannot be registered under
+	// its name: the name is empty.
+	ErrAgentName = errors.New("invalid agent name")
+
+	// ErrUnknownAgent means Options.Agent names no registered agent.
+	ErrUnknownAgent = errors.New("unknown agent")
 )

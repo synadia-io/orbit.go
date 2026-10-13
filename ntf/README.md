@@ -36,7 +36,8 @@ Set `Conn` to host the service on a connection you already have. `Close` leaves 
 | `Logger`        | _(discard)_       | Receives a line per request and per managed server transition.                       |
 | `Name`          | `test-management` | The Micro service name.                                                              |
 | `Group`         | `tester`          | Subject group every endpoint hangs off. Changing it moves every subject.             |
-| `NewCapturer`   | _(nil)_           | Supplies [trace capture](#trace-capture). Without one, `trace` or `proxy` requests are refused. |
+| `Agents`        | _(nil)_           | Network agent factories to register by name, for [trace capture](#trace-capture).    |
+| `Agent`         | _(empty)_         | The registered agent to use. Without one, `trace` or `proxy` requests are refused.   |
 
 `EmbeddedOptions` carries `Port` (zero and `-1` both bind an OS-chosen port), `ServerName`, and `Log`, which writes
 the embedded server's own log to stdout. Managed servers are unaffected by `Log`: they always log to a file under
@@ -53,8 +54,8 @@ their instance directory.
 | `Close`          | Stop serving and release everything the service owns.            |
 
 `New` unwinds whatever it started if any step fails, so a non-nil error leaves nothing running. `Close` stops
-answering requests, tears down every instance while the connection is still up, closes the capturer, and shuts
-down the embedded server.
+answering requests, tears down every instance while the connection is still up, closes the agent provider, and
+shuts down the embedded server.
 
 ## Managed servers
 
@@ -75,26 +76,29 @@ between concurrent instances.
 
 `Create*` requests accept `trace` to front a server's client port with a capture proxy that stores every
 connection's capture, and `proxy` to front it with the same proxy and store nothing, for shaping without captures.
-`trace` implies `proxy`. The service does not implement capture itself: `Options.NewCapturer` supplies it, and
-without one those requests are refused with error code `014`. Only the first node of a cluster or super-cluster is
+`trace` implies `proxy`. The service does not implement capture itself: a network agent, defined in package
+`agent`, does. `Options.Agents` registers agent factories by name and `Options.Agent` selects one; with none
+selected those requests are refused with error code `014`. Only the first node of a cluster or super-cluster is
 fronted, and combining either flag with generated TLS is rejected because the proxy forwards plaintext.
 
 ```go
-type Capturer interface {
-    Capture(ctx context.Context, req CaptureRequest) (CaptureProxy, error)
+type Factory func(ctx context.Context, opts Options) (Provider, error)
+
+type Provider interface {
+    Start(ctx context.Context, spec Spec) (Agent, error)
     Close() error
 }
 ```
 
-`NewCapturer` is called once at the end of `New` with the `*Service` already usable, so an implementation can
-reach the management connection, the embedded server and the instance directory. Keep it cheap and do the
-expensive setup on the first `Capture`, so a service that never captures never pays for it.
+`New` calls the selected factory once, after the management connection and embedded server exist and before the
+endpoints start. Its `Options` carry the service directory, `Preserve`, the logger, the management connection and
+the embedded server, which is nil when the service runs on a supplied connection.
 
-`CaptureRequest` names the instance and server being fronted, the backend address to forward to, the host to
-listen on (the node's `client_advertise`, which must name a local interface), a temp directory the service
-creates under the instance, and `Store`, which is true for `trace` and false for `proxy` alone; the capturer keeps
-captures only when it is true. The `CaptureProxy` that comes back reports the port clients reach instead of the
-managed server's own, and is stopped by the service on teardown.
+`Spec` names the instance and server being fronted, the node's client endpoint to dial, the host to listen on
+(the node's `client_advertise`, which must name a local interface), and `Store`, which is true for `trace` and
+false for `proxy` alone; the agent keeps captures only when it is true. The `Agent` that comes back reports the
+endpoint clients reach instead of the managed server's own, answers the `tester.shape.*` endpoints, and is stopped
+by the service on teardown. The agent owns any scratch space it needs.
 
 ## API
 
