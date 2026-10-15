@@ -470,8 +470,8 @@ inst.SetShaping(t, api.ShapingSet{
 ```
 
 Trace capture is plaintext-only and is rejected in combination with `WithGeneratedTLS`. On a cluster or super-cluster
-only the first node carries a `TraceURL`. The management server enables JetStream lazily — the first time any instance
-requests trace capture — so runs that never trace pay no JetStream cost. Captures hold full payloads and headers,
+only the first node carries a `TraceURL`. The management server always runs JetStream, which also keeps every
+instance's events, whether or not any instance traces. Captures hold full payloads and headers,
 including the CONNECT frame, so treat the `TRACES` store as sensitive.
 
 ## Template environment

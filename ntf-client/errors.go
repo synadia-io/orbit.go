@@ -37,4 +37,12 @@ var (
 	// ErrCaptureWait is returned when fewer captures than requested land before
 	// the wait ends.
 	ErrCaptureWait = errors.New("captures did not land in time")
+
+	// ErrEvents is returned when an instance's events cannot be read, or an
+	// event cannot be decoded.
+	ErrEvents = errors.New("could not read instance events")
+
+	// ErrNoEventStream is returned when past events are asked for but the
+	// management server has no JetStream or no event stream.
+	ErrNoEventStream = errors.New("events stream not found")
 )
