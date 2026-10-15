@@ -300,7 +300,9 @@ type managedServer struct {
 
 // New starts the management service and, unless Options.Conn is set, the embedded
 // server that hosts it. It unwinds everything it started if any step fails, so a
-// non-nil error leaves nothing running.
+// non-nil error leaves nothing running. On a caller's connection the events
+// stream it created or updated stays, since other services may share it, and a
+// later New reuses it.
 //
 // ctx limits startup only; the service runs until Close.
 func New(ctx context.Context, opts Options) (*Service, error) {
