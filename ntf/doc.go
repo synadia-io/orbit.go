@@ -56,6 +56,22 @@ trace capture are refused. Only the first node of a cluster or super-cluster is
 fronted, and a traced instance cannot use generated TLS: the proxy forwards
 plaintext.
 
+# Clocks
+
+Events from different components are lined up by their timestamps, so a
+distributed deployment of ntf must run NTP on every host. The <group>.clock
+endpoint confirms that rather than replacing it: it reports the service host as
+the reference, each instance's agent as sharing the service's clock since it
+runs in the service's process, and, for each extra clock subject the request
+lists, that participant's offset from the service host with a round trip and an
+error bound, or the error if it does not answer. The caller judges the result
+against its own threshold.
+
+A component joins by answering clock requests on its own micro service, adding
+events.ClockHandler as the endpoint named clock under a group of its own, and
+the caller lists that endpoint's subject. A subject answered by several
+processes reaches one of them per request, mixing their clocks into one result.
+
 # What embedding this grants
 
 A client that can publish to the service's subjects can supply the whole
@@ -68,8 +84,10 @@ CONNECT frames of every connection, credentials included. Any client may destroy
 instance; there is no tenancy, quota or rate limit.
 
 Treat running a Service as granting code execution on its host. On a shared server,
-put it in a dedicated account and scope subject permissions to its group. Options.Group
-namespaces the endpoints but not micro's own $SRV discovery subjects, so two services
-on one connection still collide there.
+put it in a dedicated account and scope subject permissions to its group. The service
+also needs ntf.events.<group>.> for its events and $JS.API.> for their stream.
+Options.Group namespaces the endpoints but not micro's own $SRV discovery subjects, so
+two services on one connection still collide there. On an unauthenticated server any
+client can publish forged events or delete the events stream.
 */
 package ntf

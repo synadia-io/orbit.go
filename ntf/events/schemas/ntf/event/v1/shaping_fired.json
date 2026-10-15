@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/events/schemas/ntf/event/v1/shaping_fired.json",
+  "description": "An event published when a shaping rule fires on a frame",
+  "title": "io.synadia.ntf.event.v1.shaping_fired",
+  "type": "object",
+  "required": [
+    "type",
+    "id",
+    "timestamp",
+    "instance_id",
+    "source",
+    "source_seq",
+    "set",
+    "rule",
+    "rule_action",
+    "wait",
+    "connection_uuid",
+    "client_name",
+    "frame_id"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.event.v1.shaping_fired"
+    },
+    "id": {
+      "type": "string",
+      "description": "Unique id of this event, a nuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The publisher's clock when the event was made, in RFC 3339 with nanoseconds"
+    },
+    "instance_id": {
+      "type": "string",
+      "description": "The instance the event is about"
+    },
+    "source": {
+      "type": "string",
+      "description": "The component that published the event",
+      "enum": [
+        "service",
+        "agent",
+        "backend",
+        "chaos"
+      ]
+    },
+    "source_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Counts the source's events for the instance from 1 with no gaps"
+    },
+    "set": {
+      "type": "string",
+      "description": "The id of the shaping set holding the rule"
+    },
+    "rule": {
+      "type": "string",
+      "description": "The id of the rule that fired"
+    },
+    "rule_action": {
+      "type": "string",
+      "description": "What the rule did to the frame: drop, stall, throttle or disconnect"
+    },
+    "wait": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How long a stall or throttle held the frame in nanoseconds, zero otherwise"
+    },
+    "connection_uuid": {
+      "type": "string",
+      "description": "The connection's uuid, the capture header's cuuid and the connection_uuid in TRACES metadata"
+    },
+    "client_name": {
+      "type": "string",
+      "description": "The connection's CONNECT name"
+    },
+    "frame_id": {
+      "type": "string",
+      "description": "The id of the frame the rule acted on in the capture"
+    }
+  }
+}

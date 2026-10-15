@@ -228,6 +228,13 @@ type InstanceStatus struct {
 	// as "kill", "pause" and "version-change", in the order it declares them.
 	// Empty when it declares none.
 	Capabilities []string `json:"capabilities,omitempty"`
+	// EventsSeq is the stream sequence of the latest of the service's own
+	// events of the instance in its events stream, read before the rest of the
+	// status, so a reader follows the stream after it without a gap. Agent
+	// events are not acked and may land on either side of it. Zero, and
+	// omitted, when no service event has been recorded, while the instance is
+	// being created, and when the service publishes events live only.
+	EventsSeq uint64 `json:"events_seq,omitempty"`
 }
 
 type StatusResponse struct {
@@ -453,4 +460,61 @@ type ShapingFiring struct {
 	Rule           string    `json:"rule"`
 	Action         string    `json:"action"`
 	Time           time.Time `json:"time"`
+}
+
+// ClockRequest asks the service for the clocks of the participants it knows,
+// the service itself and each instance's agent, and of each subject in Extra.
+// Each extra subject is a participant's clock endpoint, such as a workload
+// engine's, which the service probes.
+type ClockRequest struct {
+	Extra []string `json:"extra,omitempty"`
+}
+
+// ClockResponse reports each participant's clock against the service host's
+// clock, the service first, then the agents in instance id order, then the
+// extra subjects in the order the request listed them. It holds no threshold
+// and no verdict; the caller judges the offsets.
+type ClockResponse struct {
+	Participants []ClockParticipant `json:"participants"`
+}
+
+const (
+	// ClockService is the kind of the service itself, the reference clock.
+	ClockService = "service"
+	// ClockAgent is the kind of an instance's network agent.
+	ClockAgent = "agent"
+	// ClockExtra is the kind of a clock subject the request listed.
+	ClockExtra = "extra"
+)
+
+// ClockParticipant is one participant's clock. Offset is its clock less the
+// service host's, positive when it is ahead, and the true offset lies within
+// Bound of it. RoundTrip is the probe's time in flight and Bound half of it.
+// The durations are encoded in nanoseconds.
+type ClockParticipant struct {
+	// Kind is ClockService, ClockAgent or ClockExtra.
+	Kind string `json:"kind"`
+
+	// InstanceID is the instance an agent fronts.
+	InstanceID string `json:"instance_id,omitempty"`
+
+	// Subject is the clock subject of an extra participant.
+	Subject string `json:"subject,omitempty"`
+
+	// Reference is true for the service, whose host's clock every offset is
+	// measured against.
+	Reference bool `json:"reference,omitempty"`
+
+	// SharedClock is true for a participant that runs in the service's
+	// process and so reads the service host's clock. It is reported with a
+	// zero offset without being probed.
+	SharedClock bool `json:"shared_clock,omitempty"`
+
+	Offset    time.Duration `json:"offset"`
+	RoundTrip time.Duration `json:"round_trip"`
+	Bound     time.Duration `json:"bound"`
+
+	// Error is why an extra participant could not be measured, such as no
+	// reply. Offset, RoundTrip and Bound are zero when it is set.
+	Error string `json:"error,omitempty"`
 }

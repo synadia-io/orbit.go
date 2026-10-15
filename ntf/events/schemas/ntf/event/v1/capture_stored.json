@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/events/schemas/ntf/event/v1/capture_stored.json",
+  "description": "An event published when a connection's capture is stored",
+  "title": "io.synadia.ntf.event.v1.capture_stored",
+  "type": "object",
+  "required": [
+    "type",
+    "id",
+    "timestamp",
+    "instance_id",
+    "source",
+    "source_seq",
+    "bucket",
+    "object",
+    "connection_uuid",
+    "client_name",
+    "server_name",
+    "shaped",
+    "truncated"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.event.v1.capture_stored"
+    },
+    "id": {
+      "type": "string",
+      "description": "Unique id of this event, a nuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The publisher's clock when the event was made, in RFC 3339 with nanoseconds"
+    },
+    "instance_id": {
+      "type": "string",
+      "description": "The instance the event is about"
+    },
+    "source": {
+      "type": "string",
+      "description": "The component that published the event",
+      "enum": [
+        "service",
+        "agent",
+        "backend",
+        "chaos"
+      ]
+    },
+    "source_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Counts the source's events for the instance from 1 with no gaps"
+    },
+    "bucket": {
+      "type": "string",
+      "description": "The object store holding the capture"
+    },
+    "object": {
+      "type": "string",
+      "description": "The capture's object name in the bucket"
+    },
+    "connection_uuid": {
+      "type": "string",
+      "description": "The connection's uuid, the capture header's cuuid and the connection_uuid in TRACES metadata"
+    },
+    "client_name": {
+      "type": "string",
+      "description": "The connection's CONNECT name"
+    },
+    "server_name": {
+      "type": "string",
+      "description": "The name of the server the connection reached"
+    },
+    "shaped": {
+      "type": "boolean",
+      "description": "Whether any shaping rule fired on the connection"
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "Whether the capture was cut short, such as by an abrupt close"
+    }
+  }
+}

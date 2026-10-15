@@ -29,11 +29,13 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nats.go/micro"
 	"github.com/nats-io/nuid"
 
 	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/backend"
+	"github.com/synadia-io/orbit.go/ntf/events"
 )
 
 const (
@@ -57,6 +59,11 @@ const (
 	// Options.PortRange is not set.
 	defaultPortLow  = 20000
 	defaultPortHigh = 40000
+
+	// defaultEventsMaxAge and defaultEventsMaxBytes bound the events stream
+	// when Options.EventsMaxAge and Options.EventsMaxBytes are not set.
+	defaultEventsMaxAge   = 24 * time.Hour
+	defaultEventsMaxBytes = 1 << 30
 )
 
 // Options configures a Service. The zero value is usable: it starts an embedded
@@ -105,8 +112,18 @@ type Options struct {
 
 	// Group is the subject group every endpoint hangs off. Empty uses
 	// DefaultGroup. Changing it moves every subject, and clients that expect
-	// the default will not find the service.
+	// the default will not find the service. It also names the events stream,
+	// so New fails on a group that is not a single lowercase subject token
+	// valid in a stream name, as events.ValidateGroup checks.
 	Group string
+
+	// EventsMaxAge is how long the events stream keeps an event before
+	// discarding it. Zero keeps events for 24 hours.
+	EventsMaxAge time.Duration
+
+	// EventsMaxBytes is the size past which the events stream discards its
+	// oldest events. Zero keeps up to 1 GiB.
+	EventsMaxBytes int64
 
 	// Backends are backend factories to register, keyed by name, beside the
 	// built-in "inprocess" backend. New fails on an empty name or on
@@ -135,6 +152,11 @@ type EmbeddedOptions struct {
 
 	// ServerName names the embedded server. Empty uses DefaultServerName.
 	ServerName string
+
+	// StoreDir is the embedded server's JetStream store directory, which
+	// holds the events stream. Empty uses the management directory under
+	// Options.Dir.
+	StoreDir string
 
 	// Log writes the embedded server's own log to stdout. Managed servers are
 	// unaffected: they always log to a file under their instance directory.
@@ -177,6 +199,17 @@ type Service struct {
 	// backendName is the name backend was registered under. Status reports it.
 	backendName string
 
+	// group is the subject group of the endpoints and the events.
+	group string
+
+	// js stores the service's events in the stream named stream, with an
+	// ack. Nil when the service publishes its events live only.
+	js     jetstream.JetStream
+	stream string
+
+	// agentEvents is the publisher handed to the agent.
+	agentEvents *agentPublisher
+
 	mu        sync.Mutex
 	instances map[string]*instance
 }
@@ -199,6 +232,27 @@ type instance struct {
 	// provisioned and before they are published. It holds no TLS material and
 	// no contents of any file or config. Guarded by Service.mu.
 	plan *instancePlan
+
+	// events is the instance's event lock. A create holds it from making its
+	// servers visible until created and ready are published, and a teardown
+	// from stopping the agents until destroyed is published, so no node event
+	// lands before created or after destroyed. A node handler holds it only
+	// around its publish; its node's cfgMu orders that node's events. It is
+	// taken before Service.mu, never while holding it.
+	events sync.Mutex
+
+	// announced reports whether the created event was published, so a
+	// teardown records destroyed only for an instance it announced. Guarded
+	// by events.
+	announced bool
+
+	// sourceSeq is the source_seq of the last event the service published for
+	// the instance. Guarded by events.
+	sourceSeq uint64
+
+	// eventsSeq is the highest stream sequence acked for the service's events
+	// of the instance, 0 for none. Guarded by Service.mu.
+	eventsSeq uint64
 }
 
 type managedServer struct {
@@ -246,7 +300,9 @@ type managedServer struct {
 
 // New starts the management service and, unless Options.Conn is set, the embedded
 // server that hosts it. It unwinds everything it started if any step fails, so a
-// non-nil error leaves nothing running.
+// non-nil error leaves nothing running. On a caller's connection the events
+// stream it created or updated stays, since other services may share it, and a
+// later New reuses it.
 //
 // ctx limits startup only; the service runs until Close.
 func New(ctx context.Context, opts Options) (*Service, error) {
@@ -255,10 +311,20 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		log = slog.New(slog.DiscardHandler)
 	}
 
+	group := opts.Group
+	if group == "" {
+		group = DefaultGroup
+	}
+	err := events.ValidateGroup(group)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Service{
 		log:           log,
 		preserve:      opts.Preserve,
 		advertiseHost: opts.AdvertiseHost,
+		group:         group,
 		instances:     map[string]*instance{},
 	}
 
@@ -363,10 +429,17 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		unwind = append(unwind, nc.Close)
 	}
 
+	// The stream exists before the endpoints go live, so no event is lost.
+	err = s.startEvents(ctx, opts)
+	if err != nil {
+		return fail(err)
+	}
+	s.agentEvents = newAgentPublisher(s.nc, s.group)
+
 	// The agent is built before the endpoints go live, so no request finds the
 	// service without it.
 	if agentFactory != nil {
-		provider, err := agentFactory(ctx, agent.Options{Dir: s.dir, Preserve: s.preserve, Logger: log, Conn: s.nc, Server: s.srv})
+		provider, err := agentFactory(ctx, agent.Options{Dir: s.dir, Preserve: s.preserve, Logger: log, Conn: s.nc, Server: s.srv, Events: s.agentEvents})
 		if err != nil {
 			return fail(fmt.Errorf("could not create the %q agent: %w", opts.Agent, err))
 		}
@@ -377,10 +450,6 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		unwind = append(unwind, func() { provider.Close() })
 	}
 
-	group := opts.Group
-	if group == "" {
-		group = DefaultGroup
-	}
 	name := opts.Name
 	if name == "" {
 		name = DefaultName
@@ -409,10 +478,15 @@ func (s *Service) startEmbedded(ctx context.Context, opts EmbeddedOptions) (*ser
 		port = server.RANDOM_PORT
 	}
 
+	storeDir := opts.StoreDir
+	if storeDir == "" {
+		storeDir = filepath.Join(s.dir, "management")
+	}
+
 	srv, err := server.NewServer(&server.Options{
 		ServerName: name,
 		Port:       port,
-		StoreDir:   filepath.Join(s.dir, "management"),
+		StoreDir:   storeDir,
 		NoSigs:     true,
 		NoLog:      !opts.Log,
 	})
@@ -436,7 +510,61 @@ func (s *Service) startEmbedded(ctx context.Context, opts EmbeddedOptions) (*ser
 		return nil, fmt.Errorf("management server not ready for connections after %v", wait)
 	}
 
+	// JetStream is enabled once the server is up rather than in Start, which on
+	// failure stops the server, or exits the process when it logs. Its store
+	// is the jetstream directory under storeDir.
+	err = srv.EnableJetStream(&server.JetStreamConfig{StoreDir: storeDir})
+	if err != nil {
+		srv.Shutdown()
+		srv.WaitForShutdown()
+		return nil, fmt.Errorf("could not enable JetStream on the management server in %s: %w", storeDir, err)
+	}
+
 	return srv, nil
+}
+
+// startEvents creates or updates the events stream of the service's group. A
+// failure fails New on the embedded server. On a caller's connection, where
+// JetStream may be missing or the stream may not be allowed, it logs a warning
+// and leaves the service publishing its events live only.
+func (s *Service) startEvents(ctx context.Context, opts Options) error {
+	maxAge := opts.EventsMaxAge
+	if maxAge == 0 {
+		maxAge = defaultEventsMaxAge
+	}
+	maxBytes := opts.EventsMaxBytes
+	if maxBytes == 0 {
+		maxBytes = defaultEventsMaxBytes
+	}
+
+	cfg := jetstream.StreamConfig{
+		Name:     events.StreamName(s.group),
+		Subjects: []string{events.StreamSubject(s.group)},
+		Storage:  jetstream.FileStorage,
+		Discard:  jetstream.DiscardOld,
+		MaxAge:   maxAge,
+		MaxBytes: maxBytes,
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, readyTimeout)
+	defer cancel()
+
+	js, err := jetstream.New(s.nc)
+	if err == nil {
+		_, err = js.CreateOrUpdateStream(ctx, cfg)
+	}
+	if err != nil {
+		if s.srv != nil {
+			return fmt.Errorf("could not create the events stream %s: %w", cfg.Name, err)
+		}
+		s.log.Warn("Publishing events live only, could not create the events stream", "stream", cfg.Name, "err", err)
+		return nil
+	}
+
+	s.js = js
+	s.stream = cfg.Name
+
+	return nil
 }
 
 func (s *Service) startServices(name, group string) error {
@@ -532,6 +660,11 @@ func (s *Service) startServices(name, group string) error {
 		return err
 	}
 
+	err = srv.AddEndpoint("clock", micro.HandlerFunc(s.clock))
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -571,13 +704,19 @@ func (s *Service) Dir() string { return s.dir }
 
 // Reset tears down every instance and keeps serving.
 func (s *Service) Reset() error {
+	return s.resetWith(events.ReasonReset)
+}
+
+// resetWith tears down every instance, recording reason in the destroyed event
+// of each instance that was announced.
+func (s *Service) resetWith(reason events.DestroyReason) error {
 	s.mu.Lock()
 	all := slices.Collect(maps.Values(s.instances))
 	s.instances = map[string]*instance{}
 	s.mu.Unlock()
 
 	for _, inst := range all {
-		s.tearDownInstance(inst)
+		s.tearDownInstance(inst, reason)
 	}
 
 	return nil
@@ -597,7 +736,9 @@ func (s *Service) Close() error {
 		}
 	}
 
-	if err := s.Reset(); err != nil {
+	// The connection and JetStream are still up, so the destroyed events are
+	// stored.
+	if err := s.resetWith(events.ReasonClose); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -654,16 +795,23 @@ func (s *Service) newInstance(kind, description string) *instance {
 // dropInstance removes a partially-built instance after a create failure and
 // tears it down. It tears it down even when a concurrent destroy or reset has
 // already removed it, since the create may have placed or started more since
-// that teardown.
+// that teardown. The create never announced the instance, so it records no
+// event.
 func (s *Service) dropInstance(inst *instance) {
 	s.mu.Lock()
 	delete(s.instances, inst.ID)
 	s.mu.Unlock()
 
-	s.tearDownInstance(inst)
+	s.tearDownInstance(inst, events.ReasonDestroy)
 }
 
-func (s *Service) tearDownInstance(inst *instance) {
+// tearDownInstance stops the agents and the backend of inst, then records its
+// destroyed event with reason if it was announced. It holds the instance's
+// event lock throughout, so the event follows every event of the instance.
+func (s *Service) tearDownInstance(inst *instance, reason events.DestroyReason) {
+	inst.events.Lock()
+	defer inst.events.Unlock()
+
 	s.mu.Lock()
 	servers := slices.Clone(inst.Servers)
 	s.mu.Unlock()
@@ -684,6 +832,13 @@ func (s *Service) tearDownInstance(inst *instance) {
 	if err != nil {
 		s.log.Error("Failed to tear down instance", "instance", inst.ID, "err", err)
 	}
+
+	if !inst.announced {
+		return
+	}
+
+	s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceDestroyed, Reason: reason})
+	inst.announced = false
 }
 
 // shortID returns a short, name-safe identifier derived from a nuid. A nuid is
