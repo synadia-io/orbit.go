@@ -36,12 +36,15 @@ Set `Conn` to host the service on a connection you already have. `Close` leaves 
 | `Logger`        | _(discard)_       | Receives a line per request and per managed server transition.                       |
 | `Name`          | `test-management` | The Micro service name.                                                              |
 | `Group`         | `tester`          | Subject group every endpoint hangs off. Changing it moves every subject.             |
+| `EventsMaxAge`  | `24h`             | How long the events stream keeps an event.                                           |
+| `EventsMaxBytes`| 1 GiB             | Size past which the events stream discards its oldest events.                        |
 | `Agents`        | _(nil)_           | Network agent factories to register by name, for [trace capture](#trace-capture).    |
 | `Agent`         | _(empty)_         | The registered agent to use. Without one, `trace` or `proxy` requests are refused.   |
 
-`EmbeddedOptions` carries `Port` (zero and `-1` both bind an OS-chosen port), `ServerName`, and `Log`, which writes
-the embedded server's own log to stdout. Managed servers are unaffected by `Log`: they always log to a file under
-their instance directory.
+`EmbeddedOptions` carries `Port` (zero and `-1` both bind an OS-chosen port), `ServerName`, `StoreDir`, the
+JetStream store directory, which defaults to `management` under `Dir`, and `Log`, which writes the embedded server's
+own log to stdout. Managed servers are unaffected by `Log`: they always log to a file under their instance
+directory.
 
 | Method           | Description                                                      |
 |------------------|------------------------------------------------------------------|
@@ -100,6 +103,21 @@ false for `proxy` alone; the agent keeps captures only when it is true. The `Age
 endpoint clients reach instead of the managed server's own, answers the `tester.shape.*` endpoints, and is stopped
 by the service on teardown. The agent owns any scratch space it needs.
 
+## Clocks
+
+Events from different components are lined up by their timestamps, so a distributed deployment of ntf must run NTP
+on every host. `tester.clock` confirms that rather than replacing it. It reports the service host as the reference,
+each instance's agent as sharing the service's clock since it runs in the service's process, and, for each subject
+in the request's `extra`, that participant's `offset` from the service host with its `round_trip` and an error
+`bound` of half the round trip, or the `error` if it does not answer. The reply holds no threshold; the caller
+judges it.
+
+A component joins by answering clock requests on its own Micro service: it adds `events.ClockHandler` as the
+endpoint named `clock` under a group no other component or replica uses, and callers list that endpoint's
+subject in `extra`. A subject answered by several processes reaches one of them per request, mixing their clocks
+into one result. The request and reply are the
+`io.synadia.ntf.clock.v1.request` and `io.synadia.ntf.clock.v1.reply` types in the `events` package.
+
 ## API
 
 | Subject                       | Description                                                                 |
@@ -120,9 +138,15 @@ by the service on teardown. The agent owns any scratch space it needs.
 | `tester.list`                 | Lightweight summary of every instance (id, kind, servers count).            |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                              |
 | `tester.reset`                | Tears down **every** instance — CI-style global wipe.                       |
+| `tester.clock`                | Reports each participant's clock against the service host's. Optional `extra` clock subjects. |
+| `ntf.events.tester.<id>.instance.*` | Published by the service when an instance is `created` or `destroyed`. |
+| `ntf.events.tester.<id>.node.*` | Published by the service when a node is `ready`, `stopped`, `started`, `updated` or `reloaded`. |
+| `ntf.events.tester.<id>.shaping.*` | Published by the agent when a shaping set is `applied` or `cleared`, or a rule `fired`. |
+| `ntf.events.tester.<id>.capture.stored` | Published by the agent when a connection's capture is stored. |
 
 The subjects above assume the default `Group`. The Go types for these requests and responses live in the `api`
-package.
+package, and the events in the `events` package. The service keeps its group's events in the stream
+`NTF_EVENTS_TESTER`.
 
 ## What embedding this grants
 
@@ -134,5 +158,7 @@ template, and captured traces contain the CONNECT frames of every connection, cr
 destroy any instance; there is no tenancy, quota or rate limit.
 
 Treat running a `Service` as granting code execution on its host. On a shared server, put it in a dedicated
-account and scope subject permissions to its group. `Group` namespaces the endpoints but not Micro's own `$SRV`
-discovery subjects, so two services on one connection still collide there.
+account and scope subject permissions to its group. The service also needs `ntf.events.<group>.>` for its events
+and `$JS.API.>` for their stream. `Group` namespaces the endpoints but not Micro's own `$SRV` discovery subjects, so
+two services on one connection still collide there. On an unauthenticated server any client can publish forged
+events or delete the events stream.

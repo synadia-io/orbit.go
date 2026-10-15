@@ -22,12 +22,13 @@ import (
 
 	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
+	"github.com/synadia-io/orbit.go/ntf/events"
 )
 
 // Options is what the service passes a Factory.
 //
-// Conn and Server are local resources for an agent running in the service's
-// process. A remote agent ignores them.
+// Conn, Server and Events are local resources for an agent running in the
+// service's process. A remote agent ignores them.
 type Options struct {
 	// Dir is the service's directory, which holds per-instance state.
 	Dir string
@@ -44,6 +45,13 @@ type Options struct {
 	// Server is the service's embedded management server, nil when the
 	// service was given its own connection.
 	Server *server.Server
+
+	// Events publishes the agent's events of an instance. The agent fills
+	// instance_id and the fields of the event's type. Events stamps the type,
+	// id, timestamp in UTC, source agent and the instance's next source_seq,
+	// and publishes on the management connection without waiting for an ack,
+	// so an event may be lost and its source_seq then shows a gap.
+	Events events.Publisher
 }
 
 // Factory builds a provider. ctx limits startup only: the provider runs until

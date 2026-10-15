@@ -37,6 +37,7 @@ import (
 	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
+	"github.com/synadia-io/orbit.go/ntf/events"
 )
 
 // Sanity limits on how much a single request may ask for. A super-cluster
@@ -521,6 +522,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	s.mu.Unlock()
 
 	servers := make([]*managedServer, 0, len(nodes))
+	ready := make([]*events.NodeAction, 0, len(nodes))
 	var netAgent agent.Agent
 
 	for i, n := range nodes {
@@ -568,6 +570,11 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		// A node a concurrent teardown has stopped fails its status, and shows
 		// as not running.
 		st, err := node.Status(ctx)
+		serverName := n.Name
+		if err == nil {
+			serverName = st.ServerName
+		}
+		ready = append(ready, &events.NodeAction{Action: events.NodeReady, Node: n.Name, ServerName: serverName})
 		resp.Servers = append(resp.Servers, &api.ManagedServer{
 			Name:      n.Name,
 			Port:      client.External.Port,
@@ -583,12 +590,26 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	// agent, so stop it first, then tear down what this create started since.
 	// The agent may have created its scratch directory after that teardown
 	// removed the instance directory, so remove the directory again.
+	//
+	// The event lock is held across publishing the nodes and recording them,
+	// so a node handler or a teardown that finds them records its event after
+	// created and ready.
+	inst.events.Lock()
 	s.mu.Lock()
 	_, alive := s.instances[inst.ID]
 	if alive {
 		inst.Servers = servers
 	}
 	s.mu.Unlock()
+
+	if alive {
+		s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceCreated, Kind: inst.Kind, Backend: s.backendName})
+		for _, e := range ready {
+			s.publishEvent(inst, e)
+		}
+		inst.announced = true
+	}
+	inst.events.Unlock()
 
 	if !alive {
 		if netAgent != nil {
@@ -919,6 +940,8 @@ func (s *Service) stopServer(req micro.Request) {
 		return
 	}
 
+	s.recordNodeEvent(ms, events.NodeStopped, creq.Name)
+
 	req.RespondJSON(api.StopServerResponse{Shutdown: true})
 }
 
@@ -991,6 +1014,8 @@ func (s *Service) startServer(req micro.Request) {
 		return
 	}
 
+	s.recordNodeEvent(ms, events.NodeStarted, creq.Name)
+
 	req.RespondJSON(api.StartServerResponse{Started: true})
 }
 
@@ -1034,12 +1059,16 @@ func (s *Service) stopInstance(req micro.Request) {
 		node := ms.backendNode
 
 		ms.cfgMu.Lock()
+		// stopped reports whether this request stopped the node, rather than
+		// finding it stopped already.
+		stopped := false
 		st, err := node.Status(ctx)
 		if err == nil && st.Running {
 			err = node.Stop(ctx)
 			if err != nil {
 				s.log.Warn("Could not stop server", "server", node.Name(), "err", err)
 			}
+			stopped = err == nil
 		}
 		// The plan name stands in when a destroy tore the node down meanwhile.
 		res := api.ServerStateResult{Name: node.Name()}
@@ -1047,6 +1076,9 @@ func (s *Service) stopInstance(req micro.Request) {
 		if err == nil {
 			res.Name = st.ServerName
 			res.Running = st.Running
+		}
+		if stopped && err == nil && !res.Running {
+			s.recordNodeEvent(ms, events.NodeStopped, res.Name)
 		}
 		ms.cfgMu.Unlock()
 		results = append(results, res)
@@ -1130,27 +1162,33 @@ func (s *Service) startInstance(req micro.Request) {
 			return
 		}
 
-		ms.cfgMu.Unlock()
-
 		// A node with no config to start from reports the cause its error
 		// carries.
 		if errors.Is(err, errNoPersistedConfig) {
+			ms.cfgMu.Unlock()
 			res.Error = errNoPersistedConfig.Error()
 			results = append(results, res)
 			continue
 		}
 
 		if err != nil {
+			ms.cfgMu.Unlock()
 			res.Error = err.Error()
 			results = append(results, res)
 			continue
 		}
 
+		// The started node's state is read and recorded under cfgMu, so its
+		// event is ordered against the node's other changes.
 		st, err = node.Status(ctx)
 		if err == nil {
 			res.Name = st.ServerName
 			res.Running = st.Running
 		}
+		if err == nil && res.Running {
+			s.recordNodeEvent(ms, events.NodeStarted, res.Name)
+		}
+		ms.cfgMu.Unlock()
 		results = append(results, res)
 	}
 
@@ -1254,6 +1292,8 @@ func (s *Service) updateServer(req micro.Request) {
 	}
 	s.mu.Unlock()
 
+	s.recordNodeEvent(ms, events.NodeUpdated, creq.Name)
+
 	req.RespondJSON(api.UpdateServerResponse{Updated: true})
 }
 
@@ -1298,6 +1338,8 @@ func (s *Service) reloadServer(req micro.Request) {
 		req.Error("010", fmt.Sprintf("reload failed: %v", err), nil)
 		return
 	}
+
+	s.recordNodeEvent(ms, events.NodeReloaded, creq.Name)
 
 	req.RespondJSON(api.ReloadServerResponse{Reloaded: true})
 }
@@ -1378,6 +1420,7 @@ func (s *Service) status(req micro.Request) {
 			Servers:      make([]api.ManagedServer, 0, len(snap.servers)),
 			Backend:      s.backendName,
 			Capabilities: capabilities,
+			EventsSeq:    snap.eventsSeq,
 		}
 		for _, ms := range snap.servers {
 			// Port is the client port; the route/cluster port is exposed under
@@ -1453,7 +1496,7 @@ func (s *Service) destroy(req micro.Request) {
 		return
 	}
 
-	s.tearDownInstance(inst)
+	s.tearDownInstance(inst, events.ReasonDestroy)
 	req.RespondJSON(api.DestroyResponse{Destroyed: true})
 }
 
@@ -1607,6 +1650,9 @@ type instanceSnapshot struct {
 	// status handler asks it for the applied shaping sets after the lock is
 	// released.
 	agent agent.Agent
+	// eventsSeq is the instance's events_seq, read with the rest of the
+	// instance before any node state, so the snapshot is no older than it.
+	eventsSeq uint64
 }
 
 // serverSnapshot is a managed server's reportable state. snapshotInstance reads
@@ -1655,6 +1701,7 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 		description: inst.Description,
 		servers:     srvs,
 		agent:       agentOf(inst.Servers),
+		eventsSeq:   inst.eventsSeq,
 	}
 }
 

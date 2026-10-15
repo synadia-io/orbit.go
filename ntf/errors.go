@@ -54,4 +54,8 @@ var (
 
 	// ErrUnknownAgent means Options.Agent names no registered agent.
 	ErrUnknownAgent = errors.New("unknown agent")
+
+	// ErrEventPublish means an event could not be published on the
+	// management connection.
+	ErrEventPublish = errors.New("could not publish event")
 )

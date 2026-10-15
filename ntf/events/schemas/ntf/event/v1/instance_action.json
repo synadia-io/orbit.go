@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/events/schemas/ntf/event/v1/instance_action.json",
+  "description": "An event published when an instance is created or destroyed",
+  "title": "io.synadia.ntf.event.v1.instance_action",
+  "type": "object",
+  "required": [
+    "type",
+    "id",
+    "timestamp",
+    "instance_id",
+    "source",
+    "source_seq",
+    "action"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.event.v1.instance_action"
+    },
+    "id": {
+      "type": "string",
+      "description": "Unique id of this event, a nuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The publisher's clock when the event was made, in RFC 3339 with nanoseconds"
+    },
+    "instance_id": {
+      "type": "string",
+      "description": "The instance the event is about"
+    },
+    "source": {
+      "type": "string",
+      "description": "The component that published the event",
+      "enum": [
+        "service",
+        "agent",
+        "backend",
+        "chaos"
+      ]
+    },
+    "source_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Counts the source's events for the instance from 1 with no gaps"
+    },
+    "action": {
+      "type": "string",
+      "description": "What happened to the instance",
+      "enum": [
+        "created",
+        "destroyed"
+      ]
+    },
+    "kind": {
+      "type": "string",
+      "description": "The instance's kind, such as server, cluster or super-cluster, set on created"
+    },
+    "backend": {
+      "type": "string",
+      "description": "The name of the backend running the instance's servers, set on created"
+    },
+    "reason": {
+      "type": "string",
+      "description": "The request that destroyed the instance, set on destroyed",
+      "enum": [
+        "destroy",
+        "reset",
+        "close"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "created"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "kind",
+          "backend"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "destroyed"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "reason"
+        ]
+      }
+    }
+  ]
+}

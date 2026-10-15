@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/events/schemas/ntf/clock/v1/request.json",
+  "description": "A request asking a participant for its clock, answered on its clock endpoint",
+  "title": "io.synadia.ntf.clock.v1.request",
+  "type": "object",
+  "required": [
+    "type"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.clock.v1.request"
+    }
+  }
+}

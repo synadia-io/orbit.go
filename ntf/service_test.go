@@ -135,13 +135,15 @@ func TestNewSuppliedConn(t *testing.T) {
 // forward nothing; it covers the agent path without a real agent. When agent is
 // set every Start hands back that agent, so a test can drive the tester.shape.*
 // endpoints against an agent with shaping. Otherwise each Start hands back a
-// new agent without shaping.
+// new agent without shaping. opts holds the Options its factory was handed
+// when withAgent registered it.
 type fakeProvider struct {
 	mu     sync.Mutex
 	specs  []agent.Spec
 	closed bool
 	err    error
 	agent  *fakeAgent
+	opts   agent.Options
 }
 
 func (f *fakeProvider) Start(_ context.Context, spec agent.Spec) (agent.Agent, error) {
@@ -279,7 +281,12 @@ var (
 // withAgent registers p as the "fake" agent and selects it.
 func withAgent(p *fakeProvider) func(*Options) {
 	return func(o *Options) {
-		o.Agents = map[string]agent.Factory{"fake": func(context.Context, agent.Options) (agent.Provider, error) { return p, nil }}
+		o.Agents = map[string]agent.Factory{"fake": func(_ context.Context, opts agent.Options) (agent.Provider, error) {
+			p.mu.Lock()
+			p.opts = opts
+			p.mu.Unlock()
+			return p, nil
+		}}
 		o.Agent = "fake"
 	}
 }
