@@ -37,8 +37,12 @@ type fakePlacement struct {
 	// calls records each ListenerAddress call as <node dir>/<listener name>.
 	calls []string
 
-	// failAt makes the ListenerAddress call with this 1-based number fail with
-	// an error wrapping ErrPortRangeExhausted. Zero never fails.
+	// proxyCalls records each ProxyAddress call as <kind> <name>.
+	proxyCalls []string
+
+	// failAt makes the ListenerAddress or ProxyAddress call with this 1-based
+	// number, counting both, fail with an error wrapping
+	// ErrPortRangeExhausted. Zero never fails.
 	failAt int
 }
 
@@ -56,6 +60,23 @@ func (p *fakePlacement) ListenerAddress(node, name string) (backend.Listener, er
 	p.next++
 
 	return l, nil
+}
+
+// ProxyAddress hands out the next port as the in-process placement does: on
+// 127.0.0.1, or on localhost for a client proxy.
+func (p *fakePlacement) ProxyAddress(name, kind string) (backend.Endpoint, error) {
+	p.proxyCalls = append(p.proxyCalls, kind+" "+name)
+	if len(p.calls)+len(p.proxyCalls) == p.failAt {
+		return backend.Endpoint{}, fmt.Errorf("%w: fake", ErrPortRangeExhausted)
+	}
+
+	ep := backend.Endpoint{Host: "127.0.0.1", Port: p.next}
+	if kind == "client" {
+		ep.Host = "localhost"
+	}
+	p.next++
+
+	return ep, nil
 }
 
 func (p *fakePlacement) InstanceDir() string {
@@ -388,6 +409,16 @@ func TestPlanInstanceErrors(t *testing.T) {
 			failAt: 9,
 			kind:   planErrPort,
 			prefix: `listener "mqtt": `,
+			is:     ErrPortRangeExhausted,
+		},
+		{
+			// A cluster of 3 has 6 listeners, so the 7th call asks for the
+			// first route proxy.
+			name:   "proxy port",
+			spec:   instanceSpec{Kind: "cluster", Servers: 3, Toxics: true},
+			failAt: 7,
+			kind:   planErrPort,
+			prefix: "could not get free port: proxy route:",
 			is:     ErrPortRangeExhausted,
 		},
 		{

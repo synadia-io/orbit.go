@@ -476,34 +476,55 @@ or super-cluster only the first node carries a `TraceURL`. The management server
 instance's events, whether or not any instance traces. Captures hold full payloads and headers,
 including the CONNECT frame, so treat the `TRACES` store as sensitive.
 
+### Link proxies
+
+`WithToxics` puts a proxy of the service's network agent on every route, every gateway between clusters and every
+server's client listener, so links can be faulted. Each server's `Port` and `URL` report its client proxy, so the
+convenience helpers connect through it, and `inst.Links` lists every proxy with its `Name` (`route:<node>-><node>`,
+`gateway:<cluster>-><node>` or `client:<node>`), `Kind`, `From`, `To`, the `Proxy` address it is dialed on (for a
+client proxy, on the advertise host when one is set) and the `Upstream` it forwards to; `tester.status` reports the
+same list. A service whose agent does not declare the `toxics` capability refuses it with error code `018`, and one
+with no agent with `014`. Generated TLS on client ports works with it; TLS on routes or gateways is refused with
+error code `019`, on create and on `UpdateServer`.
+
 ## Template environment
 
 When you write a snippet body or a full template (`WithTemplate`), it is rendered with Go `text/template` against this
 environment. Cluster fields are zero on a single server; super-cluster fields are zero on a single cluster.
 
-| Field            | Type                | Notes                                                                              |
-|------------------|---------------------|------------------------------------------------------------------------------------|
-| `.ServerName`    | string              | globally unique; `<short>-n<i>` or `<short>-c<c>_s<i>`                             |
-| `.ShortID`       | string              | 8-char tail of the instance UUID                                                   |
-| `.InstanceID`    | string              | full instance UUID                                                                 |
-| `.ServerIndex`   | int                 | 1-based index within the cluster                                                   |
-| `.ServerDir`     | string              | absolute path to the server's storage dir                                          |
-| `.StoreDir`      | string              | currently equal to `.ServerDir`                                                    |
-| `.Host`          | string              | always `localhost` today                                                           |
-| `.AdvertiseHost` | string              | `--advertise` value; empty when unset                                              |
-| `.ClientPort`    | int                 | client listener port, reserved by the service                                      |
-| `.JetStream`     | bool                | mirrors the `jetstream` request field                                              |
-| `.ClusterName`   | string              | empty for single-server instances                                                  |
-| `.ClusterPort`   | int                 | cluster route listener port                                                        |
-| `.Routes`        | []string            | `host:port` strings of every cluster peer                                          |
-| `.Gateways`      | map[string][]string | cluster name → gateway URLs (super-cluster only)                                   |
-| `.Ports`         | map[string]int      | listener ports keyed by name (auto-populated for WS/MQTT/LeafNode)                 |
-| `.Snippets`      | map[string]string   | rendered-snippet paths by name; empty when no snippets passed                      |
-| `.TLS`           | struct              | `.TLS.CAFile`/`.CertFile`/`.KeyFile` cert paths; nil unless `WithGeneratedTLS` set |
+| Field               | Type                | Notes                                                                              |
+|---------------------|---------------------|------------------------------------------------------------------------------------|
+| `.ServerName`       | string              | globally unique; `<short>-n<i>` or `<short>-c<c>_s<i>`                             |
+| `.ShortID`          | string              | 8-char tail of the instance UUID                                                   |
+| `.InstanceID`       | string              | full instance UUID                                                                 |
+| `.ServerIndex`      | int                 | 1-based index within the cluster                                                   |
+| `.ServerDir`        | string              | absolute path to the server's storage dir                                          |
+| `.StoreDir`         | string              | currently equal to `.ServerDir`                                                    |
+| `.Host`             | string              | always `localhost` today                                                           |
+| `.AdvertiseHost`    | string              | `--advertise` value; empty when unset                                              |
+| `.ClientPort`       | int                 | client listener port, reserved by the service                                      |
+| `.JetStream`        | bool                | mirrors the `jetstream` request field                                              |
+| `.ClusterName`      | string              | empty for single-server instances                                                  |
+| `.ClusterPort`      | int                 | cluster route listener port                                                        |
+| `.Routes`           | []string            | `host:port` strings of every cluster peer                                          |
+| `.Gateways`         | map[string][]string | cluster name → gateway URLs (super-cluster only)                                   |
+| `.Ports`            | map[string]int      | listener ports keyed by name (auto-populated for WS/MQTT/LeafNode)                 |
+| `.Snippets`         | map[string]string   | rendered-snippet paths by name; empty when no snippets passed                      |
+| `.TLS`              | struct              | `.TLS.CAFile`/`.CertFile`/`.KeyFile` cert paths; nil unless `WithGeneratedTLS` set |
+| `.ClientAdvertise`  | string              | client proxy `host:port`, the `client_advertise`; empty without `WithToxics`       |
+| `.ClusterAdvertise` | string              | dead `host:port`, the cluster `advertise`; empty without `WithToxics`              |
+| `.GatewayAdvertise` | string              | dead `host:port`, the gateway `advertise`; empty without `WithToxics`              |
+
+With `WithToxics`, `.Routes` lists the route proxy for each peer and `.Gateways` lists, for each other cluster, the
+proxies the server's cluster shares to that cluster's servers.
 
 `WithTemplate` replaces the entire main template with your own body. It composes with the typed helpers (their rendered
 files are exposed via `.Snippets.<name>`), but you become responsible for emitting correct `cluster { … }` /
-`gateway { … }` wiring — reach for it only when no typed helper expresses the change.
+`gateway { … }` wiring — reach for it only when no typed helper expresses the change. With `WithToxics` the template must
+render `.ClientAdvertise` as `client_advertise`, in a cluster `.Routes` and `.ClusterAdvertise` as the cluster
+`advertise`, and in a super-cluster `.Gateways` and `.GatewayAdvertise` as the gateway `advertise` as well, or traffic
+goes around the proxies; the service refuses a template that does not reference them with error code `007`, on create
+and on `UpdateServer`.
 
 ## Service subjects
 
@@ -512,7 +533,7 @@ debugging):
 
 | Subject                       | Description                                                               |
 |-------------------------------|---------------------------------------------------------------------------|
-| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `tls`, `trace`. |
+| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `tls`, `trace`, `toxics`. |
 | `tester.create.cluster`       | Creates a cluster.                                                        |
 | `tester.create.super-cluster` | Creates a super-cluster.                                                  |
 | `tester.stop.server`          | Stops a running server by name.                                           |

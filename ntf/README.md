@@ -112,6 +112,38 @@ own. The `Agent` answers the `tester.shape.*` endpoints and is stopped by the se
 fails. A `Start` or `Front` that could not bind returns an error wrapping `agent.ErrListen`, and the create runs
 again with fresh ports. The agent owns any scratch space it needs.
 
+## Link proxies
+
+`Create*` requests accept `toxics` to put a proxy of the agent on every route, every gateway between clusters and
+every node's client listener, so links can be faulted. The agent must declare the `toxics` capability: with no agent
+selected the request is refused with `014`, and with `018` when the agent does not declare it. `Spec.Links` hands
+the agent its route and gateway proxies, each with the endpoint it listens on and the peer listener it forwards to,
+and `Spec.ClientProxies` the endpoint of each node's client proxy, whose upstream is the live client endpoint once
+the node runs.
+
+The configs dial the proxies: `.Routes` lists the route proxy for each peer, and `.Gateways` lists, for each other
+cluster, the proxies the node's cluster shares to that cluster's nodes. Three template variables, empty without
+`toxics`, carry the rest:
+
+| Variable            | Rendered by the built-in template as                                                 |
+|---------------------|--------------------------------------------------------------------------------------|
+| `.ClientAdvertise`  | `client_advertise`: the `host:port` of the node's client proxy.                      |
+| `.ClusterAdvertise` | `advertise` in the `cluster` block: a dead `host:port` that refuses every dial.      |
+| `.GatewayAdvertise` | `advertise` in the `gateway` block: the same dead address.                           |
+
+The dead address keeps gossip on the proxies. In-process every node advertises the same dead address, so nats-server
+takes a gossiped route to it for a route to itself and never dials it; on a backend where that is not so, a peer that
+dials it is refused and drops it. A custom `template` must reference `.ClientAdvertise`, and in a cluster `.Routes`
+and `.ClusterAdvertise`, and in a super-cluster `.Gateways` and `.GatewayAdvertise` as well, or the create, and an
+update of one of its servers, is refused with `007` naming what is missing. A config that enables TLS on routes or
+gateways is refused with `019`, on create and on update, since the gateway proxies read a plain CONNECT; generated
+TLS on client ports is allowed.
+
+A server's `port` reports its client proxy, and the create response and status list every proxy under `links`, each
+with its `name` (`route:<node>-><node>`, `gateway:<cluster>-><node>` or `client:<node>`), `kind`, `from`, `to`, the
+`proxy` address it is dialed on (for a client proxy, on the advertise host when one is set) and the `upstream` it
+forwards to.
+
 ## Clocks
 
 Events from different components are lined up by their timestamps, so a distributed deployment of ntf must run NTP
@@ -131,9 +163,9 @@ into one result. The request and reply are the
 
 | Subject                       | Description                                                                 |
 |-------------------------------|-----------------------------------------------------------------------------|
-| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `trace`, `proxy`. |
-| `tester.create.cluster`       | Creates a cluster. Optional `snippets`, `template`, `trace`, `proxy`.       |
-| `tester.create.super-cluster` | Creates a super-cluster. Optional `snippets`, `template`, `trace`, `proxy`. |
+| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`. |
+| `tester.create.cluster`       | Creates a cluster. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`.       |
+| `tester.create.super-cluster` | Creates a super-cluster. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`. |
 | `tester.stop.server`          | Stops a running server by name (names are globally unique).                 |
 | `tester.start.server`         | Starts a previously-stopped server by name.                                 |
 | `tester.stop.instance`        | Stops every server in an instance, keeping config and storage.              |
@@ -143,7 +175,7 @@ into one result. The request and reply are the
 | `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxy of an instance with one. |
 | `tester.shape.clear`          | Removes one shaping set by id, or every set when `set` is empty.            |
 | `tester.shape.report`         | Reports the rule firings of one shaping set, or of every set.               |
-| `tester.status`               | Status of every instance and its `shaping_sets`; optional `instance_id`.    |
+| `tester.status`               | Status of every instance, its `shaping_sets` and `links`; optional `instance_id`. |
 | `tester.list`                 | Lightweight summary of every instance (id, kind, servers count).            |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                              |
 | `tester.reset`                | Tears down **every** instance — CI-style global wipe.                       |

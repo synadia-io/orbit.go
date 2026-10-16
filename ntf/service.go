@@ -34,6 +34,7 @@ import (
 	"github.com/nats-io/nuid"
 
 	"github.com/synadia-io/orbit.go/ntf/agent"
+	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 	"github.com/synadia-io/orbit.go/ntf/events"
 )
@@ -235,6 +236,11 @@ type instance struct {
 	// no contents of any file or config. Guarded by Service.mu.
 	plan *instancePlan
 
+	// links are the proxied links of an instance created with toxics, as its
+	// create response lists them, set with Servers and never changed after.
+	// Nil for any other instance. Guarded by Service.mu.
+	links []api.Link
+
 	// events is the instance's event lock. A create holds it from making its
 	// servers visible until created and ready are published, and a teardown
 	// from stopping the agents until destroyed is published, so no node event
@@ -272,9 +278,10 @@ type managedServer struct {
 	// to an instance nobody will ever tear down.
 	instanceID string
 
-	// clientPort is the server's reserved client listen port, captured at create
-	// time. Unlike the live server's address it survives a stop, so status can
-	// report the client port even for a stopped node.
+	// clientPort is the server's reserved client listen port, or its client
+	// proxy's port when its instance was created with toxics, captured at
+	// create time. Unlike the live server's address it survives a stop, so
+	// status can report the client port even for a stopped node.
 	clientPort int
 
 	// advertiseHost is the resolved client_advertise host for this server,
@@ -291,9 +298,21 @@ type managedServer struct {
 	node *nodePlan
 
 	// agent is the network agent fronting this server's client port, set when
-	// the server was created with trace capture enabled. nil otherwise. Stopped
-	// (flushing in-flight captures) before the server is shut down on teardown.
+	// the server was created with trace capture enabled, and the instance's
+	// agent on its first server when it was created with toxics. nil
+	// otherwise. Stopped (flushing in-flight captures) before the server is
+	// shut down on teardown.
 	agent agent.Agent
+
+	// fronted reports whether agent fronts this server's client port for trace
+	// or proxy, so the shaping calls act on it. Immutable for the life of the
+	// server.
+	fronted bool
+
+	// toxics reports whether the server's instance was created with toxics,
+	// so an update checks a custom template, and the config it renders, for
+	// the proxies. Immutable for the life of the server.
+	toxics bool
 
 	// cfgMu guards the server's config (its config path and its snippet
 	// files). Held by update, reload and start operations.

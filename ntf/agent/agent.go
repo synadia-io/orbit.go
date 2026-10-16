@@ -42,8 +42,9 @@ const (
 	// ErrUnsupported.
 	CapabilityShaping Capability = "shaping"
 
-	// CapabilityToxics means the agent faults the links of an instance. The
-	// service does not use it yet.
+	// CapabilityToxics means the agent runs a proxy for each of Spec.Links
+	// and Spec.ClientProxies, and faults the links of an instance. Creates
+	// with toxics need it.
 	CapabilityToxics Capability = "toxics"
 )
 
@@ -111,6 +112,47 @@ type Spec struct {
 	// Store is true when the agent keeps captures, and false when it only
 	// forwards and shapes.
 	Store bool
+
+	// Links are the route and gateway proxies of an instance created with
+	// toxics, which the agent runs from Start, before the servers dial them.
+	// Empty for any other instance.
+	Links []Link
+
+	// ClientProxies are the client proxies of an instance created with
+	// toxics, keyed by the name of the managed server each one fronts, which
+	// is the Front.ServerName the service fronts that server with. Each is
+	// the endpoint of the proxy as placement returned it; the agent binds its
+	// port on ListenHost when the service fronts that server with
+	// ClientEdge.Front, never at Start, since the backend may hold the port
+	// until then. The server's live client endpoint, the proxy's upstream, is
+	// known only once the server runs. Empty for any other instance.
+	ClientProxies map[string]backend.Endpoint
+}
+
+// Link is a proxy on one link between the nodes of an instance: it listens on
+// Listen and forwards every connection it accepts to Upstream.
+type Link struct {
+	// Name names the link: "route:<node>-><node>" for a route,
+	// "gateway:<cluster>-><node>" for a gateway.
+	Name string
+
+	// Kind is "route" or "gateway".
+	Kind string
+
+	// From is the node that dials through a route proxy, or the cluster whose
+	// nodes all dial through a gateway proxy.
+	From string
+
+	// To is the node the proxy forwards to.
+	To string
+
+	// Listen is the endpoint the proxy listens on, which the nodes' configs
+	// dial.
+	Listen backend.Endpoint
+
+	// Upstream is the endpoint of To's cluster listener for a route, or of
+	// its gateway listener for a gateway.
+	Upstream backend.Endpoint
 }
 
 // Front describes a managed server ClientEdge.Front is to front.

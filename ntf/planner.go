@@ -19,10 +19,15 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"text/template"
 
+	"github.com/nats-io/nats-server/v2/conf"
+
+	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 )
@@ -51,10 +56,14 @@ const (
 	// planErrTemplate means the main template failed to parse or render.
 	// Answered with 002.
 	planErrTemplate
+
+	// planErrRouteTLS means a node of an instance created with toxics enables
+	// TLS on its routes or gateways. Answered with 019.
+	planErrRouteTLS
 )
 
 // errNoFreePort is the cause of a planErrPort failure for a client, cluster or
-// gateway listener.
+// gateway listener, or a proxy.
 var errNoFreePort = errors.New("could not get free port")
 
 // planError is a failure to plan an instance. Its message is the message the
@@ -166,8 +175,16 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 		return fail(planErrPort, err)
 	}
 
-	// 4. The links between the nodes.
+	// 4. The links between the nodes and, with toxics, the proxies they go
+	// through. No proxy address is asked for without toxics.
 	plan.Links = planLinks(plan)
+
+	if spec.Toxics {
+		err = planProxies(plan, place)
+		if err != nil {
+			return fail(planErrPort, err)
+		}
+	}
 
 	for _, n := range plan.nodes {
 		// 5. The node's store directory, which survives a revision, and its
@@ -192,6 +209,15 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 		err = renderNode(n, td, spec.Snippets, spec.MainTemplate)
 		if err != nil {
 			return nil, err
+		}
+
+		// The proxies of toxics read a plain CONNECT, so routes and gateways
+		// must not use TLS.
+		if spec.Toxics {
+			err = checkRouteTLS(n)
+			if err != nil {
+				return fail(planErrRouteTLS, err)
+			}
 		}
 	}
 
@@ -413,6 +439,108 @@ func planLinks(plan *instancePlan) []backend.Link {
 	return links
 }
 
+// routeLinkName names the route link of an instance created with toxics from
+// node from to node to.
+func routeLinkName(from, to string) string {
+	return "route:" + from + "->" + to
+}
+
+// gatewayLinkName names the gateway link of an instance created with toxics
+// from cluster from to node to.
+func gatewayLinkName(from, to string) string {
+	return "gateway:" + from + "->" + to
+}
+
+// clientLinkName names the client link of an instance created with toxics in
+// front of node.
+func clientLinkName(node string) string {
+	return "client:" + node
+}
+
+// planProxies asks place for the address of every proxy of plan, an instance
+// created with toxics, in this order: one for each route link; one for each
+// cluster and each node of another cluster, shared by the cluster's gateway
+// links to that node; one for each node's client listener; and last, for a
+// cluster or super-cluster, the dead advertise address. Each route link and
+// each gateway link to a node of another cluster then dials its proxy. A
+// gateway link within a cluster stays direct, since nats-server ignores the
+// gateway URLs of its own cluster.
+func planProxies(plan *instancePlan, place backend.Placement) error {
+	proxy := func(name, kind string) (backend.Endpoint, error) {
+		ep, err := place.ProxyAddress(name, kind)
+		if err != nil {
+			return backend.Endpoint{}, fmt.Errorf("%w: proxy %s: %w", errNoFreePort, name, err)
+		}
+		return ep, nil
+	}
+
+	for i, lk := range plan.Links {
+		if lk.Kind != "route" {
+			continue
+		}
+
+		name := routeLinkName(lk.Node, lk.Peer)
+		ep, err := proxy(name, "route")
+		if err != nil {
+			return err
+		}
+		plan.proxies = append(plan.proxies, agent.Link{Name: name, Kind: "route", From: lk.Node, To: lk.Peer, Listen: ep, Upstream: lk.Dial})
+		plan.Links[i].Dial = ep
+	}
+
+	if plan.Kind == "super-cluster" {
+		gateways := map[string]backend.Endpoint{}
+		for _, cluster := range plan.Clusters {
+			for _, peer := range plan.nodes {
+				if peer.Cluster == cluster {
+					continue
+				}
+
+				name := gatewayLinkName(cluster, peer.Name)
+				ep, err := proxy(name, "gateway")
+				if err != nil {
+					return err
+				}
+				plan.proxies = append(plan.proxies, agent.Link{Name: name, Kind: "gateway", From: cluster, To: peer.Name, Listen: ep, Upstream: listenerOf(peer, "gateway").Endpoint})
+				gateways[name] = ep
+			}
+		}
+
+		clusterOf := map[string]string{}
+		for _, n := range plan.nodes {
+			clusterOf[n.Name] = n.Cluster
+		}
+		for i, lk := range plan.Links {
+			if lk.Kind != "gateway" {
+				continue
+			}
+			ep, ok := gateways[gatewayLinkName(clusterOf[lk.Node], lk.Peer)]
+			if ok {
+				plan.Links[i].Dial = ep
+			}
+		}
+	}
+
+	plan.clientProxies = map[string]backend.Endpoint{}
+	for _, n := range plan.nodes {
+		ep, err := proxy(clientLinkName(n.Name), "client")
+		if err != nil {
+			return err
+		}
+		plan.clientProxies[n.Name] = ep
+	}
+
+	if plan.Kind != "server" {
+		ep, err := proxy("advertise", "advertise")
+		if err != nil {
+			return err
+		}
+		plan.deadAdvertise = ep
+	}
+
+	return nil
+}
+
 // planTemplateData returns the template data node n of plan renders its
 // snippets and config with, short of the managed TLS settings. A node's own
 // .Routes and .Gateways entries come from its own listeners, every other entry
@@ -456,6 +584,24 @@ func planTemplateData(plan *instancePlan, n *nodePlan, spec instanceSpec, dir, s
 		l, ok := findListener(n, name)
 		if ok {
 			td.Ports[name] = l.Endpoint.Port
+		}
+	}
+
+	// With toxics, clients are told the node's client proxy, on the advertise
+	// host when one is set, and peers the dead address, so gossip does not go
+	// around the proxies.
+	if spec.Toxics {
+		client := plan.clientProxies[n.Name]
+		if spec.AdvertiseHost != "" {
+			client.Host = spec.AdvertiseHost
+		}
+		td.ClientAdvertise = client.String()
+
+		if n.Cluster != "" {
+			td.ClusterAdvertise = plan.deadAdvertise.String()
+		}
+		if plan.Kind == "super-cluster" {
+			td.GatewayAdvertise = plan.deadAdvertise.String()
 		}
 	}
 
@@ -566,4 +712,69 @@ func renderSnippets(td *templateData, snippets map[string]string, snippetsDir st
 	}
 
 	return files, nil
+}
+
+// includeLine matches an include directive at the start of a config line, with
+// its path double quoted, single quoted or bare.
+var includeLine = regexp.MustCompile(`(?m)^[ \t]*include[ \t]+(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;}]+))[ \t]*;?`)
+
+// maxIncludeDepth bounds how deep checkRouteTLS expands includes, so a cycle
+// of includes ends.
+const maxIncludeDepth = 10
+
+// checkRouteTLS returns an error wrapping errRouteTLS when node n's config,
+// with every include of one of n's files expanded, has a tls block in its
+// cluster or gateway block, from the template or from a snippet. An include of
+// any other file is left out, and a config that does not parse is passed over,
+// since the server reports it when it starts.
+func checkRouteTLS(n *nodePlan) error {
+	files := map[string][]byte{}
+	for _, f := range n.Files {
+		files[filepath.Clean(f.Path)] = f.Data
+	}
+
+	cfg, err := conf.Parse(expandIncludes(string(n.Config), n.Dir, files, 0))
+	if err != nil {
+		return nil
+	}
+
+	for key, value := range cfg {
+		block := strings.ToLower(key)
+		if block != "cluster" && block != "gateway" {
+			continue
+		}
+
+		fields, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		for field := range fields {
+			if strings.EqualFold(field, "tls") {
+				return fmt.Errorf("%w: node %s enables TLS in its %s block", errRouteTLS, n.Name, block)
+			}
+		}
+	}
+
+	return nil
+}
+
+// expandIncludes returns text with every include of one of files replaced by
+// that file's contents, expanded in turn, and every other include removed.
+// files are keyed by their cleaned path relative to the instance directory,
+// and dir is the directory the include paths in text are relative to.
+func expandIncludes(text, dir string, files map[string][]byte, depth int) string {
+	return includeLine.ReplaceAllStringFunc(text, func(line string) string {
+		if depth >= maxIncludeDepth {
+			return ""
+		}
+
+		m := includeLine.FindStringSubmatch(line)
+		path := filepath.Clean(filepath.Join(dir, m[1]+m[2]+m[3]))
+		data, ok := files[path]
+		if !ok {
+			return ""
+		}
+
+		return "\n" + expandIncludes(string(data), filepath.Dir(path), files, depth+1) + "\n"
+	})
 }

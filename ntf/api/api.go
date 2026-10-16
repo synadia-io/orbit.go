@@ -75,6 +75,10 @@ type CreateServerRequest struct {
 	// shaping sets apply without filling the store. When Trace is set, Proxy has
 	// no effect.
 	Proxy bool `json:"proxy,omitempty"`
+	// Toxics puts a proxy of the instance's agent in front of the server's client
+	// listener, which Port then reports. It needs an agent that declares the
+	// toxics capability.
+	Toxics bool `json:"toxics,omitempty"`
 }
 
 type CreateClusterRequest struct {
@@ -91,6 +95,10 @@ type CreateClusterRequest struct {
 	// so shaping sets apply without filling the store. When Trace is set, Proxy
 	// has no effect.
 	Proxy bool `json:"proxy,omitempty"`
+	// Toxics routes every route between the nodes and every node's clients
+	// through proxies of the instance's agent, which Links lists. It needs an
+	// agent that declares the toxics capability.
+	Toxics bool `json:"toxics,omitempty"`
 }
 
 type CreateSuperClusterRequest struct {
@@ -108,14 +116,20 @@ type CreateSuperClusterRequest struct {
 	// stores no captures, so shaping sets apply without filling the store. When
 	// Trace is set, Proxy has no effect.
 	Proxy bool `json:"proxy,omitempty"`
+	// Toxics routes every route, every gateway between the clusters and every
+	// node's clients through proxies of the instance's agent, which Links lists.
+	// It needs an agent that declares the toxics capability.
+	Toxics bool `json:"toxics,omitempty"`
 }
 
 type ManagedServer struct {
-	Name    string         `json:"name"`
-	Cluster string         `json:"cluster"`
-	Port    int            `json:"port"`
-	Ports   map[string]int `json:"ports,omitempty"`
-	URL     string         `json:"url,omitempty"`
+	Name    string `json:"name"`
+	Cluster string `json:"cluster"`
+	// Port is the server's client port, or the port of its client proxy for an
+	// instance created with toxics.
+	Port  int            `json:"port"`
+	Ports map[string]int `json:"ports,omitempty"`
+	URL   string         `json:"url,omitempty"`
 	// Advertise is the configured client_advertise host for this server, or empty
 	// when the node advertises nothing. Clients prefer it over the management
 	// connection host when building the node's reachable URL.
@@ -135,6 +149,32 @@ type CreateResponse struct {
 	Kind        string           `json:"kind"`
 	Servers     []*ManagedServer `json:"servers"`
 	TLS         *TLSMaterial     `json:"tls,omitempty"`
+	// Links lists the proxied links of an instance created with toxics: its
+	// routes, then its gateways, then its client proxies. Empty for any other
+	// instance.
+	Links []Link `json:"links,omitempty"`
+}
+
+// Link is one proxied link of an instance created with toxics: a proxy the
+// instance's agent runs, and where it forwards what it accepts.
+type Link struct {
+	// Name names the link: "route:<node>-><node>", "gateway:<cluster>-><node>"
+	// or "client:<node>".
+	Name string `json:"name"`
+	// Kind is "route", "gateway" or "client".
+	Kind string `json:"kind"`
+	// From is the node that dials through a route proxy, or the cluster whose
+	// nodes dial through a gateway proxy. Empty for a client proxy.
+	From string `json:"from,omitempty"`
+	// To is the node the proxy forwards to.
+	To string `json:"to"`
+	// Proxy is the host:port the nodes dial a route or gateway proxy on, and
+	// the host:port clients dial a client proxy on, which is on the advertise
+	// host when one is set, as the server's client_advertise renders it.
+	Proxy string `json:"proxy"`
+	// Upstream is the host:port the proxy forwards to: To's cluster, gateway or
+	// live client listener.
+	Upstream string `json:"upstream"`
 }
 
 type DestroyRequest struct {
@@ -235,6 +275,9 @@ type InstanceStatus struct {
 	// declares, such as "capture" and "shaping", in the order it declares
 	// them. Empty when the service has no agent or it declares none.
 	AgentCapabilities []string `json:"agent_capabilities,omitempty"`
+	// Links lists the proxied links of an instance created with toxics, as the
+	// create response did. Empty for any other instance.
+	Links []Link `json:"links,omitempty"`
 	// EventsSeq is the stream sequence of the latest of the service's own
 	// events of the instance in its events stream, read before the rest of the
 	// status, so a reader follows the stream after it without a gap. Agent

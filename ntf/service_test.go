@@ -140,12 +140,16 @@ func TestNewSuppliedConn(t *testing.T) {
 // endpoints against an agent with shaping. Otherwise each Start hands back a
 // new agent without shaping. opts holds the Options its factory was handed
 // when withAgent registered it. It declares capture unless noCapture is set,
-// and shaping only when the agents it hands back shape.
+// shaping only when the agents it hands back shape, and toxics when toxics is
+// set.
 //
 // Start counts every call in starts, and returns the first of startErrs while
-// any is left, then err when set. The agents call frontGate, when set, as Front
-// begins, record each Front in fronts and return the first of frontErrs while
-// any is left. started lists the agents Start handed back, in order.
+// any is left, then err when set. It records in bindable whether each port of
+// the spec's links and client proxies could be bound as it began, and calls
+// startHook, when set, with every spec it is handed, failed or not. The agents
+// call frontGate, when set, as Front begins, record each Front in fronts and
+// return the first of frontErrs while any is left. started lists the agents
+// Start handed back, in order.
 type fakeProvider struct {
 	mu        sync.Mutex
 	specs     []agent.Spec
@@ -154,6 +158,9 @@ type fakeProvider struct {
 	agent     *fakeAgent
 	opts      agent.Options
 	noCapture bool
+	toxics    bool
+	bindable  map[int]bool
+	startHook func(agent.Spec)
 	starts    int
 	startErrs []error
 	frontErrs []error
@@ -170,6 +177,9 @@ func (f *fakeProvider) Capabilities() []agent.Capability {
 	if f.agent != nil && !f.agent.noShaping {
 		caps = append(caps, agent.CapabilityShaping)
 	}
+	if f.toxics {
+		caps = append(caps, agent.CapabilityToxics)
+	}
 
 	return caps
 }
@@ -179,6 +189,19 @@ func (f *fakeProvider) Start(_ context.Context, spec agent.Spec) (agent.Agent, e
 	defer f.mu.Unlock()
 
 	f.starts++
+	if f.bindable == nil {
+		f.bindable = map[int]bool{}
+	}
+	for _, lk := range spec.Links {
+		f.bindable[lk.Listen.Port] = portBindable(lk.Listen.Port)
+	}
+	for _, ep := range spec.ClientProxies {
+		f.bindable[ep.Port] = portBindable(ep.Port)
+	}
+	if f.startHook != nil {
+		f.startHook(spec)
+	}
+
 	if len(f.startErrs) > 0 {
 		err := f.startErrs[0]
 		f.startErrs = f.startErrs[1:]

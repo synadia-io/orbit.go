@@ -14,13 +14,14 @@
 package ntf
 
 import (
+	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 )
 
 // inProcessHost is the host in-process listeners are reached on. It matches the
-// value of .Host in the template environment and the host of every route and
-// gateway URL a config lists.
+// value of .Host in the template environment and, without toxics, the host of
+// every route and gateway URL a config lists.
 const inProcessHost = "localhost"
 
 // instanceSpec is what a validated create request asks for. The create handlers
@@ -82,6 +83,11 @@ type instanceSpec struct {
 	// StoreCaptures keeps the captures the proxy records. It applies only when
 	// Proxy is set.
 	StoreCaptures bool
+
+	// Toxics puts a proxy of the agent on every route, every gateway between
+	// clusters and every node's client listener, and advertises a dead
+	// address for routes and gateways.
+	Toxics bool
 }
 
 // instancePlan is the record of what an instance is: its nodes, how they
@@ -101,6 +107,20 @@ type instancePlan struct {
 	// TLS is the material returned to the caller in the create response. Nil
 	// when the instance has no generated TLS.
 	TLS *api.TLSMaterial
+
+	// proxies are the route and gateway proxies of an instance created with
+	// toxics, routes first, in the order their addresses were asked for. Nil
+	// without toxics.
+	proxies []agent.Link
+
+	// clientProxies are the endpoints of the client proxies of an instance
+	// created with toxics, keyed by node name. Nil without toxics.
+	clientProxies map[string]backend.Endpoint
+
+	// deadAdvertise is the address the nodes of a cluster or super-cluster
+	// created with toxics advertise for their routes and gateways, which
+	// refuses every dial. Zero otherwise.
+	deadAdvertise backend.Endpoint
 }
 
 // dropContents drops the contents of the instance's own files and the TLS

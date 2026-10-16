@@ -1,0 +1,336 @@
+=== c1_s1/config.cfg
+
+
+server_name: "<SHORT>-c1_s1"
+port: <PORT1>
+
+client_advertise: "localhost:<PORT2>"
+
+
+log_file: "<INSTANCE_DIR>/c1_s1/server.log"
+
+
+
+
+
+cluster {
+	name: "SC_<SHORT>_1"
+	port: <PORT3>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://localhost:<PORT3>"
+
+"nats://127.0.0.1:<PORT5>"
+
+	]
+}
+
+
+
+gateway {
+	name: "SC_<SHORT>_1"
+	port: <PORT6>
+	advertise: "127.0.0.1:<PORT4>"
+	gateways: [
+
+		{ name: "SC_<SHORT>_1", urls: [
+		"nats://localhost:<PORT6>"
+
+		"nats://localhost:<PORT7>"
+]}
+
+		{ name: "SC_<SHORT>_2", urls: [
+		"nats://127.0.0.1:<PORT8>"
+
+		"nats://127.0.0.1:<PORT9>"
+]}
+
+	]
+}
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== c1_s2/config.cfg
+
+
+server_name: "<SHORT>-c1_s2"
+port: <PORT10>
+
+client_advertise: "localhost:<PORT11>"
+
+
+log_file: "<INSTANCE_DIR>/c1_s2/server.log"
+
+
+
+
+
+cluster {
+	name: "SC_<SHORT>_1"
+	port: <PORT12>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://127.0.0.1:<PORT13>"
+
+"nats://localhost:<PORT12>"
+
+	]
+}
+
+
+
+gateway {
+	name: "SC_<SHORT>_1"
+	port: <PORT7>
+	advertise: "127.0.0.1:<PORT4>"
+	gateways: [
+
+		{ name: "SC_<SHORT>_1", urls: [
+		"nats://localhost:<PORT6>"
+
+		"nats://localhost:<PORT7>"
+]}
+
+		{ name: "SC_<SHORT>_2", urls: [
+		"nats://127.0.0.1:<PORT8>"
+
+		"nats://127.0.0.1:<PORT9>"
+]}
+
+	]
+}
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== c2_s1/config.cfg
+
+
+server_name: "<SHORT>-c2_s1"
+port: <PORT14>
+
+client_advertise: "localhost:<PORT15>"
+
+
+log_file: "<INSTANCE_DIR>/c2_s1/server.log"
+
+
+
+
+
+cluster {
+	name: "SC_<SHORT>_2"
+	port: <PORT16>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://localhost:<PORT16>"
+
+"nats://127.0.0.1:<PORT17>"
+
+	]
+}
+
+
+
+gateway {
+	name: "SC_<SHORT>_2"
+	port: <PORT18>
+	advertise: "127.0.0.1:<PORT4>"
+	gateways: [
+
+		{ name: "SC_<SHORT>_1", urls: [
+		"nats://127.0.0.1:<PORT19>"
+
+		"nats://127.0.0.1:<PORT20>"
+]}
+
+		{ name: "SC_<SHORT>_2", urls: [
+		"nats://localhost:<PORT18>"
+
+		"nats://localhost:<PORT21>"
+]}
+
+	]
+}
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== c2_s2/config.cfg
+
+
+server_name: "<SHORT>-c2_s2"
+port: <PORT22>
+
+client_advertise: "localhost:<PORT23>"
+
+
+log_file: "<INSTANCE_DIR>/c2_s2/server.log"
+
+
+
+
+
+cluster {
+	name: "SC_<SHORT>_2"
+	port: <PORT24>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://127.0.0.1:<PORT25>"
+
+"nats://localhost:<PORT24>"
+
+	]
+}
+
+
+
+gateway {
+	name: "SC_<SHORT>_2"
+	port: <PORT21>
+	advertise: "127.0.0.1:<PORT4>"
+	gateways: [
+
+		{ name: "SC_<SHORT>_1", urls: [
+		"nats://127.0.0.1:<PORT19>"
+
+		"nats://127.0.0.1:<PORT20>"
+]}
+
+		{ name: "SC_<SHORT>_2", urls: [
+		"nats://localhost:<PORT18>"
+
+		"nats://localhost:<PORT21>"
+]}
+
+	]
+}
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}

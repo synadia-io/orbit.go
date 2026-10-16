@@ -38,6 +38,12 @@ const (
 	// inProcessInternalHost is the host a proxy beside an in-process node dials
 	// it on.
 	inProcessInternalHost = "127.0.0.1"
+
+	// inProcessProxyHost is the host the route and gateway proxies of an
+	// in-process instance listen on and its nodes dial. nats-server dials one
+	// random address of localhost, and a proxy listens on one, so they agree
+	// on 127.0.0.1.
+	inProcessProxyHost = "127.0.0.1"
 )
 
 // inProcessError is a failure of the in-process backend. It carries the
@@ -105,6 +111,11 @@ type inProcessInstance struct {
 	// node and listener name, until the node starts.
 	held map[[2]string]*net.TCPListener
 
+	// proxies are the listeners holding the ports placement reserved for
+	// proxies, keyed by proxy name, until the service hands them to the
+	// agent.
+	proxies map[string]*net.TCPListener
+
 	// nodes are the nodes Provision started, in plan order.
 	nodes []*inProcessNode
 
@@ -149,7 +160,7 @@ func (b *inProcessBackend) Placement(_ context.Context, instanceID string) (back
 		return nil, errInstanceNotFound
 	}
 
-	rec := &inProcessInstance{inst: inst, held: map[[2]string]*net.TCPListener{}, done: make(chan struct{})}
+	rec := &inProcessInstance{inst: inst, held: map[[2]string]*net.TCPListener{}, proxies: map[string]*net.TCPListener{}, done: make(chan struct{})}
 
 	b.mu.Lock()
 	b.instances[instanceID] = rec
@@ -331,9 +342,14 @@ func (b *inProcessBackend) Teardown(_ context.Context, instanceID string) error 
 	rec.nodes = nil
 	held := rec.held
 	rec.held = nil
+	proxies := rec.proxies
+	rec.proxies = nil
 	b.mu.Unlock()
 
 	for _, ln := range held {
+		ln.Close()
+	}
+	for _, ln := range proxies {
 		ln.Close()
 	}
 
@@ -385,6 +401,28 @@ func (b *inProcessBackend) stopNodes(nodes []*inProcessNode) {
 		srv.WaitForShutdown()
 		b.svc.log.Info("Stopped server", "server", srv.Name())
 	}
+}
+
+// releaseProxies closes the listeners holding the ports of the named proxies
+// of the instance instanceID, so the agent can bind them. The ports stay
+// reserved until Teardown. A name with no listener held is passed over.
+func (b *inProcessBackend) releaseProxies(instanceID string, names []string) {
+	var held []*net.TCPListener
+
+	b.mu.Lock()
+	rec, ok := b.instances[instanceID]
+	if ok {
+		for _, name := range names {
+			ln, found := rec.proxies[name]
+			if found {
+				held = append(held, ln)
+				delete(rec.proxies, name)
+			}
+		}
+	}
+	b.mu.Unlock()
+
+	closeListeners(held)
 }
 
 // Close does nothing: the in-process backend holds nothing for the whole
@@ -484,6 +522,46 @@ func (p *inProcessPlacement) ListenerAddress(node, name string) (backend.Listene
 	}
 
 	return backend.Listener{Name: name, Endpoint: backend.Endpoint{Host: inProcessHost, Port: port}}, nil
+}
+
+// ProxyAddress reserves a port from the service's port range for the named
+// proxy and returns it on 127.0.0.1 for a route or gateway proxy, and on
+// localhost, where clients reach the nodes, for a client proxy. The listener
+// holding the port is kept on the instance until the service hands the port
+// to the agent. The dead advertise address is reserved the same way on
+// 127.0.0.1, but its listener is closed at once, so a dial to it is refused
+// while the port stays reserved until Teardown. An exhausted range returns an
+// error wrapping ErrPortRangeExhausted.
+func (p *inProcessPlacement) ProxyAddress(name, kind string) (backend.Endpoint, error) {
+	port, ln, err := p.backend.svc.reservePort(p.rec.inst)
+	if err != nil {
+		return backend.Endpoint{}, err
+	}
+
+	ep := backend.Endpoint{Host: inProcessProxyHost, Port: port}
+	if kind == "client" {
+		ep.Host = inProcessHost
+	}
+
+	if kind == "advertise" {
+		ln.Close()
+		return ep, nil
+	}
+
+	p.backend.mu.Lock()
+	torn := p.rec.torn
+	if !torn {
+		p.rec.proxies[name] = ln
+	}
+	p.backend.mu.Unlock()
+
+	// Teardown has already closed the instance's listeners and will not see
+	// this one.
+	if torn {
+		ln.Close()
+	}
+
+	return ep, nil
 }
 
 // InstanceDir returns <Dir>/<id>.
@@ -768,4 +846,5 @@ var (
 	_ backend.Backend   = (*inProcessBackend)(nil)
 	_ backend.Placement = (*inProcessPlacement)(nil)
 	_ backend.Node      = (*inProcessNode)(nil)
+	_ proxyHolder       = (*inProcessBackend)(nil)
 )

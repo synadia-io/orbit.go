@@ -137,7 +137,9 @@ var serverConfigTemplate = `
 {{ if .Snippets.top }}include "{{ .Snippets.top }}"{{ end }}
 server_name: "{{ .ServerName }}"
 port: {{ .ClientPort }}
-{{ if .AdvertiseHost }}
+{{ if .ClientAdvertise }}
+client_advertise: "{{ .ClientAdvertise }}"
+{{ else if .AdvertiseHost }}
 client_advertise: "{{ hostport .AdvertiseHost .ClientPort }}"
 {{ end }}
 {{ if .LogFile }}
@@ -156,6 +158,9 @@ jetstream {
 cluster {
 	name: "{{ .ClusterName }}"
 	port: {{ .ClusterPort }}
+{{- if .ClusterAdvertise }}
+	advertise: "{{ .ClusterAdvertise }}"
+{{- end }}
 	routes: [
 {{ range .Routes }}
 "nats://{{ . }}"
@@ -168,6 +173,9 @@ cluster {
 gateway {
 	name: "{{ .ClusterName }}"
 	port: {{ .GatewayPort }}
+{{- if .GatewayAdvertise }}
+	advertise: "{{ .GatewayAdvertise }}"
+{{- end }}
 	gateways: [
 {{ range $cluster, $urls := .Gateways }}
 		{ name: "{{ $cluster }}", urls: [
@@ -280,6 +288,59 @@ func validateTLSRequest(opts *api.TLSOptions, snippets map[string]string, custom
 		return fmt.Errorf("WithTemplate must reference {{.TLSInclude}} when WithGeneratedTLS is set")
 	}
 	return nil
+}
+
+// toxicsTemplateRefs are the template variables that carry the proxies of an
+// instance created with toxics, by kind of instance. A custom template must
+// reference each, or the instance's traffic goes around the proxies.
+var toxicsTemplateRefs = map[string][]string{
+	"server":        {".ClientAdvertise"},
+	"cluster":       {".Routes", ".ClusterAdvertise", ".ClientAdvertise"},
+	"super-cluster": {".Routes", ".ClusterAdvertise", ".ClientAdvertise", ".Gateways", ".GatewayAdvertise"},
+}
+
+// validateToxicsTemplate refuses customTemplate, the custom template of an
+// instance of the given kind created with toxics, unless its text references
+// every variable of toxicsTemplateRefs, naming those it lacks. An empty
+// customTemplate is the built-in template, which references them all.
+func validateToxicsTemplate(kind, customTemplate string) error {
+	if customTemplate == "" {
+		return nil
+	}
+
+	var missing []string
+	for _, ref := range toxicsTemplateRefs[kind] {
+		if !strings.Contains(customTemplate, ref) {
+			missing = append(missing, ref)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("WithTemplate must reference %s when toxics is set", strings.Join(missing, ", "))
+}
+
+// toxicsRefusal returns the response code and message a create of an
+// instance of the given kind with toxics is refused with, or two empty
+// strings when it is not refused: 007 for a custom template that does not
+// reference the variables that carry the proxies, 014 when no agent is
+// selected, and 018 when the agent does not declare the toxics capability.
+func (s *Service) toxicsRefusal(kind, customTemplate string) (string, string) {
+	err := validateToxicsTemplate(kind, customTemplate)
+	if err != nil {
+		return "007", err.Error()
+	}
+
+	if s.agents == nil {
+		return "014", "toxics is not configured on this service"
+	}
+
+	if !s.agentDeclares(agent.CapabilityToxics) {
+		return "018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityToxics)
+	}
+
+	return "", ""
 }
 
 // tlsInstanceFiles holds on-disk paths for the shared TLS artifacts written
@@ -429,6 +490,14 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 		return
 	}
 
+	if creq.Toxics {
+		code, msg := s.toxicsRefusal("server", creq.Template)
+		if code != "" {
+			req.Error(code, msg, nil)
+			return
+		}
+	}
+
 	inst := s.newInstance("server", creq.Description)
 
 	spec := instanceSpec{
@@ -441,6 +510,7 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
 		Proxy:         proxied,
 		StoreCaptures: creq.Trace,
+		Toxics:        creq.Toxics,
 	}
 	setSpecTLS(&spec, creq.TLS)
 
@@ -494,12 +564,20 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		return false
 	}
 
-	// The instance needs an agent when its clients go through a proxy. The
-	// agent starts before the servers, so its listeners are up before they
-	// dial them. Every failure from here on stops it.
+	// The instance needs an agent when its clients or links go through a
+	// proxy. The agent starts before the servers, so its listeners are up
+	// before they dial them, and the ports of its route and gateway proxies
+	// are handed to it just before it starts. Every failure from here on
+	// stops it.
 	var netAgent agent.Agent
-	if spec.Proxy {
-		netAgent, err = s.startAgent(inst, spec.AdvertiseHost, spec.StoreCaptures)
+	if spec.Proxy || spec.Toxics {
+		var names []string
+		for _, p := range plan.proxies {
+			names = append(names, p.Name)
+		}
+		s.releaseProxyHolds(inst.ID, names)
+
+		netAgent, err = s.startAgent(inst, spec.AdvertiseHost, spec.StoreCaptures, plan)
 		if err != nil {
 			s.dropInstance(inst)
 			if s.retryAfter(err, final, inst.ID) {
@@ -528,6 +606,12 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		Kind:        inst.Kind,
 		Servers:     []*api.ManagedServer{},
 		TLS:         plan.TLS,
+	}
+
+	// The route and gateway links, in plan order. Each node's client link
+	// follows once its live client address is known.
+	for _, p := range plan.proxies {
+		resp.Links = append(resp.Links, api.Link{Name: p.Name, Kind: p.Kind, From: p.From, To: p.To, Proxy: p.Listen.String(), Upstream: p.Upstream.String()})
 	}
 
 	// The nodes in start order. Once the plan is kept on the instance, an update
@@ -571,7 +655,27 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 			ports = maps.Clone(n.TemplateData.Ports)
 		}
 
-		ms := &managedServer{backendNode: node, instanceID: inst.ID, rootDir: filepath.Join(place.InstanceDir(), n.Dir), ports: ports, clientPort: client.External.Port, advertiseHost: spec.AdvertiseHost, node: n}
+		// With toxics, clients reach the node through its client proxy, whose
+		// port is handed to the agent here, just before the agent call that
+		// binds it. The real client port stays reachable as the link's
+		// upstream.
+		clientPort := client.External.Port
+		if spec.Toxics {
+			name := clientLinkName(n.Name)
+			s.releaseProxyHolds(inst.ID, []string{name})
+
+			proxy := plan.clientProxies[n.Name]
+			clientPort = proxy.Port
+			resp.Links = append(resp.Links, api.Link{Name: name, Kind: "client", To: n.Name, Proxy: n.TemplateData.ClientAdvertise, Upstream: client.Internal.String()})
+		}
+
+		ms := &managedServer{backendNode: node, instanceID: inst.ID, rootDir: filepath.Join(place.InstanceDir(), n.Dir), ports: ports, clientPort: clientPort, advertiseHost: spec.AdvertiseHost, node: n, toxics: spec.Toxics}
+
+		// The agent of an instance with toxics is kept on its first node's
+		// record, which teardown stops it from.
+		if spec.Toxics && i == 0 {
+			ms.agent = netAgent
+		}
 
 		// Front the node's client listener with the agent when the plan asks
 		// for it, before the node is published so its trace port and agent are
@@ -589,6 +693,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 				return false
 			}
 			ms.agent = netAgent
+			ms.fronted = true
 			if ports == nil {
 				ports = map[string]int{}
 			}
@@ -608,7 +713,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		ready = append(ready, &events.NodeAction{Action: events.NodeReady, Node: n.Name, ServerName: serverName})
 		resp.Servers = append(resp.Servers, &api.ManagedServer{
 			Name:      n.Name,
-			Port:      client.External.Port,
+			Port:      clientPort,
 			Ports:     ports,
 			Cluster:   n.Cluster,
 			Advertise: spec.AdvertiseHost,
@@ -630,6 +735,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	_, alive := s.instances[inst.ID]
 	if alive {
 		inst.Servers = servers
+		inst.links = resp.Links
 	}
 	s.mu.Unlock()
 
@@ -673,6 +779,8 @@ func planErrorCode(err error) string {
 		return "008"
 	case planErrPort:
 		return "006"
+	case planErrRouteTLS:
+		return "019"
 	default:
 		return "002"
 	}
@@ -728,9 +836,10 @@ func (s *Service) agentDeclares(c agent.Capability) bool {
 // matches the node's client_advertise. It must name a local interface or the
 // agent fails to listen. Empty binds all interfaces (the no-advertise default).
 // store is passed to the agent as Spec.Store: true keeps every connection's
-// capture, false forwards and shapes without keeping any. The caller must tear
-// the instance down on failure.
-func (s *Service) startAgent(inst *instance, advertiseHost string, store bool) (agent.Agent, error) {
+// capture, false forwards and shapes without keeping any. The proxies of plan,
+// which has some only when created with toxics, are passed as Spec.Links and
+// Spec.ClientProxies. The caller must tear the instance down on failure.
+func (s *Service) startAgent(inst *instance, advertiseHost string, store bool, plan *instancePlan) (agent.Agent, error) {
 	if s.agents == nil {
 		return nil, fmt.Errorf("trace capture is not configured on this service")
 	}
@@ -739,10 +848,32 @@ func (s *Service) startAgent(inst *instance, advertiseHost string, store bool) (
 	defer cancel()
 
 	return s.agents.Start(ctx, agent.Spec{
-		InstanceID: inst.ID,
-		ListenHost: advertiseHost,
-		Store:      store,
+		InstanceID:    inst.ID,
+		ListenHost:    advertiseHost,
+		Store:         store,
+		Links:         slices.Clone(plan.proxies),
+		ClientProxies: maps.Clone(plan.clientProxies),
 	})
+}
+
+// proxyHolder is a backend whose placement holds the port of each proxy until
+// the service hands it to the agent. The in-process backend is one.
+type proxyHolder interface {
+	// releaseProxies closes what holds the ports of the named proxies of the
+	// instance instanceID. The ports stay reserved until Teardown.
+	releaseProxies(instanceID string, names []string)
+}
+
+// releaseProxyHolds hands the ports of the named proxies of the instance
+// instanceID to its agent, just before the agent binds them, when the backend
+// holds them.
+func (s *Service) releaseProxyHolds(instanceID string, names []string) {
+	holder, ok := s.backend.(proxyHolder)
+	if !ok {
+		return
+	}
+
+	holder.releaseProxies(instanceID, names)
 }
 
 // frontClient asks a, a running agent, to front the client listener of the
@@ -846,6 +977,14 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		return
 	}
 
+	if creq.Toxics {
+		code, msg := s.toxicsRefusal("cluster", creq.Template)
+		if code != "" {
+			req.Error(code, msg, nil)
+			return
+		}
+	}
+
 	inst := s.newInstance("cluster", creq.Description)
 	inst.Cluster = "C_" + shortID(inst.ID)
 
@@ -859,6 +998,7 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
 		Proxy:         proxied,
 		StoreCaptures: creq.Trace,
+		Toxics:        creq.Toxics,
 	}
 	setSpecTLS(&spec, creq.TLS)
 
@@ -936,6 +1076,14 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		return
 	}
 
+	if creq.Toxics {
+		code, msg := s.toxicsRefusal("super-cluster", creq.Template)
+		if code != "" {
+			req.Error(code, msg, nil)
+			return
+		}
+	}
+
 	inst := s.newInstance("super-cluster", creq.Description)
 
 	spec := instanceSpec{
@@ -949,6 +1097,7 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
 		Proxy:         proxied,
 		StoreCaptures: creq.Trace,
+		Toxics:        creq.Toxics,
 	}
 	setSpecTLS(&spec, creq.TLS)
 
@@ -1326,6 +1475,16 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
+	// The revision renders the proxies' addresses from the node's template
+	// data, so a custom template must reference them as it must on create.
+	if ms.toxics {
+		err := validateToxicsTemplate(node.TemplateData.Kind, creq.Template)
+		if err != nil {
+			req.Error("007", err.Error(), nil)
+			return
+		}
+	}
+
 	mainTmpl := serverConfigTemplate
 	if creq.Template != "" {
 		mainTmpl = creq.Template
@@ -1337,6 +1496,16 @@ func (s *Service) updateServer(req micro.Request) {
 	if err != nil {
 		req.Error("009", revisionErrorMessage(err), nil)
 		return
+	}
+
+	// The proxies of toxics read a plain CONNECT, so the revision must not
+	// enable TLS on routes or gateways either.
+	if ms.toxics {
+		err = checkRouteTLS(next)
+		if err != nil {
+			req.Error("019", err.Error(), nil)
+			return
+		}
 	}
 
 	err = ms.backendNode.Apply(context.Background(), &next.NodePlan)
@@ -1505,6 +1674,7 @@ func (s *Service) status(req micro.Request) {
 			Capabilities:      capabilities,
 			Agent:             s.agentName,
 			AgentCapabilities: agentCapabilities,
+			Links:             snap.links,
 			EventsSeq:         snap.eventsSeq,
 		}
 		for _, ms := range snap.servers {
@@ -1624,7 +1794,7 @@ func (s *Service) agentFor(req micro.Request, instanceID string) agent.Agent {
 		return nil
 	}
 
-	a := agentOf(servers)
+	a := frontingAgentOf(servers)
 	if a == nil {
 		req.Error("015", "Instance has no trace proxy", nil)
 		return nil
@@ -1738,6 +1908,8 @@ type instanceSnapshot struct {
 	// eventsSeq is the instance's events_seq, read with the rest of the
 	// instance before any node state, so the snapshot is no older than it.
 	eventsSeq uint64
+	// links are the instance's proxied links, nil without toxics.
+	links []api.Link
 }
 
 // serverSnapshot is a managed server's reportable state. snapshotInstance reads
@@ -1785,8 +1957,9 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 		kind:        inst.Kind,
 		description: inst.Description,
 		servers:     srvs,
-		agent:       agentOf(inst.Servers),
+		agent:       frontingAgentOf(inst.Servers),
 		eventsSeq:   inst.eventsSeq,
+		links:       slices.Clone(inst.links),
 	}
 }
 
@@ -1796,6 +1969,20 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 func agentOf(servers []*managedServer) agent.Agent {
 	for _, ms := range servers {
 		if ms.agent != nil {
+			return ms.agent
+		}
+	}
+	return nil
+}
+
+// frontingAgentOf returns the agent of the one of servers it fronts for trace
+// or proxy, which the shaping calls act on, or nil when none is fronted. The
+// agent an instance created with toxics alone keeps on its first server does
+// not count. Like agent, fronted never changes once the server joins its
+// instance.
+func frontingAgentOf(servers []*managedServer) agent.Agent {
+	for _, ms := range servers {
+		if ms.fronted {
 			return ms.agent
 		}
 	}
@@ -2039,4 +2226,17 @@ type templateData struct {
 	// .TLS.CAFile/.CertFile/.KeyFile, so a listener snippet can build its own
 	// tls{} block (e.g. websocket wss). Nil unless generated TLS is requested.
 	TLS *templateTLS
+
+	// ClientAdvertise is the host:port of the server's client proxy, which an
+	// instance created with toxics renders as client_advertise. Empty without
+	// toxics.
+	ClientAdvertise string
+
+	// ClusterAdvertise and GatewayAdvertise are the host:port of the dead
+	// address an instance created with toxics renders as the advertise of its
+	// cluster and gateway blocks, so a peer that learns of a node by gossip
+	// is refused rather than going around the proxies. Empty without toxics,
+	// and for a block the instance does not have.
+	ClusterAdvertise string
+	GatewayAdvertise string
 }

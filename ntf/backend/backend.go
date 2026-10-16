@@ -124,6 +124,22 @@ type Placement interface {
 	// plan.
 	ListenerAddress(node, listener string) (Listener, error)
 
+	// ProxyAddress returns the endpoint of the proxy named name, which the
+	// instance's network agent runs and the nodes' configs render. kind is
+	// "route" or "gateway" for a proxy between nodes, which every node must
+	// reach, and "client" for a proxy in front of a node's client listener,
+	// which clients reach. The service asks for each proxy once, after every
+	// listener, and only for an instance created with toxics.
+	//
+	// Kind "advertise", with name "advertise", asks instead for the
+	// instance's dead advertise address, which its nodes advertise for their
+	// routes and gateways. Nothing may listen on it, so a dial to it is
+	// refused, and it is kept from any other use until Teardown. The service
+	// asks for it once, for a cluster or super-cluster created with toxics.
+	//
+	// A failure, such as no free port, fails the plan.
+	ProxyAddress(name, kind string) (Endpoint, error)
+
 	// InstanceDir returns the instance directory. Every NodePlan.Dir and every
 	// File.Path is relative to it.
 	InstanceDir() string

@@ -61,6 +61,9 @@ type Instance struct {
 	// by the service when WithGeneratedTLS was set on the create call.
 	// Nil otherwise. Use TLSConfig(inst) to build a *tls.Config from it.
 	TLS *api.TLSMaterial
+	// Links lists the proxied links of an instance created WithToxics: its
+	// routes, gateways and client proxies. Nil otherwise.
+	Links []api.Link
 
 	m *Manager
 }
@@ -78,6 +81,7 @@ type createOptions struct {
 	connectOptions []nats.Option
 	tls            *api.TLSOptions
 	trace          bool
+	toxics         bool
 }
 
 // TLSOpt customizes a WithGeneratedTLS call.
@@ -253,6 +257,23 @@ func WithTraceCapture() createOpt {
 	}
 }
 
+// WithToxics puts a proxy of the service's network agent on every route, every
+// gateway between clusters and every server's client listener, so links can
+// be faulted. Each ManagedServer's Port and URL report its client proxy, so
+// the convenience helpers connect through it, and Instance.Links lists every
+// proxy and what it forwards to.
+//
+// It needs a service whose agent declares the toxics capability; any other
+// service refuses it with error code 014 or 018. Generated TLS on client ports
+// works with it, but TLS on routes or gateways is refused with 019. With
+// WithTemplate, the template must reference the variables that carry the
+// proxies; see the template environment.
+func WithToxics() createOpt {
+	return func(o *createOptions) {
+		o.toxics = true
+	}
+}
+
 // WithAccounts replaces the built-in USERS1..USERS5 / $SYS accounts block
 // with the caller's accounts configuration. Keep a $SYS account if you don't
 // override system_account, and keep the user named by no_auth_user (default
@@ -328,6 +349,13 @@ func WithTopLevel(body string) snippetOpt { return snippetOpt{key: "top", body: 
 // …), so the user's template has full access to topology data — but it
 // becomes responsible for emitting correct cluster {…} / gateway {…} blocks;
 // the service no longer guarantees topology correctness when this is set.
+//
+// With WithToxics the template must render .ClientAdvertise as
+// client_advertise; in a cluster also .Routes and .ClusterAdvertise as the
+// cluster advertise; and in a super-cluster also .Gateways and
+// .GatewayAdvertise as the gateway advertise, or traffic goes around the
+// proxies. The service refuses one that does not reference them, on create and
+// on UpdateServer.
 //
 // Reach for this only when no typed snippet helper expresses the change.
 // Composes with the typed helpers: snippet files are still rendered to disk

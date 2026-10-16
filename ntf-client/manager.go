@@ -132,6 +132,7 @@ func (m *Manager) CreateServer(ctx context.Context, js bool, opts ...CreateOptio
 		Template:    co.template,
 		TLS:         co.tls,
 		Trace:       co.trace,
+		Toxics:      co.toxics,
 	})
 }
 
@@ -146,6 +147,7 @@ func (m *Manager) CreateCluster(ctx context.Context, servers int, js bool, opts 
 		Template:    co.template,
 		TLS:         co.tls,
 		Trace:       co.trace,
+		Toxics:      co.toxics,
 	})
 }
 
@@ -162,6 +164,7 @@ func (m *Manager) CreateSuperCluster(ctx context.Context, clusters int, servers 
 		Template:    co.template,
 		TLS:         co.tls,
 		Trace:       co.trace,
+		Toxics:      co.toxics,
 	})
 }
 
@@ -186,6 +189,7 @@ func (m *Manager) create(ctx context.Context, subject string, req any) (*Instanc
 		Kind:        resp.Kind,
 		Servers:     resp.Servers,
 		TLS:         resp.TLS,
+		Links:       resp.Links,
 		m:           m,
 	}, nil
 }
