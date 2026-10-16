@@ -419,6 +419,11 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 		return
 	}
 
+	if proxied && !s.agentDeclares(agent.CapabilityCapture) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityCapture), nil)
+		return
+	}
+
 	inst := s.newInstance("server", creq.Description)
 
 	spec := instanceSpec{
@@ -684,6 +689,16 @@ func revisionErrorMessage(err error) string {
 // first-use work such as creating the store captures are written to.
 const traceSetupTimeout = 30 * time.Second
 
+// agentDeclares reports whether the selected agent declares c. It is false when
+// no agent is selected.
+func (s *Service) agentDeclares(c agent.Capability) bool {
+	if s.agents == nil {
+		return false
+	}
+
+	return slices.Contains(s.agents.Capabilities(), c)
+}
+
 // startAgent asks the agent provider to front a managed server's client
 // listener, which it dials at client, and returns the agent. Its endpoint's
 // port is the one clients reach it on.
@@ -776,6 +791,11 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		return
 	}
 
+	if proxied && !s.agentDeclares(agent.CapabilityCapture) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityCapture), nil)
+		return
+	}
+
 	inst := s.newInstance("cluster", creq.Description)
 	inst.Cluster = "C_" + shortID(inst.ID)
 
@@ -858,6 +878,11 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 
 	if proxied && s.agents == nil {
 		req.Error("014", "trace capture is not configured on this service", nil)
+		return
+	}
+
+	if proxied && !s.agentDeclares(agent.CapabilityCapture) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityCapture), nil)
 		return
 	}
 
@@ -1411,16 +1436,26 @@ func (s *Service) status(req micro.Request) {
 		capabilities = append(capabilities, string(c))
 	}
 
+	// Likewise the agent, when one is selected.
+	var agentCapabilities []string
+	if s.agents != nil {
+		for _, c := range s.agents.Capabilities() {
+			agentCapabilities = append(agentCapabilities, string(c))
+		}
+	}
+
 	resp := api.StatusResponse{Instances: make([]api.InstanceStatus, 0, len(snapshots))}
 	for _, snap := range snapshots {
 		ist := api.InstanceStatus{
-			ID:           snap.id,
-			Description:  snap.description,
-			Kind:         snap.kind,
-			Servers:      make([]api.ManagedServer, 0, len(snap.servers)),
-			Backend:      s.backendName,
-			Capabilities: capabilities,
-			EventsSeq:    snap.eventsSeq,
+			ID:                snap.id,
+			Description:       snap.description,
+			Kind:              snap.kind,
+			Servers:           make([]api.ManagedServer, 0, len(snap.servers)),
+			Backend:           s.backendName,
+			Capabilities:      capabilities,
+			Agent:             s.agentName,
+			AgentCapabilities: agentCapabilities,
+			EventsSeq:         snap.eventsSeq,
 		}
 		for _, ms := range snap.servers {
 			// Port is the client port; the route/cluster port is exposed under

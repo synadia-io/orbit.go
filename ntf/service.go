@@ -184,6 +184,8 @@ type Service struct {
 	// agents starts the network agents of instances created with trace
 	// capture, nil when no agent is selected.
 	agents agent.Provider
+	// agentName is the name agents was registered under. Status reports it.
+	agentName string
 
 	dir string
 	// ownDir reports whether Close may remove dir.
@@ -447,6 +449,7 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 			return fail(fmt.Errorf("could not create the %q agent: the factory returned no provider", opts.Agent))
 		}
 		s.agents = provider
+		s.agentName = opts.Agent
 		unwind = append(unwind, func() { provider.Close() })
 	}
 

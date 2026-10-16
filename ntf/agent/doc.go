@@ -43,5 +43,13 @@ The agent owns any scratch space it needs.
 
 Agent does not grow. Later capabilities arrive as separate interfaces an agent
 also implements, declared through a capability list.
+
+Provider.Capabilities is that list: capture, shaping and toxics so far, each a
+Capability constant. The service decides what a provider supports from this
+list alone, not by probing its agents: it refuses a create that needs a
+capability the provider does not declare, and reports the list in status as
+agent_capabilities, beside the backend's capabilities. A provider declares only what its agents do: one that declares
+shaping answers the shaping methods, and one that does not returns
+ErrUnsupported from them.
 */
 package agent

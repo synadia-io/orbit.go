@@ -19,6 +19,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -136,14 +137,28 @@ func TestNewSuppliedConn(t *testing.T) {
 // set every Start hands back that agent, so a test can drive the tester.shape.*
 // endpoints against an agent with shaping. Otherwise each Start hands back a
 // new agent without shaping. opts holds the Options its factory was handed
-// when withAgent registered it.
+// when withAgent registered it. It declares capture unless noCapture is set,
+// and shaping only when the agents it hands back shape.
 type fakeProvider struct {
-	mu     sync.Mutex
-	specs  []agent.Spec
-	closed bool
-	err    error
-	agent  *fakeAgent
-	opts   agent.Options
+	mu        sync.Mutex
+	specs     []agent.Spec
+	closed    bool
+	err       error
+	agent     *fakeAgent
+	opts      agent.Options
+	noCapture bool
+}
+
+func (f *fakeProvider) Capabilities() []agent.Capability {
+	var caps []agent.Capability
+	if !f.noCapture {
+		caps = append(caps, agent.CapabilityCapture)
+	}
+	if f.agent != nil && !f.agent.noShaping {
+		caps = append(caps, agent.CapabilityShaping)
+	}
+
+	return caps
 }
 
 func (f *fakeProvider) Start(_ context.Context, spec agent.Spec) (agent.Agent, error) {
@@ -396,6 +411,104 @@ func TestTraceWithoutAgentIsRefused(t *testing.T) {
 	}
 	if got := msg.Header.Get("Nats-Service-Error-Code"); got != "014" {
 		t.Errorf("error code = %q, want 014", got)
+	}
+}
+
+// TestTraceWithoutCaptureIsRefused proves every kind of create refuses trace
+// and proxy with 018 when the selected agent does not declare capture, naming
+// the agent and the capability, and never starts the agent.
+func TestTraceWithoutCaptureIsRefused(t *testing.T) {
+	provider := &fakeProvider{noCapture: true}
+	svc := startTestService(t, withAgent(provider))
+
+	tests := []struct {
+		name    string
+		subject string
+		req     any
+	}{
+		{"server trace", "tester.create.server", api.CreateServerRequest{Trace: true}},
+		{"server proxy", "tester.create.server", api.CreateServerRequest{Proxy: true}},
+		{"cluster trace", "tester.create.cluster", api.CreateClusterRequest{Servers: 3, Trace: true}},
+		{"super-cluster trace", "tester.create.super-cluster", api.CreateSuperClusterRequest{Clusters: 2, Servers: 3, Trace: true}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := json.Marshal(tt.req)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+
+			msg, err := svc.nc.Request(tt.subject, payload, 10*time.Second)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			code := msg.Header.Get("Nats-Service-Error-Code")
+			if code != "018" {
+				t.Errorf("error code = %q, want 018", code)
+			}
+			got := msg.Header.Get("Nats-Service-Error")
+			if !strings.Contains(got, `"fake"`) || !strings.Contains(got, `"capture"`) {
+				t.Errorf("error %q does not name the agent and the capability", got)
+			}
+		})
+	}
+
+	specs, _ := provider.snapshot()
+	if len(specs) != 0 {
+		t.Errorf("provider saw %d specs, want none", len(specs))
+	}
+}
+
+// TestStatusReportsAgent proves status reports the name the selected agent was
+// registered under and the capabilities it declares, in its order, and omits
+// both when no agent is selected. The instances have no servers, as create
+// registers them before placement.
+func TestStatusReportsAgent(t *testing.T) {
+	svc := startTestService(t, withAgent(&fakeProvider{agent: &fakeAgent{}}))
+	inst := svc.newInstance("server", "")
+
+	var status api.StatusResponse
+	mustRequest(t, svc.nc, "tester.status", api.StatusRequest{InstanceID: inst.ID}, &status)
+	if len(status.Instances) != 1 {
+		t.Fatalf("status returned %d instances, want 1", len(status.Instances))
+	}
+
+	got := status.Instances[0]
+	if got.Agent != "fake" {
+		t.Errorf("agent = %q, want fake", got.Agent)
+	}
+	want := []string{"capture", "shaping"}
+	if !reflect.DeepEqual(got.AgentCapabilities, want) {
+		t.Errorf("agent capabilities = %v, want %v", got.AgentCapabilities, want)
+	}
+
+	plain := startTestService(t)
+	plainInst := plain.newInstance("server", "")
+
+	payload, err := json.Marshal(api.StatusRequest{InstanceID: plainInst.ID})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := plain.nc.Request("tester.status", payload, 10*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	var raw struct {
+		Instances []map[string]json.RawMessage `json:"instances"`
+	}
+	err = json.Unmarshal(msg.Data, &raw)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(raw.Instances) != 1 {
+		t.Fatalf("status returned %d instances, want 1", len(raw.Instances))
+	}
+	for _, key := range []string{"agent", "agent_capabilities"} {
+		if _, ok := raw.Instances[0][key]; ok {
+			t.Errorf("status of a service without an agent carries %q", key)
+		}
 	}
 }
 

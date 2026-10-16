@@ -25,6 +25,27 @@ import (
 	"github.com/synadia-io/orbit.go/ntf/events"
 )
 
+// Capability is something the agents of a Provider can do. A provider declares
+// its capabilities through Provider.Capabilities, and the service refuses a
+// create that needs one the selected provider does not declare.
+type Capability string
+
+const (
+	// CapabilityCapture means Provider.Start fronts a managed server's client
+	// listener and, when Spec.Store is true, keeps the captures of the
+	// connections through it. Creates with trace or proxy need it.
+	CapabilityCapture Capability = "capture"
+
+	// CapabilityShaping means Agent.Shape, ClearShaping, ShapingReport and
+	// ShapingSets apply and report shaping sets rather than returning
+	// ErrUnsupported.
+	CapabilityShaping Capability = "shaping"
+
+	// CapabilityToxics means the agent faults the links of an instance. The
+	// service does not use it yet.
+	CapabilityToxics Capability = "toxics"
+)
+
 // Options is what the service passes a Factory.
 //
 // Conn, Server and Events are local resources for an agent running in the
@@ -60,7 +81,12 @@ type Factory func(ctx context.Context, opts Options) (Provider, error)
 
 // Provider starts the agents of a service, one for each instance that needs
 // one. The service calls Start concurrently, for different instances.
+// Capabilities is safe to call at any time.
 type Provider interface {
+	// Capabilities returns the capabilities the provider's agents declare, in
+	// the order status reports them.
+	Capabilities() []Capability
+
 	// Start starts an agent for the instance spec describes and returns it.
 	Start(ctx context.Context, spec Spec) (Agent, error)
 

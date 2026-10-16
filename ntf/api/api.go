@@ -226,8 +226,15 @@ type InstanceStatus struct {
 	Backend string `json:"backend,omitempty"`
 	// Capabilities holds the capabilities the instance's backend declares, such
 	// as "kill", "pause" and "version-change", in the order it declares them.
-	// Empty when it declares none.
+	// Empty when it declares none. The agent's are in AgentCapabilities.
 	Capabilities []string `json:"capabilities,omitempty"`
+	// Agent is the name the service's network agent was registered under.
+	// Empty, and omitted, when the service has no agent.
+	Agent string `json:"agent,omitempty"`
+	// AgentCapabilities holds the capabilities the service's network agent
+	// declares, such as "capture" and "shaping", in the order it declares
+	// them. Empty when the service has no agent or it declares none.
+	AgentCapabilities []string `json:"agent_capabilities,omitempty"`
 	// EventsSeq is the stream sequence of the latest of the service's own
 	// events of the instance in its events stream, read before the rest of the
 	// status, so a reader follows the stream after it without a gap. Agent

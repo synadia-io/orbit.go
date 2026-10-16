@@ -81,17 +81,23 @@ between concurrent instances.
 connection's capture, and `proxy` to front it with the same proxy and store nothing, for shaping without captures.
 `trace` implies `proxy`. The service does not implement capture itself: a network agent, defined in package
 `agent`, does. `Options.Agents` registers agent factories by name and `Options.Agent` selects one; with none
-selected those requests are refused with error code `014`. Only the first node of a cluster or super-cluster is
-fronted, and combining either flag with generated TLS is rejected because the proxy forwards plaintext.
+selected those requests are refused with error code `014`, and with `018` when the selected agent does not declare
+the `capture` capability. Only the first node of a cluster or super-cluster is fronted, and combining either flag
+with generated TLS is rejected because the proxy forwards plaintext.
 
 ```go
 type Factory func(ctx context.Context, opts Options) (Provider, error)
 
 type Provider interface {
+    Capabilities() []Capability
     Start(ctx context.Context, spec Spec) (Agent, error)
     Close() error
 }
 ```
+
+`Capabilities` declares what the provider's agents do: `capture`, `shaping` and `toxics`, the `Capability*`
+constants. Status reports the selected agent's registered name as `agent` and its capabilities as
+`agent_capabilities`, beside the backend's `backend` and `capabilities`, and omits both when no agent is selected.
 
 `New` calls the selected factory once, after the management connection and embedded server exist and before the
 endpoints start. Its `Options` carry the service directory, `Preserve`, the logger, the management connection and

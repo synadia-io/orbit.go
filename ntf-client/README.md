@@ -469,8 +469,10 @@ inst.SetShaping(t, api.ShapingSet{
 })
 ```
 
-Trace capture is plaintext-only and is rejected in combination with `WithGeneratedTLS`. On a cluster or super-cluster
-only the first node carries a `TraceURL`. The management server always runs JetStream, which also keeps every
+Trace capture is plaintext-only and is rejected in combination with `WithGeneratedTLS`. A service whose agent does
+not declare the `capture` capability refuses it with error code `018`, an `ntf.ErrService` error naming the agent
+and the capability; status reports the agent as `agent` and its capabilities as `agent_capabilities`. On a cluster
+or super-cluster only the first node carries a `TraceURL`. The management server always runs JetStream, which also keeps every
 instance's events, whether or not any instance traces. Captures hold full payloads and headers,
 including the CONNECT frame, so treat the `TRACES` store as sensitive.
 
