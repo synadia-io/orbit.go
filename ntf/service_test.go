@@ -17,10 +17,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -139,6 +141,11 @@ func TestNewSuppliedConn(t *testing.T) {
 // new agent without shaping. opts holds the Options its factory was handed
 // when withAgent registered it. It declares capture unless noCapture is set,
 // and shaping only when the agents it hands back shape.
+//
+// Start counts every call in starts, and returns the first of startErrs while
+// any is left, then err when set. The agents call frontGate, when set, as Front
+// begins, record each Front in fronts and return the first of frontErrs while
+// any is left. started lists the agents Start handed back, in order.
 type fakeProvider struct {
 	mu        sync.Mutex
 	specs     []agent.Spec
@@ -147,6 +154,12 @@ type fakeProvider struct {
 	agent     *fakeAgent
 	opts      agent.Options
 	noCapture bool
+	starts    int
+	startErrs []error
+	frontErrs []error
+	frontGate func()
+	fronts    []agent.Front
+	started   []*fakeAgent
 }
 
 func (f *fakeProvider) Capabilities() []agent.Capability {
@@ -165,6 +178,12 @@ func (f *fakeProvider) Start(_ context.Context, spec agent.Spec) (agent.Agent, e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	f.starts++
+	if len(f.startErrs) > 0 {
+		err := f.startErrs[0]
+		f.startErrs = f.startErrs[1:]
+		return nil, err
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -174,11 +193,48 @@ func (f *fakeProvider) Start(_ context.Context, spec agent.Spec) (agent.Agent, e
 	if f.agent != nil {
 		f.agent.mu.Lock()
 		f.agent.port = port
+		f.agent.provider = f
 		f.agent.mu.Unlock()
+		f.started = append(f.started, f.agent)
 		return f.agent, nil
 	}
 
-	return &fakeAgent{port: port, noShaping: true}, nil
+	a := &fakeAgent{port: port, noShaping: true, provider: f}
+	f.started = append(f.started, a)
+
+	return a, nil
+}
+
+// front calls frontGate when set, then records a Front one of the provider's
+// agents was handed and returns the error that Front fails with, if any.
+func (f *fakeProvider) front(front agent.Front) error {
+	f.mu.Lock()
+	gate := f.frontGate
+	f.mu.Unlock()
+
+	if gate != nil {
+		gate()
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.fronts = append(f.fronts, front)
+	if len(f.frontErrs) == 0 {
+		return nil
+	}
+
+	err := f.frontErrs[0]
+	f.frontErrs = f.frontErrs[1:]
+	return err
+}
+
+// frontSnapshot returns the Fronts the provider's agents were handed and the
+// agents Start handed back, in order.
+func (f *fakeProvider) frontSnapshot() ([]agent.Front, []*fakeAgent) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]agent.Front(nil), f.fronts...), append([]*fakeAgent(nil), f.started...)
 }
 
 func (f *fakeProvider) Close() error {
@@ -194,13 +250,25 @@ func (f *fakeProvider) snapshot() ([]agent.Spec, bool) {
 	return append([]agent.Spec(nil), f.specs...), f.closed
 }
 
+// startCount returns the number of times Start was called, failed or not.
+func (f *fakeProvider) startCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.starts
+}
+
 // fakeAgent records what each method was handed and answers with canned values.
 // noShaping refuses every shaping method with agent.ErrUnsupported; err, when
-// set, is returned by every shaping method otherwise.
+// set, is returned by every shaping method otherwise. Front records itself with
+// provider, the provider that started the agent, and the endpoint is the zero
+// Endpoint until a Front succeeds.
 type fakeAgent struct {
 	mu        sync.Mutex
 	port      int
+	provider  *fakeProvider
+	fronted   bool
 	stopped   bool
+	stops     int
 	noShaping bool
 	sets      []api.ShapingSet
 	cleared   []string
@@ -214,7 +282,41 @@ type fakeAgent struct {
 func (a *fakeAgent) Endpoint() backend.Endpoint {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if !a.fronted {
+		return backend.Endpoint{}
+	}
 	return backend.Endpoint{Host: "127.0.0.1", Port: a.port}
+}
+
+func (a *fakeAgent) Front(_ context.Context, front agent.Front) (backend.Endpoint, error) {
+	a.mu.Lock()
+	provider := a.provider
+	a.mu.Unlock()
+
+	err := provider.front(front)
+	if err != nil {
+		return backend.Endpoint{}, err
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fronted = true
+	return backend.Endpoint{Host: "127.0.0.1", Port: a.port}, nil
+}
+
+// isStopped reports whether Stop was called.
+func (a *fakeAgent) isStopped() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.stopped
+}
+
+// stopCount returns the number of times Stop was called.
+func (a *fakeAgent) stopCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.stops
 }
 
 func (a *fakeAgent) Shape(_ context.Context, set api.ShapingSet) error {
@@ -285,12 +387,14 @@ func (a *fakeAgent) Stop(context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.stopped = true
+	a.stops++
 	return nil
 }
 
 var (
-	_ agent.Provider = (*fakeProvider)(nil)
-	_ agent.Agent    = (*fakeAgent)(nil)
+	_ agent.Provider   = (*fakeProvider)(nil)
+	_ agent.Agent      = (*fakeAgent)(nil)
+	_ agent.ClientEdge = (*fakeAgent)(nil)
 )
 
 // withAgent registers p as the "fake" agent and selects it.
@@ -308,7 +412,8 @@ func withAgent(p *fakeProvider) func(*Options) {
 
 // TestTraceUsesAgent proves a traced create reaches the selected agent, that
 // the port of its endpoint is published as the server's trace port, and that
-// the spec describes the server being fronted.
+// the spec describes the instance, and that the agent is asked to front the
+// server.
 func TestTraceUsesAgent(t *testing.T) {
 	provider := &fakeProvider{}
 	svc := startTestService(t, withAgent(provider))
@@ -325,8 +430,12 @@ func TestTraceUsesAgent(t *testing.T) {
 	if spec.InstanceID != created.ID {
 		t.Errorf("InstanceID = %q, want %q", spec.InstanceID, created.ID)
 	}
-	if spec.ServerName != created.Servers[0].Name {
-		t.Errorf("ServerName = %q, want %q", spec.ServerName, created.Servers[0].Name)
+	fronts, _ := provider.frontSnapshot()
+	if len(fronts) != 1 {
+		t.Fatalf("agent was fronted %d times, want 1", len(fronts))
+	}
+	if fronts[0].ServerName != created.Servers[0].Name {
+		t.Errorf("ServerName = %q, want %q", fronts[0].ServerName, created.Servers[0].Name)
 	}
 	if !spec.Store {
 		t.Error("Store = false, want true for a traced create")
@@ -355,6 +464,337 @@ func TestProxyUsesAgentWithoutStore(t *testing.T) {
 	}
 	if got := created.Servers[0].Ports["trace"]; got != 45001 {
 		t.Errorf("trace port = %d, want the agent's 45001", got)
+	}
+}
+
+// TestAgentFrontsFirstNodeLiveClient proves a traced cluster create fronts its
+// first node once, with that node's name and live client endpoint, and
+// publishes the trace port on that node only.
+func TestAgentFrontsFirstNodeLiveClient(t *testing.T) {
+	provider := &fakeProvider{}
+	svc := startTestService(t, withAgent(provider))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 3, Trace: true}, &created)
+
+	fronts, started := provider.frontSnapshot()
+	if len(started) != 1 {
+		t.Fatalf("provider started %d agents, want 1", len(started))
+	}
+	if len(fronts) != 1 {
+		t.Fatalf("agent was fronted %d times, want 1", len(fronts))
+	}
+
+	first := created.Servers[0]
+	if fronts[0].ServerName != first.Name {
+		t.Errorf("fronted %q, want the first node %q", fronts[0].ServerName, first.Name)
+	}
+
+	svc.mu.Lock()
+	addrs := svc.instances[created.ID].Servers[0].backendNode.Addresses()
+	svc.mu.Unlock()
+	var live backend.Endpoint
+	for _, a := range addrs {
+		if a.Name == "client" {
+			live = a.Internal
+		}
+	}
+	if fronts[0].Client != live {
+		t.Errorf("fronted client %+v, want the node's live client endpoint %+v", fronts[0].Client, live)
+	}
+	if fronts[0].Client.Port != first.Port {
+		t.Errorf("fronted client port %d, want the node's client port %d", fronts[0].Client.Port, first.Port)
+	}
+
+	got := first.Ports["trace"]
+	if got != 45001 {
+		t.Errorf("trace port = %d, want the agent's 45001", got)
+	}
+	for _, srv := range created.Servers[1:] {
+		_, ok := srv.Ports["trace"]
+		if ok {
+			t.Errorf("server %q carries a trace port, want only the first", srv.Name)
+		}
+	}
+}
+
+// TestAgentStoppedWhenProvisionFails takes the client port of every attempt's
+// server before it binds, and proves each attempt starts its agent before its
+// server, then stops it when Provision fails, both on the attempts that run
+// again with fresh ports and on the final one, without fronting it.
+func TestAgentStoppedWhenProvisionFails(t *testing.T) {
+	provider := &fakeProvider{}
+	svc := startTestService(t, withAgent(provider))
+
+	var early atomic.Int32
+	takePortHook(t, func(call int) bool {
+		specs, _ := provider.snapshot()
+		if len(specs) != call {
+			early.Add(1)
+		}
+		return true
+	})
+
+	payload, err := json.Marshal(api.CreateServerRequest{Trace: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := svc.nc.Request("tester.create.server", payload, 30*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	code := msg.Header.Get("Nats-Service-Error-Code")
+	if code != "003" {
+		t.Fatalf("error code = %q, want 003", code)
+	}
+
+	n := early.Load()
+	if n != 0 {
+		t.Errorf("%d servers started before their attempt's agent", n)
+	}
+	fronts, started := provider.frontSnapshot()
+	if len(started) != createAttempts {
+		t.Fatalf("provider started %d agents, want one per attempt (%d)", len(started), createAttempts)
+	}
+	for i, a := range started {
+		if !a.isStopped() {
+			t.Errorf("agent of attempt %d was not stopped", i+1)
+		}
+	}
+	if len(fronts) != 0 {
+		t.Errorf("agent was fronted %d times, want none", len(fronts))
+	}
+}
+
+// TestAgentStoppedOnReplan takes the client port of the first attempt's server
+// and proves the agent that attempt started is stopped when the create plans
+// again with fresh ports, while the agent of the attempt that succeeds keeps
+// running and fronts the server.
+func TestAgentStoppedOnReplan(t *testing.T) {
+	provider := &fakeProvider{}
+	svc := startTestService(t, withAgent(provider))
+	takePortHook(t, func(call int) bool { return call == 1 })
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
+
+	fronts, started := provider.frontSnapshot()
+	if len(started) != 2 {
+		t.Fatalf("provider started %d agents, want one per attempt (2)", len(started))
+	}
+	if !started[0].isStopped() {
+		t.Error("agent of the failed attempt was not stopped")
+	}
+	if started[1].isStopped() {
+		t.Error("agent of the successful attempt was stopped")
+	}
+	if len(fronts) != 1 {
+		t.Errorf("agent was fronted %d times, want 1", len(fronts))
+	}
+	got := created.Servers[0].Ports["trace"]
+	if got != 45002 {
+		t.Errorf("trace port = %d, want the second agent's 45002", got)
+	}
+}
+
+// TestCreateRetriesAfterAgentListen proves a create whose agent could not bind,
+// in Start or in Front, runs again with fresh ports and succeeds, stopping the
+// agent the failed attempt started.
+func TestCreateRetriesAfterAgentListen(t *testing.T) {
+	listenErr := fmt.Errorf("%w: port taken", agent.ErrListen)
+
+	tests := []struct {
+		name     string
+		provider *fakeProvider
+		// starts is the number of agents the create starts across its attempts.
+		starts int
+		// fronts is the number of times the agents are asked to front a server.
+		fronts int
+	}{
+		{"start", &fakeProvider{startErrs: []error{listenErr}}, 1, 1},
+		{"front", &fakeProvider{frontErrs: []error{listenErr}}, 2, 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := startTestService(t, withAgent(tt.provider))
+
+			var created api.CreateResponse
+			mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
+
+			if len(created.Servers) != 1 || !created.Servers[0].Running {
+				t.Fatalf("create did not start a server: %+v", created.Servers)
+			}
+			if created.Servers[0].Ports["trace"] == 0 {
+				t.Error("created server carries no trace port")
+			}
+
+			fronts, started := tt.provider.frontSnapshot()
+			if len(started) != tt.starts {
+				t.Fatalf("provider started %d agents, want %d", len(started), tt.starts)
+			}
+			if len(fronts) != tt.fronts {
+				t.Errorf("agents were fronted %d times, want %d", len(fronts), tt.fronts)
+			}
+			for i, a := range started[:len(started)-1] {
+				if !a.isStopped() {
+					t.Errorf("agent %d of a failed attempt was not stopped", i+1)
+				}
+			}
+			if started[len(started)-1].isStopped() {
+				t.Error("agent of the successful attempt was stopped")
+			}
+
+			var list api.ListResponse
+			mustRequest(t, svc.nc, "tester.list", nil, &list)
+			if len(list.Instances) != 1 {
+				t.Errorf("%d instances registered, want 1", len(list.Instances))
+			}
+		})
+	}
+}
+
+// TestAgentStartFailureIsNotRetried proves a Start error that does not wrap
+// agent.ErrListen answers 012 with its text at once, without running the create
+// again, and leaves no instance registered.
+func TestAgentStartFailureIsNotRetried(t *testing.T) {
+	provider := &fakeProvider{err: errors.New("agent refused")}
+	svc := startTestService(t, withAgent(provider))
+
+	payload, err := json.Marshal(api.CreateServerRequest{Trace: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := svc.nc.Request("tester.create.server", payload, 30*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	code := msg.Header.Get("Nats-Service-Error-Code")
+	if code != "012" {
+		t.Fatalf("error code = %q, want 012", code)
+	}
+	desc := msg.Header.Get("Nats-Service-Error")
+	if desc != "trace setup failed: agent refused" {
+		t.Errorf("error = %q, want the agent's error", desc)
+	}
+
+	starts := provider.startCount()
+	if starts != 1 {
+		t.Errorf("Start was called %d times, want 1", starts)
+	}
+
+	var list api.ListResponse
+	mustRequest(t, svc.nc, "tester.list", nil, &list)
+	if len(list.Instances) != 0 {
+		t.Errorf("failed create left %d instances registered", len(list.Instances))
+	}
+}
+
+// TestAgentStoppedWhenFinalFrontFails proves the agent is stopped exactly once
+// when the final attempt's Front fails and the create answers 012: at once for
+// an error that does not wrap agent.ErrListen, and after every attempt for one
+// that does.
+func TestAgentStoppedWhenFinalFrontFails(t *testing.T) {
+	listenErr := fmt.Errorf("%w: port taken", agent.ErrListen)
+
+	tests := []struct {
+		name      string
+		frontErrs []error
+		// attempts is the number of attempts the create runs.
+		attempts int
+	}{
+		{"other error", []error{errors.New("agent refused")}, 1},
+		{"listen on every attempt", []error{listenErr, listenErr, listenErr}, createAttempts},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &fakeProvider{frontErrs: tt.frontErrs}
+			svc := startTestService(t, withAgent(provider))
+
+			payload, err := json.Marshal(api.CreateServerRequest{Trace: true})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			msg, err := svc.nc.Request("tester.create.server", payload, 30*time.Second)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			code := msg.Header.Get("Nats-Service-Error-Code")
+			if code != "012" {
+				t.Fatalf("error code = %q, want 012", code)
+			}
+
+			fronts, started := provider.frontSnapshot()
+			if len(started) != tt.attempts {
+				t.Fatalf("provider started %d agents, want %d", len(started), tt.attempts)
+			}
+			if len(fronts) != tt.attempts {
+				t.Errorf("agents were fronted %d times, want %d", len(fronts), tt.attempts)
+			}
+			for i, a := range started {
+				stops := a.stopCount()
+				if stops != 1 {
+					t.Errorf("agent %d was stopped %d times, want 1", i+1, stops)
+				}
+			}
+		})
+	}
+}
+
+// TestAgentStoppedWhenCreateRacedByReset holds a traced create inside Front,
+// resets the service meanwhile, and proves the create, finding its instance
+// gone when it publishes, stops the agent exactly once and answers 404.
+func TestAgentStoppedWhenCreateRacedByReset(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	provider := &fakeProvider{frontGate: func() {
+		close(entered)
+		<-release
+	}}
+	svc := startTestService(t, withAgent(provider))
+
+	payload, err := json.Marshal(api.CreateServerRequest{Trace: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	codes := make(chan string, 1)
+	go func() {
+		msg, err := svc.nc.Request("tester.create.server", payload, 30*time.Second)
+		if err != nil {
+			t.Errorf("request: %v", err)
+			codes <- ""
+			return
+		}
+		codes <- msg.Header.Get("Nats-Service-Error-Code")
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		close(release)
+		t.Fatal("the create never reached Front")
+	}
+
+	err = svc.Reset()
+	close(release)
+	if err != nil {
+		t.Errorf("Reset: %v", err)
+	}
+
+	code := <-codes
+	if code != "404" {
+		t.Errorf("create answered %q, want 404", code)
+	}
+
+	_, started := provider.frontSnapshot()
+	if len(started) != 1 {
+		t.Fatalf("provider started %d agents, want 1", len(started))
+	}
+	stops := started[0].stopCount()
+	if stops != 1 {
+		t.Errorf("agent was stopped %d times, want 1", stops)
 	}
 }
 

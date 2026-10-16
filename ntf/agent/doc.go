@@ -12,9 +12,10 @@
 // limitations under the License.
 
 /*
-Package agent defines the network agent of an ntf instance: a proxy in front of
-a managed server's client port that clients reach instead of the server, which
-can capture the traffic passing through it and shape it.
+Package agent defines the network agent of an ntf instance. An agent serves an
+instance rather than fronting one server: it puts a proxy in front of a managed
+server's client port that clients reach instead of the server, which can
+capture the traffic passing through it and shape it.
 
 Everything an agent needs is in this package. An implementation that lives
 outside orbit.go imports it and nothing else from ntf.
@@ -25,9 +26,11 @@ The service:
 
  1. calls a Factory once, with Options, to build a Provider;
  2. calls Provider.Start with a Spec for each instance that needs an agent,
-    and keeps the Agent it returns;
- 3. calls Agent.Stop when the instance goes;
- 4. calls Provider.Close once, after every instance is gone and before the
+    before the instance's servers start, and keeps the Agent it returns;
+ 3. once the servers run, calls ClientEdge.Front for the server whose clients
+    go through the agent;
+ 4. calls Agent.Stop when the instance goes, or when its create fails;
+ 5. calls Provider.Close once, after every instance is gone and before the
     management server stops.
 
 # Plain values
@@ -42,14 +45,15 @@ The agent owns any scratch space it needs.
 # Growing the agent
 
 Agent does not grow. Later capabilities arrive as separate interfaces an agent
-also implements, declared through a capability list.
+also implements, declared through a capability list. ClientEdge, which capture
+declares, is the first.
 
 Provider.Capabilities is that list: capture, shaping and toxics so far, each a
 Capability constant. The service decides what a provider supports from this
 list alone, not by probing its agents: it refuses a create that needs a
 capability the provider does not declare, and reports the list in status as
-agent_capabilities, beside the backend's capabilities. A provider declares only what its agents do: one that declares
-shaping answers the shaping methods, and one that does not returns
-ErrUnsupported from them.
+agent_capabilities, beside the backend's capabilities. A provider declares only
+what its agents do: one that declares shaping answers the shaping methods, and
+one that does not returns ErrUnsupported from them.
 */
 package agent

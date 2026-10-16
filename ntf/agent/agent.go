@@ -31,9 +31,10 @@ import (
 type Capability string
 
 const (
-	// CapabilityCapture means Provider.Start fronts a managed server's client
-	// listener and, when Spec.Store is true, keeps the captures of the
-	// connections through it. Creates with trace or proxy need it.
+	// CapabilityCapture means the provider's agents implement ClientEdge,
+	// fronting a managed server's client listener and, when Spec.Store is
+	// true, keeping the captures of the connections through it. Creates with
+	// trace or proxy need it.
 	CapabilityCapture Capability = "capture"
 
 	// CapabilityShaping means Agent.Shape, ClearShaping, ShapingReport and
@@ -88,6 +89,8 @@ type Provider interface {
 	Capabilities() []Capability
 
 	// Start starts an agent for the instance spec describes and returns it.
+	// The service calls it before the instance's servers start. A failure to
+	// bind a listener wraps ErrListen.
 	Start(ctx context.Context, spec Spec) (Agent, error)
 
 	// Close releases what the provider holds for the whole service. The
@@ -96,17 +99,10 @@ type Provider interface {
 	Close() error
 }
 
-// Spec describes the managed server an agent is to front.
+// Spec describes the instance an agent is to serve.
 type Spec struct {
-	// InstanceID is the instance the server belongs to.
+	// InstanceID is the instance the agent serves.
 	InstanceID string
-
-	// ServerName is the managed server's name, recorded in captures.
-	ServerName string
-
-	// Client is the endpoint of the node's internal client address, which
-	// the agent dials.
-	Client backend.Endpoint
 
 	// ListenHost is the host the agent binds and advertises. Empty binds all
 	// interfaces.
@@ -117,17 +113,39 @@ type Spec struct {
 	Store bool
 }
 
-// Agent is a running network agent fronting one managed server. Every method
-// takes and returns plain values, so it can become a NATS request and reply.
+// Front describes a managed server ClientEdge.Front is to front.
+type Front struct {
+	// ServerName is the managed server's name, recorded in captures.
+	ServerName string
+
+	// Client is the endpoint of the server's live client listener, which the
+	// agent dials.
+	Client backend.Endpoint
+}
+
+// ClientEdge is the capability to front a managed server's client listener.
+// The agents of a provider that declares CapabilityCapture implement it. The
+// service calls Front once the server runs, before clients learn of it.
+type ClientEdge interface {
+	// Front starts forwarding to front.Client and returns the endpoint
+	// clients dial instead. It fails for a server name it already fronts. A
+	// failure to bind a listener wraps ErrListen.
+	Front(ctx context.Context, front Front) (backend.Endpoint, error)
+}
+
+// Agent is a running network agent serving one instance. Every method takes
+// and returns plain values, so it can become a NATS request and reply.
 //
 // The service calls an agent's methods concurrently, including while Stop runs
 // and after it returns.
 //
-// An agent without shaping refuses Shape, ClearShaping, ShapingReport and
-// ShapingSets with ErrUnsupported.
+// The shaping methods act on the connections through the first server the
+// agent fronts. An agent without shaping refuses Shape, ClearShaping,
+// ShapingReport and ShapingSets with ErrUnsupported.
 type Agent interface {
-	// Endpoint returns where clients dial instead of the managed server. It
-	// is fixed once Provider.Start returns.
+	// Endpoint returns where clients dial instead of the first managed server
+	// the agent fronts. It is the zero Endpoint until ClientEdge.Front first
+	// returns, and fixed after that.
 	Endpoint() backend.Endpoint
 
 	// Shape adds a set, replacing one with the same id and resetting its

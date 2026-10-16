@@ -337,15 +337,16 @@ func effectiveSANs(requested []string, advertiseHost string) []string {
 	return sans
 }
 
-// createAttempts is how many times a create runs when one of its servers could not
-// bind a port. The service reserves every port and hands it over just before the
-// server binds it; another program can take the port in that gap, and a retry with
-// freshly reserved ports gets past it.
+// createAttempts is how many times a create runs when one of its servers or its
+// agent could not bind a port. The service reserves every port and hands it over
+// just before the server binds it; another program can take the port in that gap,
+// and a retry with freshly reserved ports gets past it.
 const createAttempts = 3
 
 // createAttempt runs one attempt at a create request. It answers req itself,
-// unless a server could not listen and final is false: it then rolls back
-// everything the attempt started and returns true to have the create run again.
+// unless a server or the agent could not listen and final is false: it then rolls
+// back everything the attempt started and returns true to have the create run
+// again.
 type createAttempt func(req micro.Request, final bool) (retry bool)
 
 // retryCreate runs create until it answers req, at most createAttempts times.
@@ -357,15 +358,19 @@ func retryCreate(req micro.Request, create createAttempt) {
 	}
 }
 
-// retryAfter reports whether a create attempt that failed to start a server with
-// err should run again: only a server that could not listen, and not on the final
-// attempt. The caller must have rolled the attempt back.
+// retryAfter reports whether a create attempt that failed to start a server or the
+// agent with err should run again: only a server or an agent that could not
+// listen, and not on the final attempt. The caller must have rolled the attempt
+// back.
 func (s *Service) retryAfter(err error, final bool, instanceID string) bool {
-	if final || !errors.Is(err, ErrServerListen) {
+	if final {
+		return false
+	}
+	if !errors.Is(err, ErrServerListen) && !errors.Is(err, agent.ErrListen) {
 		return false
 	}
 
-	s.log.Warn("Retrying create with fresh ports after a server could not listen", "instance", instanceID, "err", err)
+	s.log.Warn("Retrying create with fresh ports after a server or the agent could not listen", "instance", instanceID, "err", err)
 
 	return true
 }
@@ -458,14 +463,15 @@ func setSpecTLS(spec *instanceSpec, opts *api.TLSOptions) {
 
 // createFromSpec runs the part of a create attempt every kind of instance
 // shares, once the request is validated and inst is registered. It asks the
-// backend for a placement, plans inst from spec against it, provisions the
-// plan, starts the agent when the plan asks for one, publishes the
-// nodes and answers req with the create response.
+// backend for a placement, plans inst from spec against it, starts the agent
+// when the instance needs one, provisions the plan, fronts the plan's proxy
+// node with the agent, publishes the nodes and answers req with the create
+// response.
 //
-// It answers req itself, unless a node could not listen and final is false: it
-// then tears down everything the attempt started and returns true to have the
-// create run again, which plans the instance again from the spec with a fresh
-// placement.
+// It answers req itself, unless a node or the agent could not listen and final
+// is false: it then stops the agent, tears down everything the attempt started
+// and returns true to have the create run again, which plans the instance again
+// from the spec with a fresh placement.
 func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, spec instanceSpec) (retry bool) {
 	if spec.TLS {
 		s.log.Info("Issuing TLS server cert", "instance", inst.ID, "sans", effectiveSANs(spec.TLSSANs, spec.AdvertiseHost))
@@ -488,8 +494,25 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		return false
 	}
 
+	// The instance needs an agent when its clients go through a proxy. The
+	// agent starts before the servers, so its listeners are up before they
+	// dial them. Every failure from here on stops it.
+	var netAgent agent.Agent
+	if spec.Proxy {
+		netAgent, err = s.startAgent(inst, spec.AdvertiseHost, spec.StoreCaptures)
+		if err != nil {
+			s.dropInstance(inst)
+			if s.retryAfter(err, final, inst.ID) {
+				return true
+			}
+			req.Error("012", fmt.Sprintf("trace setup failed: %v", err), nil)
+			return false
+		}
+	}
+
 	started, err := s.backend.Provision(ctx, &plan.InstancePlan)
 	if err != nil {
+		s.stopAgent(inst, netAgent)
 		s.dropInstance(inst)
 		if s.retryAfter(err, final, inst.ID) {
 			return true
@@ -528,7 +551,6 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 
 	servers := make([]*managedServer, 0, len(nodes))
 	ready := make([]*events.NodeAction, 0, len(nodes))
-	var netAgent agent.Agent
 
 	for i, n := range nodes {
 		node := started[i]
@@ -553,20 +575,24 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 
 		// Front the node's client listener with the agent when the plan asks
 		// for it, before the node is published so its trace port and agent are
-		// set atomically.
+		// set atomically. The live client address is fronted, since a custom
+		// template may set its own client port.
 		if n.Name == plan.ProxyNode {
-			a, terr := s.startAgent(inst, n.Name, client.Internal, spec.AdvertiseHost, spec.StoreCaptures)
+			ep, terr := s.frontClient(netAgent, n.Name, client.Internal)
 			if terr != nil {
+				s.stopAgent(inst, netAgent)
 				s.dropInstance(inst)
+				if s.retryAfter(terr, final, inst.ID) {
+					return true
+				}
 				req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
 				return false
 			}
-			netAgent = a
-			ms.agent = a
+			ms.agent = netAgent
 			if ports == nil {
 				ports = map[string]int{}
 			}
-			ports["trace"] = a.Endpoint().Port
+			ports["trace"] = ep.Port
 			ms.ports = ports
 		}
 
@@ -617,12 +643,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	inst.events.Unlock()
 
 	if !alive {
-		if netAgent != nil {
-			err := netAgent.Stop(context.Background())
-			if err != nil {
-				s.log.Error("Failed to stop agent", "instance", inst.ID, "err", err)
-			}
-		}
+		s.stopAgent(inst, netAgent)
 		s.dropInstance(inst)
 		if !s.preserve {
 			err := os.RemoveAll(inst.RootDir)
@@ -685,8 +706,9 @@ func revisionErrorMessage(err error) string {
 	return fmt.Sprintf("config render failed: %v", perr.Err)
 }
 
-// traceSetupTimeout limits an agent's start for one server, which may include
-// first-use work such as creating the store captures are written to.
+// traceSetupTimeout limits an agent's start, and its fronting of one server, each
+// of which may include first-use work such as creating the store captures are
+// written to.
 const traceSetupTimeout = 30 * time.Second
 
 // agentDeclares reports whether the selected agent declares c. It is false when
@@ -699,9 +721,8 @@ func (s *Service) agentDeclares(c agent.Capability) bool {
 	return slices.Contains(s.agents.Capabilities(), c)
 }
 
-// startAgent asks the agent provider to front a managed server's client
-// listener, which it dials at client, and returns the agent. Its endpoint's
-// port is the one clients reach it on.
+// startAgent asks the agent provider to start the agent of inst, before its
+// servers start, and returns the agent.
 //
 // advertiseHost becomes the agent's listen host, so the advertised trace URL
 // matches the node's client_advertise. It must name a local interface or the
@@ -709,7 +730,7 @@ func (s *Service) agentDeclares(c agent.Capability) bool {
 // store is passed to the agent as Spec.Store: true keeps every connection's
 // capture, false forwards and shapes without keeping any. The caller must tear
 // the instance down on failure.
-func (s *Service) startAgent(inst *instance, serverName string, client backend.Endpoint, advertiseHost string, store bool) (agent.Agent, error) {
+func (s *Service) startAgent(inst *instance, advertiseHost string, store bool) (agent.Agent, error) {
 	if s.agents == nil {
 		return nil, fmt.Errorf("trace capture is not configured on this service")
 	}
@@ -717,19 +738,48 @@ func (s *Service) startAgent(inst *instance, serverName string, client backend.E
 	ctx, cancel := context.WithTimeout(context.Background(), traceSetupTimeout)
 	defer cancel()
 
-	a, err := s.agents.Start(ctx, agent.Spec{
+	return s.agents.Start(ctx, agent.Spec{
 		InstanceID: inst.ID,
-		ServerName: serverName,
-		Client:     client,
 		ListenHost: advertiseHost,
 		Store:      store,
 	})
-	if err != nil {
-		return nil, err
+}
+
+// frontClient asks a, a running agent, to front the client listener of the
+// managed server serverName, which it dials at client, and returns the endpoint
+// clients reach it on. It is called only for an instance whose create asked for
+// the proxy, which the create refuses unless the agent declares capture, so an
+// agent that does not implement agent.ClientEdge is a fault in the agent. The
+// caller must stop the agent and tear the instance down on failure.
+func (s *Service) frontClient(a agent.Agent, serverName string, client backend.Endpoint) (backend.Endpoint, error) {
+	edge, ok := a.(agent.ClientEdge)
+	if !ok {
+		return backend.Endpoint{}, fmt.Errorf("the %q agent declares the %q capability but does not implement agent.ClientEdge", s.agentName, agent.CapabilityCapture)
 	}
 
-	s.log.Info("Trace proxy listening", "server", serverName, "address", a.Endpoint().String())
-	return a, nil
+	ctx, cancel := context.WithTimeout(context.Background(), traceSetupTimeout)
+	defer cancel()
+
+	ep, err := edge.Front(ctx, agent.Front{ServerName: serverName, Client: client})
+	if err != nil {
+		return backend.Endpoint{}, err
+	}
+
+	s.log.Info("Trace proxy listening", "server", serverName, "address", ep.String())
+	return ep, nil
+}
+
+// stopAgent stops a, the agent a create of inst started, when the create fails
+// before the instance is published. A failure is logged. A nil a is no agent.
+func (s *Service) stopAgent(inst *instance, a agent.Agent) {
+	if a == nil {
+		return
+	}
+
+	err := a.Stop(context.Background())
+	if err != nil {
+		s.log.Error("Failed to stop agent", "instance", inst.ID, "err", err)
+	}
 }
 
 func (s *Service) createCluster(req micro.Request) {

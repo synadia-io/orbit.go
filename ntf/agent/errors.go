@@ -20,4 +20,10 @@ var (
 	// shaping call on an agent without shaping. An agent returns it, or an
 	// error wrapping it.
 	ErrUnsupported = errors.New("not supported by this agent")
+
+	// ErrListen means the agent could not bind one of its listeners, usually
+	// because another program took the port. Provider.Start and
+	// ClientEdge.Front return an error wrapping it, and the service then runs
+	// the create again with fresh ports.
+	ErrListen = errors.New("could not listen")
 )

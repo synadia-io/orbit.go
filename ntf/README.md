@@ -103,11 +103,14 @@ constants. Status reports the selected agent's registered name as `agent` and it
 endpoints start. Its `Options` carry the service directory, `Preserve`, the logger, the management connection and
 the embedded server, which is nil when the service runs on a supplied connection.
 
-`Spec` names the instance and server being fronted, the node's client endpoint to dial, the host to listen on
-(the node's `client_advertise`, which must name a local interface), and `Store`, which is true for `trace` and
-false for `proxy` alone; the agent keeps captures only when it is true. The `Agent` that comes back reports the
-endpoint clients reach instead of the managed server's own, answers the `tester.shape.*` endpoints, and is stopped
-by the service on teardown. The agent owns any scratch space it needs.
+An agent serves an instance. `Start` runs before the instance's servers start, with a `Spec` naming the instance,
+the host to listen on (the node's `client_advertise`, which must name a local interface), and `Store`, which is
+true for `trace` and false for `proxy` alone; the agent keeps captures only when it is true. Once the servers run,
+the service fronts the first node through `ClientEdge.Front`, which an agent declaring `capture` implements, with
+the node's name and live client endpoint, and gets back the endpoint clients reach instead of the managed server's
+own. The `Agent` answers the `tester.shape.*` endpoints and is stopped by the service on teardown and when a create
+fails. A `Start` or `Front` that could not bind returns an error wrapping `agent.ErrListen`, and the create runs
+again with fresh ports. The agent owns any scratch space it needs.
 
 ## Clocks
 
