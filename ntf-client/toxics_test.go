@@ -2,10 +2,13 @@ package ntf
 
 import (
 	"context"
-	"errors"
+	"maps"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 // TestWithToxicsOption pins that WithToxics sets the toxics option, which is
@@ -22,12 +25,13 @@ func TestWithToxicsOption(t *testing.T) {
 	}
 }
 
-// TestWithToxicsRefusedWithoutToxicsAgent pins that every kind of create sends
-// toxics, by way of the service's refusal: ntf-server's network agent does not
-// declare the toxics capability yet, so the service answers ErrService naming
-// it.
-func TestWithToxicsRefusedWithoutToxicsAgent(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// TestWithToxicsCreatesThroughProxies pins that every kind of create sends
+// toxics and that ntf-server's network agent serves them: the instance lists
+// its route and gateway links and a client link for each server, each server's
+// port and url are its client proxy's, and a connection to the url reaches
+// that server.
+func TestWithToxicsCreatesThroughProxies(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
 	m, err := Connect(ctx, testServerURL())
@@ -39,30 +43,55 @@ func TestWithToxicsRefusedWithoutToxicsAgent(t *testing.T) {
 	tests := []struct {
 		name   string
 		create func() (*Instance, error)
+		kinds  map[string]int
 	}{
 		{"server", func() (*Instance, error) {
 			return m.CreateServer(ctx, false, WithToxics(), WithDescription(t.Name()))
-		}},
+		}, map[string]int{"client": 1}},
 		{"cluster", func() (*Instance, error) {
 			return m.CreateCluster(ctx, 2, false, WithToxics(), WithDescription(t.Name()))
-		}},
+		}, map[string]int{"route": 2, "client": 2}},
 		{"super-cluster", func() (*Instance, error) {
 			return m.CreateSuperCluster(ctx, 2, 2, false, WithToxics(), WithDescription(t.Name()))
-		}},
+		}, map[string]int{"route": 4, "gateway": 4, "client": 4}},
 	}
 
 	for _, tt := range tests {
-		inst, err := tt.create()
-		if err == nil {
-			inst.Destroy(t)
-			t.Errorf("%s: created with toxics, want a refusal", tt.name)
-			continue
-		}
-		if !errors.Is(err, ErrService) {
-			t.Errorf("%s: err = %v, want ErrService", tt.name, err)
-		}
-		if !strings.Contains(err.Error(), `"toxics"`) {
-			t.Errorf("%s: error %q does not name the toxics capability", tt.name, err)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			inst, err := tt.create()
+			if err != nil {
+				t.Fatalf("create with toxics: %v", err)
+			}
+			defer inst.Destroy(t)
+
+			kinds := map[string]int{}
+			proxies := map[string]string{}
+			for _, lk := range inst.Links {
+				kinds[lk.Kind]++
+				if lk.Kind == "client" {
+					proxies[lk.To] = lk.Proxy
+				}
+			}
+			if !maps.Equal(kinds, tt.kinds) {
+				t.Errorf("links by kind = %v, want %v", kinds, tt.kinds)
+			}
+
+			for _, srv := range inst.Servers {
+				port := ":" + strconv.Itoa(srv.Port)
+				if !strings.HasSuffix(proxies[srv.Name], port) || !strings.HasSuffix(srv.URL, port) {
+					t.Errorf("server %s port %d and url %s are not its client proxy %s", srv.Name, srv.Port, srv.URL, proxies[srv.Name])
+				}
+
+				nc, err := nats.Connect(srv.URL, nats.Timeout(5*time.Second))
+				if err != nil {
+					t.Errorf("connect to %s at %s: %v", srv.Name, srv.URL, err)
+					continue
+				}
+				if nc.ConnectedServerName() != srv.Name {
+					t.Errorf("url of %s reached %s", srv.Name, nc.ConnectedServerName())
+				}
+				nc.Close()
+			}
+		})
 	}
 }

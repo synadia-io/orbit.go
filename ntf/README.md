@@ -107,8 +107,8 @@ An agent serves an instance. `Start` runs before the instance's servers start, w
 the host to listen on (the node's `client_advertise`, which must name a local interface), and `Store`, which is
 true for `trace` and false for `proxy` alone; the agent keeps captures only when it is true. Once the servers run,
 the service fronts the first node through `ClientEdge.Front`, which an agent declaring `capture` implements, with
-the node's name and live client endpoint, and gets back the endpoint clients reach instead of the managed server's
-own. The `Agent` answers the `tester.shape.*` endpoints and is stopped by the service on teardown and when a create
+the node's name, its live client endpoint and `Capture` set, and gets back the endpoint clients reach instead of the
+managed server's own. The `Agent` answers the `tester.shape.*` endpoints and is stopped by the service on teardown and when a create
 fails. A `Start` or `Front` that could not bind returns an error wrapping `agent.ErrListen`, and the create runs
 again with fresh ports. The agent owns any scratch space it needs.
 
@@ -119,7 +119,10 @@ every node's client listener, so links can be faulted. The agent must declare th
 selected the request is refused with `014`, and with `018` when the agent does not declare it. `Spec.Links` hands
 the agent its route and gateway proxies, each with the endpoint it listens on and the peer listener it forwards to,
 and `Spec.ClientProxies` the endpoint of each node's client proxy, whose upstream is the live client endpoint once
-the node runs.
+the node runs. The service fronts every node through `ClientEdge.Front`, which binds that node's client proxy:
+with `Capture` false the agent returns the client proxy's endpoint, and on the captured first node of a traced or
+proxied instance the capture proxy forwards to the client proxy, so its chain is client, capture, client proxy,
+server.
 
 The configs dial the proxies: `.Routes` lists the route proxy for each peer, and `.Gateways` lists, for each other
 cluster, the proxies the node's cluster shares to that cluster's nodes. Three template variables, empty without

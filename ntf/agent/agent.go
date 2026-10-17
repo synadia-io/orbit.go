@@ -43,8 +43,8 @@ const (
 	CapabilityShaping Capability = "shaping"
 
 	// CapabilityToxics means the agent runs a proxy for each of Spec.Links
-	// and Spec.ClientProxies, and faults the links of an instance. Creates
-	// with toxics need it.
+	// and, through ClientEdge.Front, each of Spec.ClientProxies, and faults
+	// the links of an instance. Creates with toxics need it.
 	CapabilityToxics Capability = "toxics"
 )
 
@@ -163,15 +163,25 @@ type Front struct {
 	// Client is the endpoint of the server's live client listener, which the
 	// agent dials.
 	Client backend.Endpoint
+
+	// Capture puts a capture proxy in front of the server: clients dial it,
+	// and it forwards to the server's client proxy in Spec.ClientProxies when
+	// it has one, or to Client otherwise. False fronts the server with its
+	// client proxy alone, which only an instance created with toxics has.
+	Capture bool
 }
 
 // ClientEdge is the capability to front a managed server's client listener.
-// The agents of a provider that declares CapabilityCapture implement it. The
-// service calls Front once the server runs, before clients learn of it.
+// The agents of a provider that declares CapabilityCapture or
+// CapabilityToxics implement it. The service calls Front once the server runs,
+// before clients learn of it: with Capture set for the server of a traced or
+// proxied instance whose clients are captured, and, for an instance created
+// with toxics, for every server, with Capture false for the others.
 type ClientEdge interface {
 	// Front starts forwarding to front.Client and returns the endpoint
-	// clients dial instead. It fails for a server name it already fronts. A
-	// failure to bind a listener wraps ErrListen.
+	// clients dial instead: the capture proxy's when front.Capture is set,
+	// and the client proxy's otherwise. It fails for a server name it already
+	// fronts. A failure to bind a listener wraps ErrListen.
 	Front(ctx context.Context, front Front) (backend.Endpoint, error)
 }
 
@@ -182,8 +192,8 @@ type ClientEdge interface {
 // and after it returns.
 //
 // The shaping methods act on the connections through the first server the
-// agent fronts. An agent without shaping refuses Shape, ClearShaping,
-// ShapingReport and ShapingSets with ErrUnsupported.
+// agent fronts with Front.Capture set. An agent without shaping refuses Shape,
+// ClearShaping, ShapingReport and ShapingSets with ErrUnsupported.
 type Agent interface {
 	// Endpoint returns where clients dial instead of the first managed server
 	// the agent fronts. It is the zero Endpoint until ClientEdge.Front first

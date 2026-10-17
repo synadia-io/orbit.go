@@ -535,8 +535,8 @@ func setSpecTLS(spec *instanceSpec, opts *api.TLSOptions) {
 // shares, once the request is validated and inst is registered. It asks the
 // backend for a placement, plans inst from spec against it, starts the agent
 // when the instance needs one, provisions the plan, fronts the plan's proxy
-// node with the agent, publishes the nodes and answers req with the create
-// response.
+// node, and every node of an instance with toxics, with the agent, publishes
+// the nodes and answers req with the create response.
 //
 // It answers req itself, unless a node or the agent could not listen and final
 // is false: it then stops the agent, tears down everything the attempt started
@@ -677,12 +677,14 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 			ms.agent = netAgent
 		}
 
-		// Front the node's client listener with the agent when the plan asks
-		// for it, before the node is published so its trace port and agent are
-		// set atomically. The live client address is fronted, since a custom
+		// Front the node's client listener with the agent when the plan
+		// captures it, and every node with its client proxy under toxics,
+		// before the node is published so its trace port and agent are set
+		// atomically. The live client address is fronted, since a custom
 		// template may set its own client port.
-		if n.Name == plan.ProxyNode {
-			ep, terr := s.frontClient(netAgent, n.Name, client.Internal)
+		capture := n.Name == plan.ProxyNode
+		if capture || spec.Toxics {
+			ep, terr := s.frontClient(netAgent, agent.Front{ServerName: n.Name, Client: client.Internal, Capture: capture})
 			if terr != nil {
 				s.stopAgent(inst, netAgent)
 				s.dropInstance(inst)
@@ -692,13 +694,15 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 				req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
 				return false
 			}
-			ms.agent = netAgent
-			ms.fronted = true
-			if ports == nil {
-				ports = map[string]int{}
+			if capture {
+				ms.agent = netAgent
+				ms.fronted = true
+				if ports == nil {
+					ports = map[string]int{}
+				}
+				ports["trace"] = ep.Port
+				ms.ports = ports
 			}
-			ports["trace"] = ep.Port
-			ms.ports = ports
 		}
 
 		servers = append(servers, ms)
@@ -877,26 +881,35 @@ func (s *Service) releaseProxyHolds(instanceID string, names []string) {
 }
 
 // frontClient asks a, a running agent, to front the client listener of the
-// managed server serverName, which it dials at client, and returns the endpoint
-// clients reach it on. It is called only for an instance whose create asked for
-// the proxy, which the create refuses unless the agent declares capture, so an
-// agent that does not implement agent.ClientEdge is a fault in the agent. The
-// caller must stop the agent and tear the instance down on failure.
-func (s *Service) frontClient(a agent.Agent, serverName string, client backend.Endpoint) (backend.Endpoint, error) {
+// managed server front names, and returns the endpoint clients reach it on. It
+// is called only for an instance whose create asked for the proxy or for
+// toxics, which the create refuses unless the agent declares capture or toxics,
+// so an agent that does not implement agent.ClientEdge is a fault in the agent.
+// The caller must stop the agent and tear the instance down on failure.
+func (s *Service) frontClient(a agent.Agent, front agent.Front) (backend.Endpoint, error) {
 	edge, ok := a.(agent.ClientEdge)
 	if !ok {
-		return backend.Endpoint{}, fmt.Errorf("the %q agent declares the %q capability but does not implement agent.ClientEdge", s.agentName, agent.CapabilityCapture)
+		capability := agent.CapabilityToxics
+		if front.Capture {
+			capability = agent.CapabilityCapture
+		}
+		return backend.Endpoint{}, fmt.Errorf("the %q agent declares the %q capability but does not implement agent.ClientEdge", s.agentName, capability)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), traceSetupTimeout)
 	defer cancel()
 
-	ep, err := edge.Front(ctx, agent.Front{ServerName: serverName, Client: client})
+	ep, err := edge.Front(ctx, front)
 	if err != nil {
 		return backend.Endpoint{}, err
 	}
 
-	s.log.Info("Trace proxy listening", "server", serverName, "address", ep.String())
+	if front.Capture {
+		s.log.Info("Trace proxy listening", "server", front.ServerName, "address", ep.String())
+	} else {
+		s.log.Info("Client proxy listening", "server", front.ServerName, "address", ep.String())
+	}
+
 	return ep, nil
 }
 

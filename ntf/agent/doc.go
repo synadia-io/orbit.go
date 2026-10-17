@@ -27,8 +27,11 @@ The service:
  1. calls a Factory once, with Options, to build a Provider;
  2. calls Provider.Start with a Spec for each instance that needs an agent,
     before the instance's servers start, and keeps the Agent it returns;
- 3. once the servers run, calls ClientEdge.Front for the server whose clients
-    go through the agent;
+ 3. once the servers run, calls ClientEdge.Front: with Capture set for the
+    first server of an instance created with trace or proxy, whose clients
+    the agent captures, and, for an instance created with toxics, for every
+    other server with Capture false; under toxics alone every server, the
+    first included, is fronted with Capture false;
  4. calls Agent.Stop when the instance goes, or when its create fails;
  5. calls Provider.Close once, after every instance is gone and before the
     management server stops.

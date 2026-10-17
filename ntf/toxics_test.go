@@ -956,3 +956,75 @@ func TestToxicsCreateRetryUsesFreshProxies(t *testing.T) {
 		}
 	}
 }
+
+// TestFrontsByOptIn proves which nodes a cluster create fronts, and with what:
+// under toxics every node, in order, with its live client endpoint and Capture
+// set only on the first node of a traced or proxied instance; without toxics
+// only the first node of a traced one. Only a captured node gets a trace port,
+// and the one agent is stopped once on teardown.
+func TestFrontsByOptIn(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     api.CreateClusterRequest
+		fronted int
+		capture bool
+	}{
+		{"toxics only", api.CreateClusterRequest{Servers: 3, Toxics: true}, 3, false},
+		{"toxics and proxy", api.CreateClusterRequest{Servers: 3, Toxics: true, Proxy: true}, 3, true},
+		{"toxics and trace", api.CreateClusterRequest{Servers: 3, Toxics: true, Trace: true}, 3, true},
+		{"trace without toxics", api.CreateClusterRequest{Servers: 3, Trace: true}, 1, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &fakeProvider{toxics: true}
+			svc := startTestService(t, withAgent(provider))
+
+			var created api.CreateResponse
+			mustRequest(t, svc.nc, "tester.create.cluster", tt.req, &created)
+
+			fronts, started := provider.frontSnapshot()
+			if len(started) != 1 {
+				t.Fatalf("provider started %d agents, want 1", len(started))
+			}
+			if len(fronts) != tt.fronted {
+				t.Fatalf("agent was fronted %d times, want %d", len(fronts), tt.fronted)
+			}
+
+			for i, front := range fronts {
+				srv := created.Servers[i]
+				if front.ServerName != srv.Name {
+					t.Errorf("front %d is %q, want %q", i, front.ServerName, srv.Name)
+				}
+
+				var live backend.Endpoint
+				for _, a := range svc.findServerByName(srv.Name).backendNode.Addresses() {
+					if a.Name == "client" {
+						live = a.Internal
+					}
+				}
+				if front.Client != live {
+					t.Errorf("front of %s dials %s, want its live client %s", srv.Name, front.Client, live)
+				}
+
+				wantCapture := tt.capture && i == 0
+				if front.Capture != wantCapture {
+					t.Errorf("front of %s has Capture %v, want %v", srv.Name, front.Capture, wantCapture)
+				}
+			}
+
+			for i, srv := range created.Servers {
+				_, traced := srv.Ports["trace"]
+				wantTraced := tt.capture && i == 0
+				if traced != wantTraced {
+					t.Errorf("server %s has a trace port: %v, want %v", srv.Name, traced, wantTraced)
+				}
+			}
+
+			mustRequest(t, svc.nc, "tester.destroy", api.DestroyRequest{InstanceID: created.ID}, nil)
+			if started[0].stopCount() != 1 {
+				t.Errorf("agent stopped %d times on teardown, want 1", started[0].stopCount())
+			}
+		})
+	}
+}
