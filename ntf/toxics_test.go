@@ -21,6 +21,7 @@ import (
 	"maps"
 	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -315,63 +316,275 @@ const routeTLSBlock = `	tls {
 		key_file: "/certs/server.key"
 	}`
 
-// TestPlanRefusesRouteTLS proves a plan with toxics fails with
-// planErrRouteTLS, answered with 019, when a node's config enables TLS in its
-// cluster block from the template or in its gateway block from a snippet, and
-// that client TLS and a plan without toxics are not refused.
-func TestPlanRefusesRouteTLS(t *testing.T) {
+// inlineTLSInclude includes the tls snippet after another field on the same
+// line, where an include does not start its line.
+const inlineTLSInclude = "\tconnect_retries: 3; {{ if .Snippets.tls }}include \"{{ .Snippets.tls }}\"{{ end }}"
+
+// emptyDir fails t when dir holds anything.
+func emptyDir(t *testing.T, dir string) {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		t.Errorf("%s left behind in %s", e.Name(), dir)
+	}
+}
+
+// TestToxicsConfigRefusal proves the checks of an instance created with
+// toxics, run on each planned node's config as the server reads it, refuse
+// TLS in a cluster or gateway block or a gateway entry with 019, a gateway not
+// named for its cluster and a config that does not parse with 007, wherever
+// an include puts what they look for, pass a valid config with its includes,
+// and leave no temporary directory behind.
+func TestToxicsConfigRefusal(t *testing.T) {
+	id := nuid.Next()
+	short := shortID(id)
 	tlsSnippet := map[string]string{"tls": "tls {\n\tcert_file: \"/certs/server.crt\"\n}\n"}
+	routeTLS := func(node, block string) string {
+		return fmt.Sprintf("%s: node %s enables TLS in its %s block", errRouteTLS, node, block)
+	}
 
 	tests := []struct {
 		name string
 		spec instanceSpec
-		// block is the block the refusal names, empty when the plan succeeds.
-		block string
+		// code and want are the refusal, both empty when nothing is refused.
+		code string
+		want string
 	}{
 		{
-			name:  "cluster tls from the template",
-			spec:  instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: toxicsTLSTemplate(routeTLSBlock), Toxics: true},
-			block: "cluster",
+			name: "cluster tls from the template",
+			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: toxicsTLSTemplate(routeTLSBlock), Toxics: true},
+			code: "019",
+			want: routeTLS(short+"-n1", "cluster"),
 		},
 		{
-			name:  "gateway tls from a snippet",
-			spec:  instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: toxicsTLSTemplate(""), Snippets: tlsSnippet, Toxics: true},
-			block: "gateway",
+			name: "gateway tls from a snippet",
+			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: toxicsTLSTemplate(""), Snippets: tlsSnippet, Toxics: true},
+			code: "019",
+			want: routeTLS(short+"-c1_s1", "gateway"),
 		},
 		{
-			name: "client tls",
-			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: serverConfigTemplate, TLS: true, Toxics: true},
+			name: "cluster tls from an inline include",
+			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: toxicsTLSTemplate(inlineTLSInclude), Snippets: tlsSnippet, Toxics: true},
+			code: "019",
+			want: routeTLS(short+"-n1", "cluster"),
 		},
 		{
-			name: "cluster tls without toxics",
-			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: toxicsTLSTemplate(routeTLSBlock)},
+			name: "cluster after a brace that ends an include",
+			spec: instanceSpec{
+				Kind:         "cluster",
+				Servers:      2,
+				MainTemplate: toxicsTLSTemplate("") + "\ninclude \"{{ .Snippets.top }}\"}cluster { tls { cert_file: \"/certs/server.crt\" } }\n",
+				Snippets:     map[string]string{"top": "max_payload: 1024\n"},
+				Toxics:       true,
+			},
+			code: "019",
+			want: routeTLS(short+"-n1", "cluster"),
+		},
+		{
+			name: "tls after a brace inside an included snippet",
+			spec: instanceSpec{
+				Kind:         "cluster",
+				Servers:      2,
+				MainTemplate: toxicsTLSTemplate("\tinclude \"{{ .Snippets.tls }}\""),
+				Snippets:     map[string]string{"tls": "x: 1}tls { cert_file: \"/certs/server.crt\" }\n"},
+				Toxics:       true,
+			},
+			code: "019",
+			want: routeTLS(short+"-n1", "cluster"),
+		},
+		{
+			name: "gateway entry tls",
+			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: gatewayEntryTLSTemplate(t), Toxics: true},
+			code: "019",
+			want: fmt.Sprintf("%s: node %s-c1_s1 enables TLS in its gateway entry SC_%s_2", errRouteTLS, short, short),
+		},
+		{
+			name: "other gateway name",
+			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: gatewayOtherNameTemplate(t), Toxics: true},
+			code: "007",
+			want: fmt.Sprintf(`%s: node %s-c1_s1 names its gateway "elsewhere", want "SC_%s_1"`, errGatewayName, short, short),
+		},
+		{
+			name: "no gateway name",
+			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: gatewayNoNameTemplate(t), Toxics: true},
+			code: "007",
+			want: fmt.Sprintf(`%s: node %s-c1_s1 does not name its gateway, want "SC_%s_1"`, errGatewayName, short, short),
+		},
+		{
+			name: "unparseable config",
+			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: serverConfigTemplate + "\nbroken {\n", Toxics: true},
+			code: "007",
+			want: fmt.Sprintf("%s: node %s-n1: ", errConfigParse, short),
+		},
+		{
+			name: "valid config with includes and client tls",
+			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: serverConfigTemplate, Snippets: map[string]string{"top": "max_payload: 1024\n"}, TLS: true, Toxics: true},
+		},
+		{
+			name: "cluster with its own gateway block",
+			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: serverConfigTemplate + "\ngateway {\n\tname: \"elsewhere\"\n\tport: -1\n}\n", Toxics: true},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			id := nuid.Next()
+			plan, err := planInstance(tt.spec, id, newFakePlacement(id), server.VERSION)
+			if err != nil {
+				t.Fatalf("planInstance: %v", err)
+			}
 
-			_, err := planInstance(tt.spec, id, newFakePlacement(id), server.VERSION)
-			if tt.block == "" {
-				if err != nil {
-					t.Fatalf("planInstance: %v", err)
+			dir := t.TempDir()
+			var code, msg string
+			for _, n := range plan.nodes {
+				code, msg = toxicsConfigRefusal(dir, n, "002")
+				if code != "" {
+					break
 				}
-				return
 			}
+			emptyDir(t, dir)
 
-			if !errors.Is(err, errRouteTLS) {
-				t.Fatalf("planInstance error %v does not wrap errRouteTLS", err)
+			if code != tt.code {
+				t.Errorf("code = %q (%s), want %q", code, msg, tt.code)
 			}
-			if planErrorCode(err) != "019" {
-				t.Errorf("error code = %s, want 019", planErrorCode(err))
-			}
-			want := "enables TLS in its " + tt.block + " block"
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q does not say %q", err, want)
+			if !strings.HasPrefix(msg, tt.want) {
+				t.Errorf("message %q does not start with %q", msg, tt.want)
 			}
 		})
 	}
+}
+
+// TestReadNodeConfig proves readNodeConfig reads a node's snippets and its
+// managed TLS snippet through their includes, removes its temporary
+// directory, and refuses a file path that leaves that directory.
+func TestReadNodeConfig(t *testing.T) {
+	id := nuid.Next()
+	spec := instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: serverConfigTemplate, Snippets: map[string]string{"top": "max_payload: 1024\n"}, TLS: true}
+
+	plan, err := planInstance(spec, id, newFakePlacement(id), server.VERSION)
+	if err != nil {
+		t.Fatalf("planInstance: %v", err)
+	}
+	n := plan.nodes[0]
+
+	dir := t.TempDir()
+	cfg, err := readNodeConfig(dir, n)
+	if err != nil {
+		t.Fatalf("readNodeConfig: %v", err)
+	}
+	emptyDir(t, dir)
+
+	if cfg["max_payload"] != int64(1024) {
+		t.Errorf("max_payload = %v, want 1024 from the top snippet", cfg["max_payload"])
+	}
+	_, ok := cfg["tls"]
+	if !ok {
+		t.Error("config has no tls block from the managed TLS snippet")
+	}
+
+	escaping := &nodePlan{NodePlan: n.NodePlan, TLS: n.TLS}
+	escaping.Files = []backend.File{{Path: filepath.Join("..", "outside.conf"), Data: []byte("x: 1\n")}}
+	_, err = readNodeConfig(dir, escaping)
+	if !errors.Is(err, errConfigParse) {
+		t.Errorf("readNodeConfig of a file outside the directory: %v, want errConfigParse", err)
+	}
+	emptyDir(t, dir)
+}
+
+// TestReadNodeConfigErrorPaths proves a parse error of readNodeConfig names
+// files in the instance directory, never in its removed temporary directory,
+// for a missing include and a syntax error, and that an absolute include
+// resolves under the including file's directory, as conf joins it, not at
+// its path on disk.
+func TestReadNodeConfigErrorPaths(t *testing.T) {
+	id := nuid.Next()
+	place := newFakePlacement(id)
+
+	outside := filepath.Join(t.TempDir(), "outside.conf")
+	err := os.WriteFile(outside, []byte("max_payload: 7\n"), 0600)
+	if err != nil {
+		t.Fatalf("write %s: %v", outside, err)
+	}
+
+	tests := []struct {
+		name  string
+		extra string
+		// want is what the message says, empty when only the path is checked.
+		want string
+	}{
+		{"missing include", "\ninclude \"snippets/missing.conf\"\n", filepath.Join(place.InstanceDir(), "n1", "snippets", "missing.conf")},
+		{"syntax error", "\nbroken {\n", ""},
+		{"absolute include", "\ninclude \"" + outside + "\"\n", filepath.Join(place.InstanceDir(), "n1", outside)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: serverConfigTemplate + tt.extra}
+			plan, err := planInstance(spec, id, place, server.VERSION)
+			if err != nil {
+				t.Fatalf("planInstance: %v", err)
+			}
+
+			dir := t.TempDir()
+			_, err = readNodeConfig(dir, plan.nodes[0])
+			emptyDir(t, dir)
+
+			if !errors.Is(err, errConfigParse) {
+				t.Fatalf("readNodeConfig: %v, want errConfigParse", err)
+			}
+			if strings.Contains(err.Error(), "config-check-") {
+				t.Errorf("error %q names the temporary directory", err)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q does not name %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// gatewayNameLine and gatewayEntryLine are lines of the built-in template's
+// gateway block a test replaces: the gateway name, and the start of each
+// entry of the gateways list.
+const (
+	gatewayNameLine  = "\tname: \"{{ .ClusterName }}\"\n\tport: {{ .GatewayPort }}"
+	gatewayEntryLine = `{ name: "{{ $cluster }}", urls: [`
+)
+
+// gatewayTemplate returns the built-in template with from, a line of its
+// gateway block, replaced by to.
+func gatewayTemplate(t *testing.T, from, to string) string {
+	t.Helper()
+
+	if strings.Count(serverConfigTemplate, from) != 1 {
+		t.Fatalf("the built-in template does not hold %q once", from)
+	}
+
+	return strings.Replace(serverConfigTemplate, from, to, 1)
+}
+
+// gatewayEntryTLSTemplate puts TLS, keyed in upper case, in the entry of the
+// gateways list for a super-cluster's second cluster.
+func gatewayEntryTLSTemplate(t *testing.T) string {
+	t.Helper()
+
+	return gatewayTemplate(t, gatewayEntryLine, `{ name: "{{ $cluster }}", {{ if eq $cluster (index $.Clusters 1) }}TLS: { cert_file: "/certs/server.crt" }, {{ end }}urls: [`)
+}
+
+// gatewayOtherNameTemplate names the gateway "elsewhere", keyed in mixed case.
+func gatewayOtherNameTemplate(t *testing.T) string {
+	t.Helper()
+
+	return gatewayTemplate(t, gatewayNameLine, "\tName: \"elsewhere\"\n\tport: {{ .GatewayPort }}")
+}
+
+// gatewayNoNameTemplate leaves the name out of the gateway block.
+func gatewayNoNameTemplate(t *testing.T) string {
+	t.Helper()
+
+	return gatewayTemplate(t, gatewayNameLine, "\tport: {{ .GatewayPort }}")
 }
 
 // TestInProcessPlacementProxyAddress proves the in-process placement holds a
@@ -799,6 +1012,9 @@ func TestToxicsUpdateRouteTLSIsRefused(t *testing.T) {
 	}{
 		{"template", api.UpdateServerRequest{Name: name, Template: toxicsTLSTemplate(routeTLSBlock)}},
 		{"snippet", api.UpdateServerRequest{Name: name, Template: toxicsTLSTemplate(snippetInCluster), Snippets: map[string]string{"tls": "tls {\n\tcert_file: \"/certs/server.crt\"\n}\n"}}},
+		{"inline snippet", api.UpdateServerRequest{Name: name, Template: toxicsTLSTemplate(inlineTLSInclude), Snippets: map[string]string{"tls": "tls {\n\tcert_file: \"/certs/server.crt\"\n}\n"}}},
+		{"brace after an include", api.UpdateServerRequest{Name: name, Template: toxicsTLSTemplate("") + "\ninclude \"{{ .Snippets.top }}\"}cluster { tls { cert_file: \"/certs/server.crt\" } }\n", Snippets: map[string]string{"top": "max_payload: 1024\n"}}},
+		{"brace inside a snippet", api.UpdateServerRequest{Name: name, Template: toxicsTLSTemplate("\tinclude \"{{ .Snippets.tls }}\""), Snippets: map[string]string{"tls": "x: 1}tls { cert_file: \"/certs/server.crt\" }\n"}}},
 	}
 
 	for _, tt := range tests {
@@ -820,6 +1036,248 @@ func TestToxicsUpdateRouteTLSIsRefused(t *testing.T) {
 	if !bytes.Equal(after, before) {
 		t.Errorf("a refused update changed the config\n%s\nwant\n%s", after, before)
 	}
+}
+
+// TestToxicsGatewayRefusals proves a create of a super-cluster with toxics is
+// refused, before the agent starts and leaving no port reserved, with 019 when
+// an entry of its gateways list enables TLS and with 007 when its gateway has
+// no name or a name other than its cluster's.
+func TestToxicsGatewayRefusals(t *testing.T) {
+	provider := &fakeProvider{toxics: true}
+	svc := startTestService(t, withAgent(provider))
+
+	tests := []struct {
+		name     string
+		template string
+		code     string
+		want     []string
+	}{
+		{"gateway entry tls", gatewayEntryTLSTemplate(t), "019", []string{errRouteTLS.Error(), "enables TLS in its gateway entry SC_"}},
+		{"other gateway name", gatewayOtherNameTemplate(t), "007", []string{errGatewayName.Error(), `names its gateway "elsewhere", want "SC_`}},
+		{"no gateway name", gatewayNoNameTemplate(t), "007", []string{errGatewayName.Error(), `does not name its gateway, want "SC_`}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, msg := serviceError(t, svc.nc, "tester.create.super-cluster", api.CreateSuperClusterRequest{Clusters: 2, Servers: 2, Template: tt.template, Toxics: true})
+			if code != tt.code {
+				t.Errorf("error code = %q, want %s", code, tt.code)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error %q does not say %q", msg, want)
+				}
+			}
+		})
+	}
+
+	if provider.startCount() != 0 {
+		t.Errorf("provider started %d agents, want none", provider.startCount())
+	}
+	if trackedPorts(svc) != 0 {
+		t.Errorf("%d ports still reserved after the refusals", trackedPorts(svc))
+	}
+	noConfigCheckDirs(t, svc)
+}
+
+// noConfigCheckDirs fails t when a temporary directory of readNodeConfig is
+// left in svc's directory.
+func noConfigCheckDirs(t *testing.T, svc *Service) {
+	t.Helper()
+
+	left, err := filepath.Glob(filepath.Join(svc.dir, "config-check-*"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(left) != 0 {
+		t.Errorf("config check directories left behind: %v", left)
+	}
+}
+
+// TestNoToxicsSkipsConfigChecks proves a create without toxics does not run
+// the config checks: a config that does not parse fails when the server
+// starts, not with the checks' 007.
+func TestNoToxicsSkipsConfigChecks(t *testing.T) {
+	svc := startTestService(t)
+
+	code, msg := serviceError(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Template: serverConfigTemplate + "\nbroken {\n"})
+	if code == "" {
+		t.Fatal("create of a config that does not parse succeeded")
+	}
+	if strings.Contains(msg, errConfigParse.Error()) {
+		t.Errorf("create without toxics was refused by the config checks: %s %s", code, msg)
+	}
+}
+
+// TestToxicsUpdateGatewayRefusals proves an update of a server of a
+// super-cluster created with toxics is refused, and writes nothing, with 019
+// when an entry of its gateways list enables TLS, naming the entry, and with
+// 007 when its gateway has no name or a name other than its cluster's.
+func TestToxicsUpdateGatewayRefusals(t *testing.T) {
+	provider := &fakeProvider{toxics: true}
+	svc := startTestService(t, withAgent(provider))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.super-cluster", api.CreateSuperClusterRequest{Clusters: 2, Servers: 2, Toxics: true}, &created)
+
+	// The entry TLS template puts TLS in the second cluster's entry, so the
+	// server is picked from the first.
+	svc.mu.Lock()
+	clusters := slices.Clone(svc.instances[created.ID].plan.Clusters)
+	svc.mu.Unlock()
+	if len(clusters) != 2 {
+		t.Fatalf("plan has %d clusters, want 2", len(clusters))
+	}
+	other := clusters[1]
+
+	var srv *api.ManagedServer
+	for _, s := range created.Servers {
+		if s.Cluster == clusters[0] {
+			srv = s
+			break
+		}
+	}
+	if srv == nil {
+		t.Fatalf("no server in cluster %s", clusters[0])
+	}
+
+	cfgPath := svc.findServerByName(srv.Name).backendNode.(*inProcessNode).cfgPath
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		template string
+		code     string
+		want     string
+	}{
+		{"gateway entry tls", gatewayEntryTLSTemplate(t), "019", fmt.Sprintf("%s: node %s enables TLS in its gateway entry %s", errRouteTLS, srv.Name, other)},
+		{"other gateway name", gatewayOtherNameTemplate(t), "007", fmt.Sprintf(`%s: node %s names its gateway "elsewhere", want %q`, errGatewayName, srv.Name, srv.Cluster)},
+		{"no gateway name", gatewayNoNameTemplate(t), "007", fmt.Sprintf(`%s: node %s does not name its gateway, want %q`, errGatewayName, srv.Name, srv.Cluster)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, msg := serviceError(t, svc.nc, "tester.update.server", api.UpdateServerRequest{Name: srv.Name, Template: tt.template})
+			if code != tt.code {
+				t.Errorf("error code = %q, want %s", code, tt.code)
+			}
+			if msg != tt.want {
+				t.Errorf("error %q, want %q", msg, tt.want)
+			}
+		})
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Errorf("a refused update changed the config\n%s\nwant\n%s", after, before)
+	}
+}
+
+// TestToxicsUnparseableConfigIsRefused proves a create with toxics whose
+// config does not parse is refused with 007, naming the node, before the
+// agent starts, and that an update of a server created with toxics is refused
+// the same way and writes nothing.
+func TestToxicsUnparseableConfigIsRefused(t *testing.T) {
+	provider := &fakeProvider{toxics: true}
+	svc := startTestService(t, withAgent(provider))
+	broken := serverConfigTemplate + "\nbroken {\n"
+
+	code, msg := serviceError(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Template: broken, Toxics: true})
+	if code != "007" {
+		t.Errorf("create error code = %q, want 007", code)
+	}
+	if !strings.HasPrefix(msg, errConfigParse.Error()+": node ") {
+		t.Errorf("create error %q does not explain the refusal", msg)
+	}
+	if provider.startCount() != 0 {
+		t.Errorf("provider started %d agents, want none", provider.startCount())
+	}
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Toxics: true}, &created)
+
+	name := created.Servers[0].Name
+	cfgPath := svc.findServerByName(name).backendNode.(*inProcessNode).cfgPath
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	code, msg = serviceError(t, svc.nc, "tester.update.server", api.UpdateServerRequest{Name: name, Template: broken})
+	if code != "007" {
+		t.Errorf("update error code = %q, want 007", code)
+	}
+	if !strings.HasPrefix(msg, fmt.Sprintf("%s: node %s: ", errConfigParse, name)) {
+		t.Errorf("update error %q does not explain the refusal", msg)
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Errorf("a refused update changed the config\n%s\nwant\n%s", after, before)
+	}
+	noConfigCheckDirs(t, svc)
+}
+
+// TestToxicsUpdateManagedTLSIsRefused proves an update of a server of a
+// super-cluster created with toxics and generated TLS is refused with 019, and
+// writes nothing, when its template includes the managed TLS snippet the
+// create wrote inside the cluster or gateway block, though the update does
+// not rewrite that snippet.
+func TestToxicsUpdateManagedTLSIsRefused(t *testing.T) {
+	provider := &fakeProvider{toxics: true}
+	svc := startTestService(t, withAgent(provider))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.super-cluster", api.CreateSuperClusterRequest{Clusters: 2, Servers: 2, TLS: &api.TLSOptions{Mode: api.TLSModeServer}, Toxics: true}, &created)
+
+	name := created.Servers[0].Name
+	cfgPath := svc.findServerByName(name).backendNode.(*inProcessNode).cfgPath
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	managedInclude := "\t{{ if .TLSInclude }}include \"{{ .TLSInclude }}\"{{ end }}"
+
+	tests := []struct {
+		name     string
+		template string
+		block    string
+	}{
+		{"cluster", toxicsTLSTemplate(managedInclude), "cluster"},
+		{"gateway", gatewayTemplate(t, gatewayNameLine, gatewayNameLine+"\n"+managedInclude), "gateway"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, msg := serviceError(t, svc.nc, "tester.update.server", api.UpdateServerRequest{Name: name, Template: tt.template})
+			if code != "019" {
+				t.Errorf("error code = %q, want 019", code)
+			}
+			want := fmt.Sprintf("%s: node %s enables TLS in its %s block", errRouteTLS, name, tt.block)
+			if msg != want {
+				t.Errorf("error %q, want %q", msg, want)
+			}
+		})
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Errorf("a refused update changed the config\n%s\nwant\n%s", after, before)
+	}
+	noConfigCheckDirs(t, svc)
 }
 
 // TestToxicsAloneHasNoShapingProxy proves an instance created with toxics and

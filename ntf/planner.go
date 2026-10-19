@@ -19,13 +19,10 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"text/template"
-
-	"github.com/nats-io/nats-server/v2/conf"
 
 	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/api"
@@ -56,10 +53,6 @@ const (
 	// planErrTemplate means the main template failed to parse or render.
 	// Answered with 002.
 	planErrTemplate
-
-	// planErrRouteTLS means a node of an instance created with toxics enables
-	// TLS on its routes or gateways. Answered with 019.
-	planErrRouteTLS
 )
 
 // errNoFreePort is the cause of a planErrPort failure for a client, cluster or
@@ -209,15 +202,6 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 		err = renderNode(n, td, spec.Snippets, spec.MainTemplate)
 		if err != nil {
 			return nil, err
-		}
-
-		// The proxies of toxics read a plain CONNECT, so routes and gateways
-		// must not use TLS.
-		if spec.Toxics {
-			err = checkRouteTLS(n)
-			if err != nil {
-				return fail(planErrRouteTLS, err)
-			}
 		}
 	}
 
@@ -714,30 +698,11 @@ func renderSnippets(td *templateData, snippets map[string]string, snippetsDir st
 	return files, nil
 }
 
-// includeLine matches an include directive at the start of a config line, with
-// its path double quoted, single quoted or bare.
-var includeLine = regexp.MustCompile(`(?m)^[ \t]*include[ \t]+(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;}]+))[ \t]*;?`)
-
-// maxIncludeDepth bounds how deep checkRouteTLS expands includes, so a cycle
-// of includes ends.
-const maxIncludeDepth = 10
-
-// checkRouteTLS returns an error wrapping errRouteTLS when node n's config,
-// with every include of one of n's files expanded, has a tls block in its
-// cluster or gateway block, from the template or from a snippet. An include of
-// any other file is left out, and a config that does not parse is passed over,
-// since the server reports it when it starts.
-func checkRouteTLS(n *nodePlan) error {
-	files := map[string][]byte{}
-	for _, f := range n.Files {
-		files[filepath.Clean(f.Path)] = f.Data
-	}
-
-	cfg, err := conf.Parse(expandIncludes(string(n.Config), n.Dir, files, 0))
-	if err != nil {
-		return nil
-	}
-
+// checkRouteTLS returns an error wrapping errRouteTLS when cfg, node n's
+// parsed config, has a tls block in its cluster or gateway block or in an
+// entry of its gateway block's gateways list. Keys match in any case, as the
+// server matches them.
+func checkRouteTLS(n *nodePlan, cfg map[string]any) error {
 	for key, value := range cfg {
 		block := strings.ToLower(key)
 		if block != "cluster" && block != "gateway" {
@@ -748,9 +713,29 @@ func checkRouteTLS(n *nodePlan) error {
 		if !ok {
 			continue
 		}
-		for field := range fields {
+		for field, fieldValue := range fields {
 			if strings.EqualFold(field, "tls") {
 				return fmt.Errorf("%w: node %s enables TLS in its %s block", errRouteTLS, n.Name, block)
+			}
+
+			if block != "gateway" || !strings.EqualFold(field, "gateways") {
+				continue
+			}
+
+			entries, ok := fieldValue.([]any)
+			if !ok {
+				continue
+			}
+			for i, entry := range entries {
+				entryFields, ok := entry.(map[string]any)
+				if !ok {
+					continue
+				}
+				for entryField := range entryFields {
+					if strings.EqualFold(entryField, "tls") {
+						return fmt.Errorf("%w: node %s enables TLS in its gateway entry %s", errRouteTLS, n.Name, gatewayEntryName(entryFields, i))
+					}
+				}
 			}
 		}
 	}
@@ -758,23 +743,59 @@ func checkRouteTLS(n *nodePlan) error {
 	return nil
 }
 
-// expandIncludes returns text with every include of one of files replaced by
-// that file's contents, expanded in turn, and every other include removed.
-// files are keyed by their cleaned path relative to the instance directory,
-// and dir is the directory the include paths in text are relative to.
-func expandIncludes(text, dir string, files map[string][]byte, depth int) string {
-	return includeLine.ReplaceAllStringFunc(text, func(line string) string {
-		if depth >= maxIncludeDepth {
-			return ""
+// gatewayEntryName returns the name of entry, the fields of the entry at index
+// i of a gateways list, or its 1-based position when it has no name.
+func gatewayEntryName(entry map[string]any, i int) string {
+	for field, value := range entry {
+		if !strings.EqualFold(field, "name") {
+			continue
+		}
+		name, ok := value.(string)
+		if ok && name != "" {
+			return name
+		}
+	}
+
+	return strconv.Itoa(i + 1)
+}
+
+// checkGatewayName returns an error wrapping errGatewayName when node n is in
+// a super-cluster and the gateway block of cfg, n's parsed config, has no name
+// or a name other than n's planned cluster name, which the gateway gate admits
+// a connection by. A config without a gateway block, and a node of any other
+// kind of instance, is passed over. Keys match in any case, as the server
+// matches them.
+func checkGatewayName(n *nodePlan, cfg map[string]any) error {
+	if n.TemplateData == nil || n.TemplateData.Kind != "super-cluster" {
+		return nil
+	}
+
+	for key, value := range cfg {
+		if !strings.EqualFold(key, "gateway") {
+			continue
 		}
 
-		m := includeLine.FindStringSubmatch(line)
-		path := filepath.Clean(filepath.Join(dir, m[1]+m[2]+m[3]))
-		data, ok := files[path]
+		fields, ok := value.(map[string]any)
 		if !ok {
-			return ""
+			continue
 		}
 
-		return "\n" + expandIncludes(string(data), filepath.Dir(path), files, depth+1) + "\n"
-	})
+		named := false
+		for field, fieldValue := range fields {
+			if !strings.EqualFold(field, "name") {
+				continue
+			}
+			named = true
+
+			name := fmt.Sprint(fieldValue)
+			if name != n.Cluster {
+				return fmt.Errorf("%w: node %s names its gateway %q, want %q", errGatewayName, n.Name, name, n.Cluster)
+			}
+		}
+		if !named {
+			return fmt.Errorf("%w: node %s does not name its gateway, want %q", errGatewayName, n.Name, n.Cluster)
+		}
+	}
+
+	return nil
 }

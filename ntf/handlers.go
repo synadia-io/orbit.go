@@ -31,6 +31,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/nats-io/nats-server/v2/conf"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go/micro"
 
@@ -343,6 +344,143 @@ func (s *Service) toxicsRefusal(kind, customTemplate string) (string, string) {
 	return "", ""
 }
 
+// toxicsConfigRefusal returns the response code and message a create or
+// update of an instance created with toxics is refused with for node n's
+// rendered config, or two empty strings when it is not refused: 007 for a
+// config that does not parse, 019 for one that enables TLS on routes or
+// gateways, 007 for a gateway not named for its cluster, and failCode when the
+// config could not be checked. dir is where readNodeConfig makes its
+// temporary directory.
+func toxicsConfigRefusal(dir string, n *nodePlan, failCode string) (string, string) {
+	cfg, err := readNodeConfig(dir, n)
+	if errors.Is(err, errConfigParse) {
+		return "007", err.Error()
+	}
+	if err != nil {
+		return failCode, err.Error()
+	}
+
+	err = checkRouteTLS(n, cfg)
+	if err != nil {
+		return "019", err.Error()
+	}
+
+	err = checkGatewayName(n, cfg)
+	if err != nil {
+		return "007", err.Error()
+	}
+
+	return "", ""
+}
+
+// readNodeConfig parses node n's rendered config as the server reads it from
+// disk. It writes the config, every file of n and, when n has managed TLS
+// settings, its managed TLS snippet into a new temporary directory under dir,
+// laid out as in the instance directory, so every include resolves as it does
+// for the server, then parses the config with conf.ParseFile, which reads
+// includes but loads no certificate, and removes the directory. The managed
+// TLS snippet is written whenever n has one, since a revision that does not
+// rewrite it leaves the one on disk. Only n's own files are written, so on
+// update a config that includes a file left on disk by an earlier revision or
+// another node does not parse here and is refused, although the server would
+// load it.
+//
+// A config that does not parse, and a node directory or file path that would
+// leave the temporary directory, is an error wrapping errConfigParse that
+// names the node. Any other error means the config could not be checked.
+func readNodeConfig(dir string, n *nodePlan) (cfg map[string]any, err error) {
+	files := n.Files
+	if n.TLS != nil {
+		files = append([]backend.File{managedTLSFile(n)}, n.Files...)
+	}
+
+	if !filepath.IsLocal(n.Dir) {
+		return nil, fmt.Errorf("%w: node %s: directory %s is outside the instance directory", errConfigParse, n.Name, n.Dir)
+	}
+	for _, f := range files {
+		if !filepath.IsLocal(f.Path) {
+			return nil, fmt.Errorf("%w: node %s: file %s is outside the instance directory", errConfigParse, n.Name, f.Path)
+		}
+	}
+
+	err = os.MkdirAll(dir, 0700)
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+
+	tmp, err := os.MkdirTemp(dir, "config-check-")
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	defer func() {
+		rmErr := os.RemoveAll(tmp)
+		if rmErr != nil && err == nil {
+			cfg = nil
+			err = fmt.Errorf("node %s config check: %w", n.Name, rmErr)
+		}
+	}()
+
+	for _, f := range files {
+		path := filepath.Join(tmp, f.Path)
+		err = os.MkdirAll(filepath.Dir(path), 0700)
+		if err != nil {
+			return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+		}
+		err = os.WriteFile(path, f.Data, 0600)
+		if err != nil {
+			return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+		}
+	}
+
+	nodeDir := filepath.Join(tmp, n.Dir)
+	err = os.MkdirAll(nodeDir, 0700)
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	// The in-process backend writes the config under a random *.cfg name in
+	// the node's directory, so this does too, clear of the node's files.
+	cfgFile, err := os.CreateTemp(nodeDir, "*.cfg")
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	_, err = cfgFile.Write(n.Config)
+	closeErr := cfgFile.Close()
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, closeErr)
+	}
+
+	// A parse error names files by their path in the temporary directory,
+	// which is gone once this returns, so the message names them in the
+	// instance directory instead.
+	cfg, err = conf.ParseFile(cfgFile.Name())
+	if err != nil {
+		scrubbed := strings.ReplaceAll(err.Error(), tmp, nodeInstanceDir(n))
+		return nil, fmt.Errorf("%w: node %s: %s", errConfigParse, n.Name, scrubbed)
+	}
+
+	return cfg, nil
+}
+
+// nodeInstanceDir returns the instance directory node n's files are written
+// under, taken from the node directory its template data names, or "." when
+// that does not end in n.Dir.
+func nodeInstanceDir(n *nodePlan) string {
+	if n.TemplateData == nil {
+		return "."
+	}
+
+	suffix := string(filepath.Separator) + filepath.Clean(n.Dir)
+	serverDir := filepath.Clean(n.TemplateData.ServerDir)
+	if !strings.HasSuffix(serverDir, suffix) {
+		return "."
+	}
+
+	return strings.TrimSuffix(serverDir, suffix)
+}
+
 // tlsInstanceFiles holds on-disk paths for the shared TLS artifacts written
 // once per instance. The server cert/key are reused by every node in the
 // instance — SANs are caller-supplied, so a single leaf covers them all.
@@ -564,6 +702,20 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		return false
 	}
 
+	// The proxies of toxics read a plain CONNECT, so routes and gateways must
+	// not use TLS, and the gateway gate admits only a gateway named for its
+	// cluster. A config these checks cannot read is refused.
+	if spec.Toxics {
+		for _, n := range plan.nodes {
+			code, msg := toxicsConfigRefusal(s.dir, n, "002")
+			if code != "" {
+				s.dropInstance(inst)
+				req.Error(code, msg, nil)
+				return false
+			}
+		}
+	}
+
 	// The instance needs an agent when its clients or links go through a
 	// proxy. The agent starts before the servers, so its listeners are up
 	// before they dial them, and the ports of its route and gateway proxies
@@ -783,8 +935,6 @@ func planErrorCode(err error) string {
 		return "008"
 	case planErrPort:
 		return "006"
-	case planErrRouteTLS:
-		return "019"
 	default:
 		return "002"
 	}
@@ -1512,11 +1662,12 @@ func (s *Service) updateServer(req micro.Request) {
 	}
 
 	// The proxies of toxics read a plain CONNECT, so the revision must not
-	// enable TLS on routes or gateways either.
+	// enable TLS on routes or gateways either, and must name its gateway for
+	// its cluster. A config these checks cannot read is refused.
 	if ms.toxics {
-		err = checkRouteTLS(next)
-		if err != nil {
-			req.Error("019", err.Error(), nil)
+		code, msg := toxicsConfigRefusal(s.dir, next, "009")
+		if code != "" {
+			req.Error(code, msg, nil)
 			return
 		}
 	}

@@ -60,7 +60,17 @@ var (
 	ErrEventPublish = errors.New("could not publish event")
 )
 
-// errRouteTLS is the cause of a create with toxics refused because a node's
-// config enables TLS on its routes or gateways, whose proxies read a plain
-// CONNECT.
+// errRouteTLS is the cause of a create or update with toxics refused because
+// a node's config enables TLS on its routes or gateways, whose proxies read a
+// plain CONNECT.
 var errRouteTLS = errors.New("toxics needs plaintext routes and gateways")
+
+// errGatewayName is the cause of a create or update of a super-cluster with
+// toxics refused because a node's gateway is not named for its cluster, the
+// name the gateway gate admits a connection by.
+var errGatewayName = errors.New("toxics needs each gateway named for its cluster")
+
+// errConfigParse is the cause of a create or update with toxics refused
+// because a node's config does not parse, so the checks of its routes and
+// gateways cannot read it.
+var errConfigParse = errors.New("toxics needs a config that parses")

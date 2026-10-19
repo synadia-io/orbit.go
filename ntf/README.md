@@ -140,7 +140,11 @@ dials it is refused and drops it. A custom `template` must reference `.ClientAdv
 and `.ClusterAdvertise`, and in a super-cluster `.Gateways` and `.GatewayAdvertise` as well, or the create, and an
 update of one of its servers, is refused with `007` naming what is missing. A config that enables TLS on routes or
 gateways is refused with `019`, on create and on update, since the gateway proxies read a plain CONNECT; generated
-TLS on client ports is allowed.
+TLS on client ports is allowed. A `tls` inside one entry of the `gateway` block's `gateways` list is refused the same
+way, naming the entry. In a super-cluster the `gateway` block's `name` must be the node's cluster name, the only
+gateway name its proxies admit, or the create, and an update, is refused with `007` naming the node and the name it
+found or that it found none. These checks parse each node's config with its includes as nats-server reads them, and a
+config that does not parse is refused with `007`, on create and on update, naming the node and the parse error.
 
 A server's `port` reports its client proxy, and the create response and status list every proxy under `links`, each
 with its `name` (`route:<node>-><node>`, `gateway:<cluster>-><node>` or `client:<node>`), `kind`, `from`, `to`, the
