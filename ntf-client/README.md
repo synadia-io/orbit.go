@@ -495,7 +495,9 @@ chance it acts, 1 when nil: toxiproxy rolls it for each stream of each connectio
 chain is rebuilt by adding or removing another toxic. A cut cuts every connection and accepts no toxicity other than
 1. `inst.RemoveToxic(t, name)` removes one, `inst.ClearToxics(t)` removes every toxic, and `inst.ToxicReport(t)` lists
 every link with the toxics on it, and every toxic with the links it resolved to. `Manager.AddToxic`, `RemoveToxic`,
-`ClearToxics` and `ToxicReport` are the same calls by instance ID.
+`ClearToxics` and `ToxicReport` are the same calls by instance ID. `inst.Status(t)` lists the toxics in place as
+`Toxics`, and each change publishes an `events.ToxicAction` on the instance's events, one per toxic `added`,
+`removed` or `cleared`.
 
 A selector names links by what you mean: a `Kind` (`api.ToxicKindRoute`, `ToxicKindGateway` or `ToxicKindClient`;
 empty for every kind), `From` and `To` as a server or a cluster name, and a `Direction`: `api.ToxicDirectionTo` for

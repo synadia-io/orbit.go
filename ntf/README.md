@@ -158,8 +158,9 @@ forwards each to the agent's `agent.Toxics` interface, which an agent declaring 
 and the agent works out the proxies. `add` takes a `toxic`: a `name` unique on the instance, a `selector`, a `type`,
 the `attributes` of that type and a `toxicity`. `remove` takes a `name`, `clear` removes every toxic, and `report`
 lists every link with the toxics on it, and every toxic with the `links` its selector resolved to and `since` when
-it is in place. Callers' toxics never remove or change what the agent keeps on its proxies for itself, the gate of a
-gateway proxy and the cut stages, though cuts act through them.
+it is in place. Status lists the same toxics under `toxics`. Each change publishes a `toxic_action` event carrying the
+toxic, one per toxic `added`, `removed` or `cleared`. Callers' toxics never remove or change what the agent keeps on
+its proxies for itself, the gate of a gateway proxy and the cut stages, though cuts act through them.
 
 A selector names what the caller means rather than a proxy: a `kind` (`route`, `gateway` or `client`; empty selects
 every kind), `from` and `to` as a node or a cluster, and a `direction`: `to` for the data flowing from `from` toward
@@ -228,7 +229,7 @@ into one result. The request and reply are the
 | `tester.toxic.remove`         | Removes one toxic by `name`.                                                |
 | `tester.toxic.clear`          | Removes every toxic of an instance.                                         |
 | `tester.toxic.report`         | Lists every link with its toxics, and every toxic with its links.          |
-| `tester.status`               | Status of every instance, its `shaping_sets` and `links`; optional `instance_id`. |
+| `tester.status`               | Status of every instance, its `shaping_sets`, `links` and `toxics`; optional `instance_id`. |
 | `tester.list`                 | Lightweight summary of every instance (id, kind, servers count).            |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                              |
 | `tester.reset`                | Tears down **every** instance — CI-style global wipe.                       |
@@ -237,6 +238,7 @@ into one result. The request and reply are the
 | `ntf.events.tester.<id>.node.*` | Published by the service when a node is `ready`, `stopped`, `started`, `updated` or `reloaded`. |
 | `ntf.events.tester.<id>.shaping.*` | Published by the agent when a shaping set is `applied` or `cleared`, or a rule `fired`. |
 | `ntf.events.tester.<id>.capture.stored` | Published by the agent when a connection's capture is stored. |
+| `ntf.events.tester.<id>.toxic.*` | Published by the agent when a toxic is `added` or `removed`, and once per toxic when they are `cleared`. |
 
 The subjects above assume the default `Group`. The Go types for these requests and responses live in the `api`
 package, and the events in the `events` package. The service keeps its group's events in the stream

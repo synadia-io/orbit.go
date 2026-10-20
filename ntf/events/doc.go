@@ -46,6 +46,10 @@ shown inside this package, embedded and returned by Schema:
 	    ntf.events.<group>.<instance>.capture.stored
 	    schemas/ntf/event/v1/capture_stored.json
 
+	io.synadia.ntf.event.v1.toxic_action
+	    ntf.events.<group>.<instance>.toxic.<added|removed|cleared>
+	    schemas/ntf/event/v1/toxic_action.json
+
 A breaking change to a type is a new v2 id. An additive field is not, so the
 schemas allow additional properties and an older schema accepts a newer event.
 ParseEvent returns an *UnknownEvent for a type it does not know, so an older
@@ -67,10 +71,10 @@ overlap in subjects.
 # Sources and order
 
 source is service for events the ntf service publishes, the instance and node
-events, and agent for events a network agent publishes, the shaping and capture
-events. backend and chaos are reserved. source_seq counts from 1 per instance
-and source with no gaps, so a reader sees one source's order directly and a
-dropped event shows as a gap.
+events, and agent for events a network agent publishes, the shaping, capture
+and toxic events. backend and chaos are reserved. source_seq counts from 1 per
+instance and source with no gaps, so a reader sees one source's order directly
+and a dropped event shows as a gap.
 
 The order of events is the stream sequence, total across the service and its
 agents. timestamp is the publisher's clock, comparable across components within

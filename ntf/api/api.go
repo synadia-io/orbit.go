@@ -278,6 +278,12 @@ type InstanceStatus struct {
 	// Links lists the proxied links of an instance created with toxics, as the
 	// create response did. Empty for any other instance.
 	Links []Link `json:"links,omitempty"`
+	// Toxics lists the toxics in place on the links of an instance created
+	// with toxics, in the order they were added, each with the links its
+	// selector resolved to and when it was added, as tester.toxic.report
+	// lists them. Empty when none is in place, for any other instance, and
+	// when the agent could not report them.
+	Toxics []ActiveToxic `json:"toxics,omitempty"`
 	// EventsSeq is the stream sequence of the latest of the service's own
 	// events of the instance in its events stream, read before the rest of the
 	// status, so a reader follows the stream after it without a gap. Agent

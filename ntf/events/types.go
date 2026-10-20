@@ -190,3 +190,69 @@ type CaptureStored struct {
 func (e *CaptureStored) EventType() string       { return TypeCaptureStored }
 func (e *CaptureStored) EventCategory() Category { return CategoryCapture }
 func (e *CaptureStored) EventAction() string     { return CaptureStoredAction }
+
+// ToxicEventAction is what happened to a toxic.
+type ToxicEventAction string
+
+const (
+	ToxicAdded   ToxicEventAction = "added"
+	ToxicRemoved ToxicEventAction = "removed"
+	ToxicCleared ToxicEventAction = "cleared"
+)
+
+// ToxicSelector names the links of an instance a toxic acts on. It has the
+// fields and JSON names of the management API's toxic selector, copied so
+// this package imports nothing from ntf.
+type ToxicSelector struct {
+	// Kind is route, gateway or client. Empty selects every kind.
+	Kind string `json:"kind,omitempty"`
+
+	// From is a node or a cluster at one end of the links. Empty matches any.
+	From string `json:"from,omitempty"`
+
+	// To is a node or a cluster at the other end of the links, and the server
+	// of a client link. Empty matches any.
+	To string `json:"to,omitempty"`
+
+	// Node selects every link of one node, both ways.
+	Node string `json:"node,omitempty"`
+
+	// Direction is to, from or both.
+	Direction string `json:"direction,omitempty"`
+}
+
+// ToxicAction is published when a toxic is added to or removed from the
+// links of an instance, one event per toxic. Clearing every toxic publishes
+// one cleared event per toxic removed. Every action carries the toxic as it
+// was applied, so a reader needs no earlier event.
+//
+// NTF Schema Type io.synadia.ntf.event.v1.toxic_action
+type ToxicAction struct {
+	Base
+
+	Action ToxicEventAction `json:"action"`
+
+	// Name is the toxic's name, unique on the instance.
+	Name string `json:"name"`
+
+	// Selector names the links the toxic acts on, with its direction filled
+	// in.
+	Selector ToxicSelector `json:"selector"`
+
+	// ToxicType is the toxic's type, such as cut, latency or lossy.
+	ToxicType string `json:"toxic_type"`
+
+	// Attributes are the toxic's attributes as applied, with defaults
+	// filled in. Absent when there are none, such as for a cut.
+	Attributes map[string]any `json:"attributes,omitempty"`
+
+	// Toxicity is the chance, in [0, 1], that the toxic acts.
+	Toxicity float64 `json:"toxicity"`
+
+	// Links are the names of the links the selector resolved to.
+	Links []string `json:"links"`
+}
+
+func (e *ToxicAction) EventType() string       { return TypeToxicAction }
+func (e *ToxicAction) EventCategory() Category { return CategoryToxic }
+func (e *ToxicAction) EventAction() string     { return string(e.Action) }

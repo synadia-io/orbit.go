@@ -1871,10 +1871,29 @@ func (s *Service) status(req micro.Request) {
 			})
 		}
 		ist.ShapingSets = s.shapingSetIDs(snap.id, snap.agent)
+		ist.Toxics = s.activeToxics(snap.id, snap.toxics)
 		resp.Instances = append(resp.Instances, ist)
 	}
 
 	req.RespondJSON(resp)
+}
+
+// activeToxics returns the toxics in place on the links of an instance, in
+// the order tx reports them. A nil tx, for an instance without link proxies,
+// has none. On an error it logs the error and returns none, so status never
+// fails on it.
+func (s *Service) activeToxics(instanceID string, tx agent.Toxics) []api.ActiveToxic {
+	if tx == nil {
+		return nil
+	}
+
+	_, toxics, err := tx.ToxicReport(context.Background())
+	if err != nil {
+		s.log.Warn("Could not read toxics for status", "instance", instanceID, "err", err)
+		return nil
+	}
+
+	return toxics
 }
 
 // shapingSetIDs returns the ids of the shaping sets applied to a, in the order
@@ -2252,6 +2271,10 @@ type instanceSnapshot struct {
 	eventsSeq uint64
 	// links are the instance's proxied links, nil without toxics.
 	links []api.Link
+	// toxics is the toxics of the agent of an instance with link proxies, or
+	// nil for any other instance. The status handler asks it for the toxics
+	// in place after the lock is released.
+	toxics agent.Toxics
 }
 
 // serverSnapshot is a managed server's reportable state. snapshotInstance reads
@@ -2294,6 +2317,14 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 		srvs = append(srvs, snap)
 	}
 
+	var toxics agent.Toxics
+	if len(inst.links) > 0 {
+		tx, ok := agentOf(inst.Servers).(agent.Toxics)
+		if ok {
+			toxics = tx
+		}
+	}
+
 	return instanceSnapshot{
 		id:          inst.ID,
 		kind:        inst.Kind,
@@ -2302,6 +2333,7 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 		agent:       frontingAgentOf(inst.Servers),
 		eventsSeq:   inst.eventsSeq,
 		links:       slices.Clone(inst.links),
+		toxics:      toxics,
 	}
 }
 

@@ -78,7 +78,7 @@ func (a *fakeAgent) ToxicReport(context.Context) ([]api.LinkToxics, []api.Active
 
 	var active []api.ActiveToxic
 	for _, tx := range a.added {
-		active = append(active, api.ActiveToxic{Toxic: tx, Links: []string{"route:a->b"}})
+		active = append(active, api.ActiveToxic{Toxic: tx, Links: []string{"route:a->b"}, Since: time.Unix(1, 0).UTC()})
 	}
 	links := []api.LinkToxics{{Link: api.Link{Name: "route:a->b", Kind: "route"}}}
 
@@ -157,6 +157,76 @@ func TestToxicCallsAnswerEmptyLists(t *testing.T) {
 	}
 	if !strings.Contains(string(msg.Data), `"cleared":[]`) {
 		t.Errorf("clear response = %s, want an empty cleared list", msg.Data)
+	}
+}
+
+// TestStatusListsToxics proves status lists the toxics the agent of an
+// instance created with toxics reports, with their links and since when, none
+// for an instance without toxics, and none, without failing, when the agent
+// cannot report them.
+func TestStatusListsToxics(t *testing.T) {
+	fake := &fakeAgent{}
+	provider := &fakeProvider{toxics: true, agent: fake}
+	svc := startTestService(t, withAgent(provider))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Toxics: true}, &created)
+	var plain api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Proxy: true}, &plain)
+
+	provider.mu.Lock()
+	starts := provider.starts
+	provider.mu.Unlock()
+	if starts != 2 {
+		t.Fatalf("the provider started %d agents, want one for each instance", starts)
+	}
+
+	status := func(id string) api.InstanceStatus {
+		t.Helper()
+
+		var resp api.StatusResponse
+		mustRequest(t, svc.nc, "tester.status", api.StatusRequest{InstanceID: id}, &resp)
+		if len(resp.Instances) != 1 {
+			t.Fatalf("status lists %d instances, want 1", len(resp.Instances))
+		}
+		return resp.Instances[0]
+	}
+
+	got := status(created.ID).Toxics
+	if len(got) != 0 {
+		t.Fatalf("status before any toxic lists %+v", got)
+	}
+
+	toxic := api.Toxic{Name: "slow", Selector: api.ToxicSelector{Kind: api.ToxicKindRoute}, Type: api.ToxicLatency}
+	var added api.ToxicAddResponse
+	mustRequest(t, svc.nc, "tester.toxic.add", api.ToxicAddRequest{InstanceID: created.ID, Toxic: toxic}, &added)
+
+	want := []api.ActiveToxic{{Toxic: toxic, Links: []string{"route:a->b"}, Since: time.Unix(1, 0).UTC()}}
+	got = status(created.ID).Toxics
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("status toxics = %+v, want %+v", got, want)
+	}
+
+	// The proxied instance has the same agent, which reports slow, but no
+	// links, so status does not ask it.
+	plainStatus := status(plain.ID)
+	if len(plainStatus.Links) != 0 {
+		t.Fatalf("plain instance status = %+v, want no links", plainStatus)
+	}
+	if len(plainStatus.Toxics) != 0 {
+		t.Errorf("status of an instance without toxics lists %+v", plainStatus.Toxics)
+	}
+
+	fake.mu.Lock()
+	fake.toxicErr = errors.New("report failed")
+	fake.mu.Unlock()
+
+	failed := status(created.ID)
+	if len(failed.Toxics) != 0 {
+		t.Errorf("status with a failing report lists %+v", failed.Toxics)
+	}
+	if len(failed.Servers) != 2 {
+		t.Errorf("status with a failing report lists %d servers, want 2", len(failed.Servers))
 	}
 }
 
