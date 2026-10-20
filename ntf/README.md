@@ -118,9 +118,9 @@ again with fresh ports. The agent owns any scratch space it needs.
 every node's client listener, so links can be faulted. The agent must declare the `toxics` capability: with no agent
 selected the request is refused with `014`, and with `018` when the agent does not declare it. `Spec.Links` hands
 the agent its route and gateway proxies, each with the endpoint it listens on and the peer listener it forwards to,
-and `Spec.ClientProxies` the endpoint of each node's client proxy, whose upstream is the live client endpoint once
-the node runs. The service fronts every node through `ClientEdge.Front`, which binds that node's client proxy:
-with `Capture` false the agent returns the client proxy's endpoint, and on the captured first node of a traced or
+`Spec.ClientProxies` the endpoint of each node's client proxy, whose upstream is the live client endpoint once
+the node runs, and `Spec.Nodes` every node with its cluster, which toxic selectors resolve against. The service
+fronts every node through `ClientEdge.Front`, which binds that node's client proxy: with `Capture` false the agent returns the client proxy's endpoint, and on the captured first node of a traced or
 proxied instance the capture proxy forwards to the client proxy, so its chain is client, capture, client proxy,
 server.
 
@@ -150,6 +150,41 @@ A server's `port` reports its client proxy, and the create response and status l
 with its `name` (`route:<node>-><node>`, `gateway:<cluster>-><node>` or `client:<node>`), `kind`, `from`, `to`, the
 `proxy` address it is dialed on (for a client proxy, on the advertise host when one is set) and the `upstream` it
 forwards to.
+
+### Faulting links
+
+`tester.toxic.add`, `remove`, `clear` and `report` fault the links of an instance created with `toxics`. The service
+forwards each to the agent's `agent.Toxics` interface, which an agent declaring the `toxics` capability implements,
+and the agent works out the proxies. `add` takes a `toxic`: a `name` unique on the instance, a `selector`, a `type`,
+the `attributes` of that type and a `toxicity`. `remove` takes a `name`, `clear` removes every toxic, and `report`
+lists every link with the toxics on it, and every toxic with the `links` its selector resolved to and `since` when
+it is in place. Callers' toxics never remove or change what the agent keeps on its proxies for itself, the gate of a
+gateway proxy and the cut stages, though cuts act through them.
+
+A selector names what the caller means rather than a proxy: a `kind` (`route`, `gateway` or `client`; empty selects
+every kind), `from` and `to` as a node or a cluster, and a `direction`: `to` for the data flowing from `from` toward
+`to`, and on a client link toward the server, `from` for the reverse, and `both`, the default. `node` alone selects
+every link of one node, both ways, and cannot be combined with `from` or `to`; a `direction` of `to` or `from` needs
+`from` or `to`. On a route the data from A to B is the upstream of the A to B proxy and the downstream of the B to A
+proxy, since either side may dial a pooled connection. On a gateway it is the upstream of A's proxies to B, since
+messages travel on the sender's connection only; the downstream carries interest. Gateway proxies are shared by every
+node of their source cluster, so a gateway toxic whose `from` is a node acts on its cluster's proxies.
+
+`type` is toxiproxy's `latency`, `bandwidth`, `slow_close`, `timeout`, `reset_peer`, `slicer` or `limit_data`, with
+toxiproxy's attribute names and units, or `cut`. A cut is a blackhole: the proxies keep accepting dials, data is
+dropped both ways, and connections go silent until the servers' ping timers close them, as in a partition. Data
+already inside a later toxic, such as a latency toxic's buffer, is still delivered after a cut starts. A cut that
+names a node also silences that node's connections through the gateway proxies its cluster shares, existing and new,
+so a cut of `{"node": "<node>"}` unplugs the node. A cut always acts both ways, and removing it closes the connections
+that dropped data while it was in place. `toxicity` is the chance that a toxic acts, 1 by default: toxiproxy rolls it
+for each stream of each connection, and again whenever the stream's chain is rebuilt by adding or removing another
+toxic. A cut cuts every connection and accepts no toxicity other than 1.
+
+The toxic calls are refused with `002` without an `instance_id`, `014` when no agent is selected, `018` when the agent
+does not declare `toxics`, `404` for an unknown instance, and `020` for an instance created without `toxics`. A toxic
+the agent refuses for what it asks, such as a name in use or unknown, a selector that matches no link or names an
+unknown node or cluster, a one-way cut, or an unknown attribute or one out of range, is refused with `021` naming the
+toxic and the field. Any other failure of the agent answers `022`.
 
 ## Clocks
 
@@ -182,6 +217,10 @@ into one result. The request and reply are the
 | `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxy of an instance with one. |
 | `tester.shape.clear`          | Removes one shaping set by id, or every set when `set` is empty.            |
 | `tester.shape.report`         | Reports the rule firings of one shaping set, or of every set.               |
+| `tester.toxic.add`            | Adds a named toxic to the links a selector names, on an instance with `toxics`. |
+| `tester.toxic.remove`         | Removes one toxic by `name`.                                                |
+| `tester.toxic.clear`          | Removes every toxic of an instance.                                         |
+| `tester.toxic.report`         | Lists every link with its toxics, and every toxic with its links.          |
 | `tester.status`               | Status of every instance, its `shaping_sets` and `links`; optional `instance_id`. |
 | `tester.list`                 | Lightweight summary of every instance (id, kind, servers count).            |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                              |

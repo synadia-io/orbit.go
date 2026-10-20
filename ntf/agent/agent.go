@@ -44,7 +44,8 @@ const (
 
 	// CapabilityToxics means the agent runs a proxy for each of Spec.Links
 	// and, through ClientEdge.Front, each of Spec.ClientProxies, and faults
-	// the links of an instance. Creates with toxics need it.
+	// the links of an instance through the Toxics interface, which its agents
+	// implement. Creates with toxics and the toxic calls need it.
 	CapabilityToxics Capability = "toxics"
 )
 
@@ -127,6 +128,24 @@ type Spec struct {
 	// until then. The server's live client endpoint, the proxy's upstream, is
 	// known only once the server runs. Empty for any other instance.
 	ClientProxies map[string]backend.Endpoint
+
+	// Nodes are the nodes of an instance created with toxics, in start
+	// order, each with its cluster, which the agent resolves the selectors of
+	// Toxics calls against. Empty for any other instance.
+	Nodes []Node
+}
+
+// Node is one node of an instance.
+type Node struct {
+	// Name is the node's name, the name its links and client proxy use. It
+	// equals the server_name the node's config renders, which a gateway
+	// dialer gives in the INFO it sends after its CONNECT, so an agent can
+	// tell which node a gateway connection comes from. A custom template that
+	// renders another server_name breaks that.
+	Name string
+
+	// Cluster is the cluster the node belongs to, empty for a single server.
+	Cluster string
 }
 
 // Link is a proxy on one link between the nodes of an instance: it listens on
@@ -183,6 +202,58 @@ type ClientEdge interface {
 	// and the client proxy's otherwise. It fails for a server name it already
 	// fronts. A failure to bind a listener wraps ErrListen.
 	Front(ctx context.Context, front Front) (backend.Endpoint, error)
+}
+
+// Toxics is the capability to fault the links of an instance created with
+// toxics. The agents of a provider that declares CapabilityToxics implement
+// it. Every method takes and returns plain values, so each can become a NATS
+// request and reply, and the service calls them concurrently.
+//
+// A toxic names its links with an api.ToxicSelector, which the agent resolves
+// to its proxies and their streams, where the upstream of a proxy carries what
+// its dialer sends and the downstream what it receives:
+//
+//   - On a route, the data from node A to node B is the upstream of the A to B
+//     proxy and the downstream of the B to A proxy, since the pooled route
+//     connections carry data both ways and either side may have dialed.
+//   - On a gateway, every node of the source cluster dials through the proxy to
+//     a node of another cluster, and messages travel on the sender's outbound
+//     connection only, so the data from cluster C to node N is the upstream of
+//     the C to N proxy, and a toxic other than a cut acts on the upstream
+//     alone. A gateway toxic whose from is a node acts on its cluster's
+//     proxies.
+//   - On a client link, the data to the server is the upstream.
+//   - A node alone selects every route, gateway and client link of the node,
+//     both ways.
+//   - A cut always acts on both streams. Where a gateway proxy is shared by
+//     nodes the cut does not name, such as the proxies of a node it unplugs,
+//     it silences only the named nodes' connections through it, identified by
+//     the server_name in the dialer's INFO, which is Node.Name.
+//
+// A call refused for what it asked returns an error wrapping ErrInvalidToxic
+// that names the toxic and the field; any other error is the agent's own
+// failure. No call touches anything the agent keeps on its proxies for itself,
+// such as the gate of a gateway proxy.
+type Toxics interface {
+	// AddToxic validates toxic, resolves its selector and applies it to every
+	// link the selector names, or to none on failure. Its name must not be in
+	// use. It returns the toxic as applied: with its toxicity filled in, the
+	// links it resolved to, and when it was added.
+	AddToxic(ctx context.Context, toxic api.Toxic) (api.ActiveToxic, error)
+
+	// RemoveToxic removes the toxic named name from every link it was applied
+	// to.
+	RemoveToxic(ctx context.Context, name string) error
+
+	// ClearToxics removes every toxic and returns their names in the order
+	// they were added.
+	ClearToxics(ctx context.Context) ([]string, error)
+
+	// ToxicReport returns every proxied link with the toxics on it, routes
+	// and gateways in the order of Spec.Links and then client links in the
+	// order of Spec.Nodes, and every toxic in place in the order they were
+	// added.
+	ToxicReport(ctx context.Context) ([]api.LinkToxics, []api.ActiveToxic, error)
 }
 
 // Agent is a running network agent serving one instance. Every method takes

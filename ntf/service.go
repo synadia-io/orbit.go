@@ -662,6 +662,24 @@ func (s *Service) startServices(name, group string) error {
 		return err
 	}
 
+	toxic := srv.AddGroup("toxic")
+	err = toxic.AddEndpoint("add", micro.HandlerFunc(s.toxicAdd))
+	if err != nil {
+		return err
+	}
+	err = toxic.AddEndpoint("remove", micro.HandlerFunc(s.toxicRemove))
+	if err != nil {
+		return err
+	}
+	err = toxic.AddEndpoint("clear", micro.HandlerFunc(s.toxicClear))
+	if err != nil {
+		return err
+	}
+	err = toxic.AddEndpoint("report", micro.HandlerFunc(s.toxicReport))
+	if err != nil {
+		return err
+	}
+
 	err = srv.AddEndpoint("status", micro.HandlerFunc(s.status))
 	if err != nil {
 		return err

@@ -808,6 +808,74 @@ func (i *Instance) ShapingReport(t testing.TB, setID string) *api.ShapeReportRes
 	return resp
 }
 
+// AddToxic adds toxic to this instance's links. The instance must have been
+// created with WithToxics. See Manager.AddToxic.
+func (i *Instance) AddToxic(t testing.TB, toxic api.Toxic) *api.ToxicAddResponse {
+	t.Helper()
+
+	resp, err := i.m.AddToxic(context.Background(), i.ID, toxic)
+	if err != nil {
+		t.Fatalf("could not add toxic %s: %v", toxic.Name, err)
+	}
+	return resp
+}
+
+// RemoveToxic removes the toxic named name from this instance's links.
+func (i *Instance) RemoveToxic(t testing.TB, name string) *api.ToxicRemoveResponse {
+	t.Helper()
+
+	resp, err := i.m.RemoveToxic(context.Background(), i.ID, name)
+	if err != nil {
+		t.Fatalf("could not remove toxic %s: %v", name, err)
+	}
+	return resp
+}
+
+// ClearToxics removes every toxic from this instance's links.
+func (i *Instance) ClearToxics(t testing.TB) *api.ToxicClearResponse {
+	t.Helper()
+
+	resp, err := i.m.ClearToxics(context.Background(), i.ID)
+	if err != nil {
+		t.Fatalf("could not clear toxics: %v", err)
+	}
+	return resp
+}
+
+// ToxicReport reports every proxied link of this instance with the toxics on
+// it, and every toxic in place.
+func (i *Instance) ToxicReport(t testing.TB) *api.ToxicReportResponse {
+	t.Helper()
+
+	resp, err := i.m.ToxicReport(context.Background(), i.ID)
+	if err != nil {
+		t.Fatalf("could not report toxics: %v", err)
+	}
+	return resp
+}
+
+// Unplug cuts every route, gateway and client link of server, both ways, with a
+// cut named "unplug-<server name>", as pulling its network cable would: its
+// connections go silent until the servers' ping timers close them. It returns
+// restore, which removes the cut. The instance must have been created with
+// WithToxics.
+func (i *Instance) Unplug(t testing.TB, server *api.ManagedServer) (restore func()) {
+	t.Helper()
+
+	if serverName(server) == "" {
+		t.Fatalf("could not unplug: %v", ErrServerRequired)
+	}
+
+	name := "unplug-" + server.Name
+	i.AddToxic(t, api.Toxic{Name: name, Selector: api.ToxicSelector{Node: server.Name}, Type: api.ToxicCut})
+
+	return func() {
+		t.Helper()
+
+		i.RemoveToxic(t, name)
+	}
+}
+
 // Captures returns this instance's captures whose CONNECT name is clientName,
 // ordered by when their connection closed. It waits up to wait for at least want
 // captures to land and fails the test if they do not; a wait of zero or less uses

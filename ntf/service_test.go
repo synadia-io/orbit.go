@@ -149,24 +149,26 @@ func TestNewSuppliedConn(t *testing.T) {
 // startHook, when set, with every spec it is handed, failed or not. The agents
 // call frontGate, when set, as Front begins, record each Front in fronts and
 // return the first of frontErrs while any is left. started lists the agents
-// Start handed back, in order.
+// Start handed back, in order. With hideToxics set, Start hands each agent back
+// behind a wrapper that implements agent.Agent and agent.ClientEdge only.
 type fakeProvider struct {
-	mu        sync.Mutex
-	specs     []agent.Spec
-	closed    bool
-	err       error
-	agent     *fakeAgent
-	opts      agent.Options
-	noCapture bool
-	toxics    bool
-	bindable  map[int]bool
-	startHook func(agent.Spec)
-	starts    int
-	startErrs []error
-	frontErrs []error
-	frontGate func()
-	fronts    []agent.Front
-	started   []*fakeAgent
+	mu         sync.Mutex
+	specs      []agent.Spec
+	closed     bool
+	err        error
+	agent      *fakeAgent
+	opts       agent.Options
+	noCapture  bool
+	toxics     bool
+	hideToxics bool
+	bindable   map[int]bool
+	startHook  func(agent.Spec)
+	starts     int
+	startErrs  []error
+	frontErrs  []error
+	frontGate  func()
+	fronts     []agent.Front
+	started    []*fakeAgent
 }
 
 func (f *fakeProvider) Capabilities() []agent.Capability {
@@ -219,13 +221,26 @@ func (f *fakeProvider) Start(_ context.Context, spec agent.Spec) (agent.Agent, e
 		f.agent.provider = f
 		f.agent.mu.Unlock()
 		f.started = append(f.started, f.agent)
+		if f.hideToxics {
+			return withoutToxics{Agent: f.agent, ClientEdge: f.agent}, nil
+		}
 		return f.agent, nil
 	}
 
 	a := &fakeAgent{port: port, noShaping: true, provider: f}
 	f.started = append(f.started, a)
+	if f.hideToxics {
+		return withoutToxics{Agent: a, ClientEdge: a}, nil
+	}
 
 	return a, nil
+}
+
+// withoutToxics hands back an agent with its agent.Agent and agent.ClientEdge
+// methods only, so it does not implement agent.Toxics.
+type withoutToxics struct {
+	agent.Agent
+	agent.ClientEdge
 }
 
 // front calls frontGate when set, then records a Front one of the provider's
@@ -284,7 +299,8 @@ func (f *fakeProvider) startCount() int {
 // noShaping refuses every shaping method with agent.ErrUnsupported; err, when
 // set, is returned by every shaping method otherwise. Front records itself with
 // provider, the provider that started the agent, and the endpoint is the zero
-// Endpoint until a Front succeeds.
+// Endpoint until a Front succeeds. The toxics methods record what they were
+// handed in added and removed and return toxicErr when it is set.
 type fakeAgent struct {
 	mu        sync.Mutex
 	port      int
@@ -300,6 +316,9 @@ type fakeAgent struct {
 	err       error
 	reports   []api.ShapingReport
 	setIDs    []string
+	added     []api.Toxic
+	removed   []string
+	toxicErr  error
 }
 
 func (a *fakeAgent) Endpoint() backend.Endpoint {

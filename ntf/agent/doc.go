@@ -45,11 +45,37 @@ a remote agent ignores them.
 
 The agent owns any scratch space it needs.
 
+# Faulting links
+
+An agent that declares toxics implements Toxics, which the service forwards
+tester.toxic.add, remove, clear and report to. Callers name links with an
+api.ToxicSelector, never with a proxy's dial direction, and every agent must
+resolve a selector the same way:
+
+  - The upstream of a proxy carries what its dialer sends, the downstream what
+    the dialer receives.
+  - On a route, the data from node A to node B is the upstream of the A to B
+    proxy plus the downstream of the B to A proxy, since the pooled route
+    connections carry data both ways and either side may have dialed.
+  - On a gateway, the proxy from cluster C to node N is shared by every node of
+    C, and messages travel on the sender's outbound connection only, so the
+    data from C to N is the upstream of that proxy. Only a cut acts on its
+    downstream, which carries interest. A selector whose from is a node acts
+    on its cluster's proxies.
+  - On a client link, the data to the server is the upstream.
+  - A node alone selects every route, gateway and client link of the node,
+    both ways.
+  - A cut always acts on both streams, and one-way cuts are refused. A cut
+    that names a node silences that node's connections through the gateway
+    proxies its cluster shares, existing and new, telling them apart by the
+    server_name the dialer's INFO gives, which is Spec.Nodes' Name, so a cut of
+    a node alone unplugs it.
+
 # Growing the agent
 
 Agent does not grow. Later capabilities arrive as separate interfaces an agent
 also implements, declared through a capability list. ClientEdge, which capture
-declares, is the first.
+declares, is the first, and Toxics, which toxics declares, the second.
 
 Provider.Capabilities is that list: capture, shaping and toxics so far, each a
 Capability constant. The service decides what a provider supports from this

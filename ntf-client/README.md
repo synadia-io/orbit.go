@@ -487,6 +487,51 @@ same list. A service whose agent does not declare the `toxics` capability refuse
 with no agent with `014`. Generated TLS on client ports works with it; TLS on routes or gateways is refused with
 error code `019`, on create and on `UpdateServer`.
 
+### Faulting links
+
+An instance created with `WithToxics` takes toxics on its links. `inst.AddToxic(t, toxic)` adds an `api.Toxic`: a
+`Name` unique on the instance, a `Selector` naming the links, a `Type` and its `Attributes`, and a `Toxicity`, the
+chance it acts, 1 when nil: toxiproxy rolls it for each stream of each connection, and again whenever the stream's
+chain is rebuilt by adding or removing another toxic. A cut cuts every connection and accepts no toxicity other than
+1. `inst.RemoveToxic(t, name)` removes one, `inst.ClearToxics(t)` removes every toxic, and `inst.ToxicReport(t)` lists
+every link with the toxics on it, and every toxic with the links it resolved to. `Manager.AddToxic`, `RemoveToxic`,
+`ClearToxics` and `ToxicReport` are the same calls by instance ID.
+
+A selector names links by what you mean: a `Kind` (`api.ToxicKindRoute`, `ToxicKindGateway` or `ToxicKindClient`;
+empty for every kind), `From` and `To` as a server or a cluster name, and a `Direction`: `api.ToxicDirectionTo` for
+the data flowing from `From` toward `To`, and on a client link toward the server, `ToxicDirectionFrom` for the
+reverse, and `ToxicDirectionBoth`, the default; to or from needs `From` or `To`. `Node` alone selects every link of
+one server, both ways. Gateway proxies are shared by every server of their source cluster, so a gateway toxic from a
+server acts on its cluster's gateways.
+
+The types are toxiproxy's `latency`, `bandwidth`, `slow_close`, `timeout`, `reset_peer`, `slicer` and `limit_data`,
+with toxiproxy's attribute names and units (`latency` and `jitter` in ms, `rate` in KB/s, and so on), and `cut`, a
+blackhole that keeps the proxies accepting but drops data both ways, so connections go silent until the servers'
+ping timers close them. Data already inside a later toxic, such as a latency toxic's buffer, is still delivered after
+a cut starts. `inst.Unplug(t, server)` cuts every link of a server and returns a function that restores it:
+
+```go
+client.WithJetStreamCluster(t, 3, func(t testing.TB, nc *nats.Conn, inst *ntf.Instance) {
+    restore := inst.Unplug(t, inst.Servers[2])
+    // ... the cluster carries on without the third server ...
+    restore()
+
+    inst.AddToxic(t, api.Toxic{
+        Name:       "slow-routes",
+        Selector:   api.ToxicSelector{Kind: api.ToxicKindRoute, Node: inst.Servers[0].Name},
+        Type:       api.ToxicLatency,
+        Attributes: map[string]any{"latency": 50, "jitter": 10},
+    })
+}, ntf.WithToxics())
+```
+
+A cut acts both ways, and removing it closes the connections that dropped data while it was in place. The service
+refuses the toxic calls with error code `002` without an instance ID, `014` without an agent, `018` when its agent
+does not declare `toxics`, and `020` for an instance created without `WithToxics`. A toxic the agent refuses for what
+it asks, such as a name in use, a selector that matches no link, a one-way cut, or an attribute that is unknown or out
+of range, is refused with `021`, and the `ntf.ErrService` error names the toxic and the field; any other failure of
+the agent answers `022`.
+
 ## Template environment
 
 When you write a snippet body or a full template (`WithTemplate`), it is rendered with Go `text/template` against this
@@ -547,3 +592,7 @@ debugging):
 | `tester.shape.set`            | Applies a shaping set to a trace-capture instance's proxy.                |
 | `tester.shape.clear`          | Removes one shaping set, or every set, from an instance's proxy.          |
 | `tester.shape.report`         | Reports the firings of one shaping set, or of every set.                  |
+| `tester.toxic.add`            | Adds a named toxic to the links of an instance created with toxics.       |
+| `tester.toxic.remove`         | Removes one toxic by name.                                                |
+| `tester.toxic.clear`          | Removes every toxic of an instance.                                       |
+| `tester.toxic.report`         | Lists every link with its toxics, and every toxic with its links.         |

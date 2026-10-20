@@ -992,7 +992,8 @@ func (s *Service) agentDeclares(c agent.Capability) bool {
 // store is passed to the agent as Spec.Store: true keeps every connection's
 // capture, false forwards and shapes without keeping any. The proxies of plan,
 // which has some only when created with toxics, are passed as Spec.Links and
-// Spec.ClientProxies. The caller must tear the instance down on failure.
+// Spec.ClientProxies, and then its nodes as Spec.Nodes. The caller must tear
+// the instance down on failure.
 func (s *Service) startAgent(inst *instance, advertiseHost string, store bool, plan *instancePlan) (agent.Agent, error) {
 	if s.agents == nil {
 		return nil, fmt.Errorf("trace capture is not configured on this service")
@@ -1001,12 +1002,20 @@ func (s *Service) startAgent(inst *instance, advertiseHost string, store bool, p
 	ctx, cancel := context.WithTimeout(context.Background(), traceSetupTimeout)
 	defer cancel()
 
+	var nodes []agent.Node
+	if plan.clientProxies != nil {
+		for _, n := range plan.nodes {
+			nodes = append(nodes, agent.Node{Name: n.Name, Cluster: n.Cluster})
+		}
+	}
+
 	return s.agents.Start(ctx, agent.Spec{
 		InstanceID:    inst.ID,
 		ListenHost:    advertiseHost,
 		Store:         store,
 		Links:         slices.Clone(plan.proxies),
 		ClientProxies: maps.Clone(plan.clientProxies),
+		Nodes:         nodes,
 	})
 }
 
@@ -2055,6 +2064,175 @@ func (s *Service) shapeReport(req micro.Request) {
 	}
 
 	req.RespondJSON(api.ShapeReportResponse{Sets: sets})
+}
+
+// toxicsFor finds the toxics of the agent of an instance created with toxics.
+// It answers the request itself on any failure and returns nil, so a handler
+// returns when it gets nil back: 002 without an instance id, 014 when no agent
+// is selected, 018 when the agent does not declare toxics, 404 for an unknown
+// instance, 020 for an instance created without toxics, and 022 when the
+// agent declares toxics but does not implement agent.Toxics.
+func (s *Service) toxicsFor(req micro.Request, instanceID string) agent.Toxics {
+	if instanceID == "" {
+		req.Error("002", "Invalid request: instance_id is required", nil)
+		return nil
+	}
+
+	if s.agents == nil {
+		req.Error("014", "toxics is not configured on this service", nil)
+		return nil
+	}
+
+	if !s.agentDeclares(agent.CapabilityToxics) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityToxics), nil)
+		return nil
+	}
+
+	s.mu.Lock()
+	inst, ok := s.instances[instanceID]
+	var servers []*managedServer
+	var proxied bool
+	if ok {
+		servers = slices.Clone(inst.Servers)
+		proxied = len(inst.links) > 0
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		req.Error("404", "Instance not found", nil)
+		return nil
+	}
+
+	a := agentOf(servers)
+	if !proxied || a == nil {
+		req.Error("020", "Instance has no link proxies: create it with toxics", nil)
+		return nil
+	}
+
+	tx, ok := a.(agent.Toxics)
+	if !ok {
+		req.Error("022", fmt.Sprintf("the %q agent declares the %q capability but does not implement agent.Toxics", s.agentName, agent.CapabilityToxics), nil)
+		return nil
+	}
+
+	return tx
+}
+
+// answerToxicError answers req with the error an agent's toxics call
+// returned: 021 with the error's text when the call was refused for what it
+// asked, and 022 with the error's text otherwise.
+func answerToxicError(req micro.Request, err error) {
+	if errors.Is(err, agent.ErrInvalidToxic) {
+		req.Error("021", err.Error(), nil)
+		return
+	}
+
+	req.Error("022", err.Error(), nil)
+}
+
+func (s *Service) toxicAdd(req micro.Request) {
+	s.log.Info("Handling toxic add request")
+
+	creq := api.ToxicAddRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	added, err := tx.AddToxic(context.Background(), creq.Toxic)
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+
+	req.RespondJSON(api.ToxicAddResponse{Toxic: added})
+}
+
+func (s *Service) toxicRemove(req micro.Request) {
+	s.log.Info("Handling toxic remove request")
+
+	creq := api.ToxicRemoveRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	err = tx.RemoveToxic(context.Background(), creq.Name)
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+
+	req.RespondJSON(api.ToxicRemoveResponse{Removed: creq.Name})
+}
+
+func (s *Service) toxicClear(req micro.Request) {
+	s.log.Info("Handling toxic clear request")
+
+	creq := api.ToxicClearRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	cleared, err := tx.ClearToxics(context.Background())
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+	if cleared == nil {
+		cleared = []string{}
+	}
+
+	req.RespondJSON(api.ToxicClearResponse{Cleared: cleared})
+}
+
+func (s *Service) toxicReport(req micro.Request) {
+	s.log.Info("Handling toxic report request")
+
+	creq := api.ToxicReportRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	links, toxics, err := tx.ToxicReport(context.Background())
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+	if links == nil {
+		links = []api.LinkToxics{}
+	}
+	if toxics == nil {
+		toxics = []api.ActiveToxic{}
+	}
+
+	req.RespondJSON(api.ToxicReportResponse{Links: links, Toxics: toxics})
 }
 
 // instanceSnapshot is a lock-released view of an instance's metadata and the

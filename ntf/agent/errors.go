@@ -26,4 +26,11 @@ var (
 	// ClientEdge.Front return an error wrapping it, and the service then runs
 	// the create again with fresh ports.
 	ErrListen = errors.New("could not listen")
+
+	// ErrInvalidToxic means a toxics call was refused for what it asked: a
+	// name that is malformed, in use or unknown, a selector that matches no
+	// link, names an unknown node or cluster or contradicts itself, or a type,
+	// attribute or toxicity the agent does not accept. An agent returns an
+	// error wrapping it, whose text names the toxic and the field.
+	ErrInvalidToxic = errors.New("invalid toxic")
 )
