@@ -67,9 +67,9 @@ type CreateServerRequest struct {
 	Snippets    map[string]string `json:"snippets,omitempty"`
 	Template    string            `json:"template,omitempty"`
 	TLS         *TLSOptions       `json:"tls,omitempty"`
-	// Trace opts the server into a capture proxy on a random port; every connection
-	// that reaches it has its trace stored in the TRACES object store. It implies
-	// Proxy.
+	// Trace opts the server into a capture proxy on a trace port of its own,
+	// which Ports["trace"] reports; every connection that reaches it has its
+	// trace stored in the TRACES object store. It implies Proxy.
 	Trace bool `json:"trace,omitempty"`
 	// Proxy fronts the server with the capture proxy and stores no captures, so
 	// shaping sets apply without filling the store. When Trace is set, Proxy has
@@ -88,11 +88,12 @@ type CreateClusterRequest struct {
 	Snippets    map[string]string `json:"snippets,omitempty"`
 	Template    string            `json:"template,omitempty"`
 	TLS         *TLSOptions       `json:"tls,omitempty"`
-	// Trace fronts the first node of the cluster with a single capture proxy that
-	// stores every connection's trace. It implies Proxy.
+	// Trace fronts every node of the cluster with a capture proxy of its own,
+	// on the trace port its Ports["trace"] reports, that stores every
+	// connection's trace. It implies Proxy.
 	Trace bool `json:"trace,omitempty"`
-	// Proxy fronts the first node with the capture proxy and stores no captures,
-	// so shaping sets apply without filling the store. When Trace is set, Proxy
+	// Proxy fronts every node with a capture proxy and stores no captures, so
+	// shaping sets apply without filling the store. When Trace is set, Proxy
 	// has no effect.
 	Proxy bool `json:"proxy,omitempty"`
 	// Toxics routes every route between the nodes and every node's clients
@@ -109,12 +110,13 @@ type CreateSuperClusterRequest struct {
 	Snippets    map[string]string `json:"snippets,omitempty"`
 	Template    string            `json:"template,omitempty"`
 	TLS         *TLSOptions       `json:"tls,omitempty"`
-	// Trace fronts the first node of the first cluster with a single capture proxy
-	// that stores every connection's trace. It implies Proxy.
+	// Trace fronts every node of every cluster with a capture proxy of its
+	// own, on the trace port its Ports["trace"] reports, that stores every
+	// connection's trace. It implies Proxy.
 	Trace bool `json:"trace,omitempty"`
-	// Proxy fronts the first node of the first cluster with the capture proxy and
-	// stores no captures, so shaping sets apply without filling the store. When
-	// Trace is set, Proxy has no effect.
+	// Proxy fronts every node with a capture proxy and stores no captures, so
+	// shaping sets apply without filling the store. When Trace is set, Proxy
+	// has no effect.
 	Proxy bool `json:"proxy,omitempty"`
 	// Toxics routes every route, every gateway between the clusters and every
 	// node's clients through proxies of the instance's agent, which Links lists.
@@ -135,8 +137,9 @@ type ManagedServer struct {
 	// connection host when building the node's reachable URL.
 	Advertise string `json:"advertise,omitempty"`
 	Running   bool   `json:"running"`
-	// TraceURL is the capture-proxy URL for a server created with trace capture
-	// enabled. Set client-side from Ports["trace"]; empty when not traced.
+	// TraceURL is the URL of the server's own capture proxy, for every server
+	// of an instance created with trace capture enabled. Set client-side from
+	// Ports["trace"]; empty when not traced.
 	TraceURL string `json:"trace_url,omitempty"`
 	// Version is the server version the node runs, in its backend's own version
 	// string. Set by status only; empty when the node could not report it.
@@ -257,8 +260,9 @@ type InstanceStatus struct {
 	Kind        string          `json:"kind"`
 	Servers     []ManagedServer `json:"servers"`
 	// ShapingSets holds the ids of the shaping sets applied to the instance's
-	// capture proxy, in the order they were applied. Empty when the instance has
-	// no proxy or the capturer does not shape.
+	// capture proxies, on every server or on one, in the order they were first
+	// applied. Empty when the instance has no proxy or the capturer does not
+	// shape.
 	ShapingSets []string `json:"shaping_sets,omitempty"`
 	// Backend is the name the backend running the instance's servers was
 	// registered under. Its presence is how a client tells a service whose
@@ -320,13 +324,19 @@ type ReloadServerResponse struct {
 }
 
 // ShapingSet is a named group of traffic shaping rules applied to the connections
-// through an instance's capture proxy whose CONNECT name matches ConnectionName, a
+// through an instance's capture proxies whose CONNECT name matches ConnectionName, a
 // regular expression. Rules are evaluated in order and the first rule that fires
 // takes the frame. The types carry no validation: the capturer compiles a set when
 // it is applied and refuses one it cannot, naming the rule and field.
+//
+// Server, when set, names the one server of the instance whose capture proxy the
+// set applies on, a ManagedServer.Name; a server that is not captured is refused.
+// Empty applies the set on every server's capture proxy. The id is unique across
+// the instance either way.
 type ShapingSet struct {
 	ID             string        `json:"id"`
 	ConnectionName string        `json:"connection_name"`
+	Server         string        `json:"server,omitempty"`
 	Rules          []ShapingRule `json:"rules"`
 }
 
@@ -466,9 +476,9 @@ func (a *ShapingAction) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ShapeSetRequest adds a shaping set to an instance's capture proxy, replacing one
-// with the same id and resetting its counters. The instance must have been created
-// with trace capture.
+// ShapeSetRequest adds a shaping set to an instance's capture proxies, every
+// server's or the one Set.Server names, replacing one with the same id and
+// resetting its counters. The instance must have been created with trace capture.
 type ShapeSetRequest struct {
 	InstanceID string     `json:"instance_id"`
 	Set        ShapingSet `json:"set"`
@@ -500,10 +510,14 @@ type ShapeReportResponse struct {
 	Sets []ShapingReport `json:"sets"`
 }
 
-// ShapingReport lists every time a rule of one set fired.
+// ShapingReport lists every time a rule of one set fired, on every server the set
+// applies on, in the order of their time. Servers counts the firings by the name
+// of the server whose capture proxy they fired on, with an entry, zero included,
+// for every server the set applies on.
 type ShapingReport struct {
 	ID      string          `json:"id"`
 	Firings []ShapingFiring `json:"firings"`
+	Servers map[string]int  `json:"servers,omitempty"`
 }
 
 // ShapingFiring records one rule firing on one frame. FrameID is the frame's id in

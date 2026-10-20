@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -287,6 +288,74 @@ func TestPlanInstanceNodesAndLinks(t *testing.T) {
 	}
 	if plan.ProxyNode != "" {
 		t.Errorf("proxy node = %q without the proxy, want none", plan.ProxyNode)
+	}
+}
+
+// TestPlanInstanceCaptureProxies proves a traced or proxied instance asks for a
+// trace port per node, in start order and after every other address, so its
+// listeners and link proxies get the same ports as the same instance untraced,
+// with and without toxics, and that an untraced instance asks for none.
+func TestPlanInstanceCaptureProxies(t *testing.T) {
+	for _, toxics := range []bool{false, true} {
+		t.Run(fmt.Sprintf("toxics=%t", toxics), func(t *testing.T) {
+			id := nuid.Next()
+			planWith := func(proxy bool) (*instancePlan, *fakePlacement) {
+				place := newFakePlacement(id)
+				spec := instanceSpec{Kind: "cluster", Servers: 3, MainTemplate: serverConfigTemplate, Proxy: proxy, Toxics: toxics}
+				plan, err := planInstance(spec, id, place, server.VERSION)
+				if err != nil {
+					t.Fatalf("planInstance: %v", err)
+				}
+				return plan, place
+			}
+
+			plain, plainPlace := planWith(false)
+			traced, tracedPlace := planWith(true)
+
+			if plain.captureProxies != nil {
+				t.Errorf("untraced plan has capture proxies %v", plain.captureProxies)
+			}
+			for _, call := range plainPlace.proxyCalls {
+				if strings.HasPrefix(call, "trace ") {
+					t.Errorf("untraced plan asked for %q", call)
+				}
+			}
+
+			if !slices.Equal(tracedPlace.calls, plainPlace.calls) {
+				t.Errorf("listener calls = %v traced, want the untraced %v", tracedPlace.calls, plainPlace.calls)
+			}
+			for i, n := range traced.nodes {
+				if !reflect.DeepEqual(n.Listeners, plain.nodes[i].Listeners) {
+					t.Errorf("node %s listeners %v traced, want the untraced %v", n.Name, n.Listeners, plain.nodes[i].Listeners)
+				}
+			}
+			if !reflect.DeepEqual(traced.clientProxies, plain.clientProxies) {
+				t.Errorf("client proxies %v traced, want the untraced %v", traced.clientProxies, plain.clientProxies)
+			}
+
+			want := slices.Clone(plainPlace.proxyCalls)
+			for _, n := range traced.nodes {
+				want = append(want, "trace trace:"+n.Name)
+			}
+			if !slices.Equal(tracedPlace.proxyCalls, want) {
+				t.Errorf("proxy calls = %v, want %v", tracedPlace.proxyCalls, want)
+			}
+
+			if len(traced.captureProxies) != len(traced.nodes) {
+				t.Fatalf("traced plan has %d capture proxies, want %d", len(traced.captureProxies), len(traced.nodes))
+			}
+			seen := map[int]bool{}
+			for _, n := range traced.nodes {
+				ep, ok := traced.captureProxies[n.Name]
+				if !ok {
+					t.Fatalf("node %s has no capture proxy", n.Name)
+				}
+				if seen[ep.Port] {
+					t.Errorf("node %s shares capture proxy port %d", n.Name, ep.Port)
+				}
+				seen[ep.Port] = true
+			}
+		})
 	}
 }
 

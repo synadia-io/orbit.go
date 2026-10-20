@@ -18,8 +18,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -219,6 +221,7 @@ func (f *fakeProvider) Start(_ context.Context, spec agent.Spec) (agent.Agent, e
 		f.agent.mu.Lock()
 		f.agent.port = port
 		f.agent.provider = f
+		f.agent.captures = spec.CaptureProxies
 		f.agent.mu.Unlock()
 		f.started = append(f.started, f.agent)
 		if f.hideToxics {
@@ -227,7 +230,7 @@ func (f *fakeProvider) Start(_ context.Context, spec agent.Spec) (agent.Agent, e
 		return f.agent, nil
 	}
 
-	a := &fakeAgent{port: port, noShaping: true, provider: f}
+	a := &fakeAgent{port: port, noShaping: true, provider: f, captures: spec.CaptureProxies}
 	f.started = append(f.started, a)
 	if f.hideToxics {
 		return withoutToxics{Agent: a, ClientEdge: a}, nil
@@ -244,8 +247,10 @@ type withoutToxics struct {
 }
 
 // front calls frontGate when set, then records a Front one of the provider's
-// agents was handed and returns the error that Front fails with, if any.
-func (f *fakeProvider) front(front agent.Front) error {
+// agents was handed, and whether the trace port the agent binds for it, listen
+// when not zero, could be bound then, and returns the error that Front fails
+// with, if any.
+func (f *fakeProvider) front(front agent.Front, listen int) error {
 	f.mu.Lock()
 	gate := f.frontGate
 	f.mu.Unlock()
@@ -256,6 +261,13 @@ func (f *fakeProvider) front(front agent.Front) error {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if listen != 0 {
+		if f.bindable == nil {
+			f.bindable = map[int]bool{}
+		}
+		f.bindable[listen] = portBindable(listen)
+	}
 
 	f.fronts = append(f.fronts, front)
 	if len(f.frontErrs) == 0 {
@@ -299,11 +311,14 @@ func (f *fakeProvider) startCount() int {
 // noShaping refuses every shaping method with agent.ErrUnsupported; err, when
 // set, is returned by every shaping method otherwise. Front records itself with
 // provider, the provider that started the agent, and the endpoint is the zero
-// Endpoint until a Front succeeds. The toxics methods record what they were
-// handed in added and removed and return toxicErr when it is set.
+// Endpoint until a Front succeeds. A Front with Capture set returns the
+// server's port in captures, the Spec.CaptureProxies Start was handed, and port
+// otherwise. The toxics methods record what they were handed in added and
+// removed and return toxicErr when it is set.
 type fakeAgent struct {
 	mu        sync.Mutex
 	port      int
+	captures  map[string]backend.Endpoint
 	provider  *fakeProvider
 	fronted   bool
 	stopped   bool
@@ -334,9 +349,18 @@ func (a *fakeAgent) Endpoint() backend.Endpoint {
 func (a *fakeAgent) Front(_ context.Context, front agent.Front) (backend.Endpoint, error) {
 	a.mu.Lock()
 	provider := a.provider
+	port := a.port
+	listen := 0
+	if front.Capture {
+		ep, ok := a.captures[front.ServerName]
+		if ok {
+			port = ep.Port
+			listen = ep.Port
+		}
+	}
 	a.mu.Unlock()
 
-	err := provider.front(front)
+	err := provider.front(front, listen)
 	if err != nil {
 		return backend.Endpoint{}, err
 	}
@@ -344,7 +368,7 @@ func (a *fakeAgent) Front(_ context.Context, front agent.Front) (backend.Endpoin
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.fronted = true
-	return backend.Endpoint{Host: "127.0.0.1", Port: a.port}, nil
+	return backend.Endpoint{Host: "127.0.0.1", Port: port}, nil
 }
 
 // isStopped reports whether Stop was called.
@@ -482,10 +506,35 @@ func TestTraceUsesAgent(t *testing.T) {
 	if !spec.Store {
 		t.Error("Store = false, want true for a traced create")
 	}
-
-	if got := created.Servers[0].Ports["trace"]; got != 45001 {
-		t.Errorf("trace port = %d, want the agent's 45001", got)
+	if !fronts[0].Capture {
+		t.Error("Capture = false, want true for a traced create")
 	}
+
+	name := created.Servers[0].Name
+	want := spec.CaptureProxies[name].Port
+	if want == 0 {
+		t.Fatalf("spec has no capture proxy for %q: %v", name, spec.CaptureProxies)
+	}
+	got := created.Servers[0].Ports["trace"]
+	if got != want {
+		t.Errorf("trace port = %d, want the planned capture proxy's %d", got, want)
+	}
+}
+
+// reservedPorts returns the ports the service reserved for the instance id from
+// its managed range.
+func reservedPorts(t *testing.T, svc *Service, id string) []int {
+	t.Helper()
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+
+	inst, ok := svc.instances[id]
+	if !ok {
+		t.Fatalf("instance %s is not registered", id)
+	}
+
+	return slices.Clone(inst.ports)
 }
 
 // TestProxyUsesAgentWithoutStore proves a create with Proxy and no Trace starts
@@ -504,15 +553,19 @@ func TestProxyUsesAgentWithoutStore(t *testing.T) {
 	if specs[0].Store {
 		t.Error("Store = true, want false for a proxy-only create")
 	}
-	if got := created.Servers[0].Ports["trace"]; got != 45001 {
-		t.Errorf("trace port = %d, want the agent's 45001", got)
+	want := specs[0].CaptureProxies[created.Servers[0].Name].Port
+	got := created.Servers[0].Ports["trace"]
+	if got == 0 || got != want {
+		t.Errorf("trace port = %d, want the planned capture proxy's %d", got, want)
 	}
 }
 
-// TestAgentFrontsFirstNodeLiveClient proves a traced cluster create fronts its
-// first node once, with that node's name and live client endpoint, and
-// publishes the trace port on that node only.
-func TestAgentFrontsFirstNodeLiveClient(t *testing.T) {
+// TestAgentFrontsEveryNodeLiveClient proves a traced cluster create fronts
+// every node once, in start order, with Capture set and the node's name and
+// live client endpoint, and publishes on each node a trace port of its own,
+// taken from the managed range, planned in Spec.CaptureProxies and released
+// before that node's Front.
+func TestAgentFrontsEveryNodeLiveClient(t *testing.T) {
 	provider := &fakeProvider{}
 	svc := startTestService(t, withAgent(provider))
 
@@ -523,39 +576,62 @@ func TestAgentFrontsFirstNodeLiveClient(t *testing.T) {
 	if len(started) != 1 {
 		t.Fatalf("provider started %d agents, want 1", len(started))
 	}
-	if len(fronts) != 1 {
-		t.Fatalf("agent was fronted %d times, want 1", len(fronts))
+	if len(fronts) != 3 {
+		t.Fatalf("agent was fronted %d times, want 3", len(fronts))
 	}
 
-	first := created.Servers[0]
-	if fronts[0].ServerName != first.Name {
-		t.Errorf("fronted %q, want the first node %q", fronts[0].ServerName, first.Name)
+	specs, _ := provider.snapshot()
+	captures := specs[0].CaptureProxies
+	if len(captures) != 3 {
+		t.Fatalf("spec has %d capture proxies, want 3: %v", len(captures), captures)
 	}
+
+	reserved := reservedPorts(t, svc, created.ID)
+	seen := map[int]bool{}
 
 	svc.mu.Lock()
-	addrs := svc.instances[created.ID].Servers[0].backendNode.Addresses()
+	servers := slices.Clone(svc.instances[created.ID].Servers)
 	svc.mu.Unlock()
-	var live backend.Endpoint
-	for _, a := range addrs {
-		if a.Name == "client" {
-			live = a.Internal
-		}
-	}
-	if fronts[0].Client != live {
-		t.Errorf("fronted client %+v, want the node's live client endpoint %+v", fronts[0].Client, live)
-	}
-	if fronts[0].Client.Port != first.Port {
-		t.Errorf("fronted client port %d, want the node's client port %d", fronts[0].Client.Port, first.Port)
-	}
 
-	got := first.Ports["trace"]
-	if got != 45001 {
-		t.Errorf("trace port = %d, want the agent's 45001", got)
-	}
-	for _, srv := range created.Servers[1:] {
-		_, ok := srv.Ports["trace"]
-		if ok {
-			t.Errorf("server %q carries a trace port, want only the first", srv.Name)
+	provider.mu.Lock()
+	bindable := maps.Clone(provider.bindable)
+	provider.mu.Unlock()
+
+	for i, srv := range created.Servers {
+		front := fronts[i]
+		if front.ServerName != srv.Name {
+			t.Errorf("front %d named %q, want %q", i, front.ServerName, srv.Name)
+		}
+		if !front.Capture {
+			t.Errorf("node %q fronted without Capture", srv.Name)
+		}
+
+		var live backend.Endpoint
+		for _, a := range servers[i].backendNode.Addresses() {
+			if a.Name == "client" {
+				live = a.Internal
+			}
+		}
+		if front.Client != live {
+			t.Errorf("node %q fronted client %+v, want its live client endpoint %+v", srv.Name, front.Client, live)
+		}
+		if front.Client.Port != srv.Port {
+			t.Errorf("node %q fronted client port %d, want its client port %d", srv.Name, front.Client.Port, srv.Port)
+		}
+
+		got := srv.Ports["trace"]
+		if got == 0 || got != captures[srv.Name].Port {
+			t.Errorf("node %q trace port = %d, want its planned capture proxy's %d", srv.Name, got, captures[srv.Name].Port)
+		}
+		if seen[got] {
+			t.Errorf("node %q shares trace port %d", srv.Name, got)
+		}
+		seen[got] = true
+		if !slices.Contains(reserved, got) {
+			t.Errorf("node %q trace port %d is not from the managed range: %v", srv.Name, got, reserved)
+		}
+		if !bindable[got] {
+			t.Errorf("node %q trace port %d was still held at its Front", srv.Name, got)
 		}
 	}
 }
@@ -633,9 +709,17 @@ func TestAgentStoppedOnReplan(t *testing.T) {
 	if len(fronts) != 1 {
 		t.Errorf("agent was fronted %d times, want 1", len(fronts))
 	}
+	specs, _ := provider.snapshot()
+	if len(specs) != 2 {
+		t.Fatalf("provider saw %d specs, want 2", len(specs))
+	}
 	got := created.Servers[0].Ports["trace"]
-	if got != 45002 {
-		t.Errorf("trace port = %d, want the second agent's 45002", got)
+	want := specs[1].CaptureProxies[created.Servers[0].Name].Port
+	if got == 0 || got != want {
+		t.Errorf("trace port = %d, want the second attempt's planned %d", got, want)
+	}
+	if got == specs[0].CaptureProxies[created.Servers[0].Name].Port {
+		t.Errorf("trace port %d is the failed attempt's, want a fresh one", got)
 	}
 }
 
@@ -1038,7 +1122,8 @@ func exampleShapingSet() api.ShapingSet {
 }
 
 // TestShapeEndpointsReachAgent proves set, clear and report reach the traced
-// instance's agent with the request's arguments and return what it answers.
+// instance's agent with the request's arguments, a set's server included, and
+// return what it answers, a report's per-server counts included.
 func TestShapeEndpointsReachAgent(t *testing.T) {
 	fake := &fakeAgent{reports: []api.ShapingReport{{
 		ID: "lost-ack-30",
@@ -1050,6 +1135,7 @@ func TestShapeEndpointsReachAgent(t *testing.T) {
 			Action:         api.ShapingDrop,
 			Time:           time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC),
 		}},
+		Servers: map[string]int{"n1": 1},
 	}}}
 	svc := startTestService(t, withAgent(&fakeProvider{agent: fake}))
 
@@ -1057,6 +1143,7 @@ func TestShapeEndpointsReachAgent(t *testing.T) {
 	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
 
 	set := exampleShapingSet()
+	set.Server = created.Servers[0].Name
 	var setResp api.ShapeSetResponse
 	mustRequest(t, svc.nc, "tester.shape.set", api.ShapeSetRequest{InstanceID: created.ID, Set: set}, &setResp)
 	if setResp.Set != set.ID {

@@ -241,6 +241,17 @@ type instance struct {
 	// Nil for any other instance. Guarded by Service.mu.
 	links []api.Link
 
+	// agent is the instance's network agent, set with Servers when its create
+	// started one, for trace, proxy or toxics, and never changed after. A
+	// teardown stops it once, before the servers go, so in-flight captures
+	// flush. Nil for any other instance. Guarded by Service.mu.
+	agent agent.Agent
+
+	// captured reports whether agent fronts every server's client port with a
+	// capture proxy, for trace or proxy, so the shaping calls act on it. Set
+	// with agent and never changed after. Guarded by Service.mu.
+	captured bool
+
 	// events is the instance's event lock. A create holds it from making its
 	// servers visible until created and ready are published, and a teardown
 	// from stopping the agents until destroyed is published, so no node event
@@ -296,18 +307,6 @@ type managedServer struct {
 	// every node of the instance, so a node plan is never mutated: updateServer
 	// swaps in a changed copy on success. Guarded by cfgMu.
 	node *nodePlan
-
-	// agent is the network agent fronting this server's client port, set when
-	// the server was created with trace capture enabled, and the instance's
-	// agent on its first server when it was created with toxics. nil
-	// otherwise. Stopped (flushing in-flight captures) before the server is
-	// shut down on teardown.
-	agent agent.Agent
-
-	// fronted reports whether agent fronts this server's client port for trace
-	// or proxy, so the shaping calls act on it. Immutable for the life of the
-	// server.
-	fronted bool
 
 	// toxics reports whether the server's instance was created with toxics,
 	// so an update checks a custom template, and the config it renders, for
@@ -845,7 +844,7 @@ func (s *Service) dropInstance(inst *instance) {
 	s.tearDownInstance(inst, events.ReasonDestroy)
 }
 
-// tearDownInstance stops the agents and the backend of inst, then records its
+// tearDownInstance stops the agent and the backend of inst, then records its
 // destroyed event with reason if it was announced. It holds the instance's
 // event lock throughout, so the event follows every event of the instance.
 func (s *Service) tearDownInstance(inst *instance, reason events.DestroyReason) {
@@ -853,16 +852,13 @@ func (s *Service) tearDownInstance(inst *instance, reason events.DestroyReason) 
 	defer inst.events.Unlock()
 
 	s.mu.Lock()
-	servers := slices.Clone(inst.Servers)
+	netAgent := inst.agent
 	s.mu.Unlock()
 
-	// Stop the agents first, while the connection they may store through is
+	// Stop the agent first, while the connection it may store through is
 	// still up, so in-flight captures flush before the backend servers go away.
-	for _, ms := range servers {
-		if ms.agent == nil {
-			continue
-		}
-		err := ms.agent.Stop(context.Background())
+	if netAgent != nil {
+		err := netAgent.Stop(context.Background())
 		if err != nil {
 			s.log.Error("Failed to stop agent", "instance", inst.ID, "err", err)
 		}

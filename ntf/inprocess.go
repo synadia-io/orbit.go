@@ -526,12 +526,12 @@ func (p *inProcessPlacement) ListenerAddress(node, name string) (backend.Listene
 
 // ProxyAddress reserves a port from the service's port range for the named
 // proxy and returns it on 127.0.0.1 for a route or gateway proxy, and on
-// localhost, where clients reach the nodes, for a client proxy. The listener
-// holding the port is kept on the instance until the service hands the port
-// to the agent. The dead advertise address is reserved the same way on
-// 127.0.0.1, but its listener is closed at once, so a dial to it is refused
-// while the port stays reserved until Teardown. An exhausted range returns an
-// error wrapping ErrPortRangeExhausted.
+// localhost, where clients reach the nodes, for a client or trace proxy. The
+// listener holding the port is kept on the instance until the service hands
+// the port to the agent. The dead advertise address is reserved the same way
+// on 127.0.0.1, but its listener is closed at once, so a dial to it is
+// refused while the port stays reserved until Teardown. An exhausted range
+// returns an error wrapping ErrPortRangeExhausted.
 func (p *inProcessPlacement) ProxyAddress(name, kind string) (backend.Endpoint, error) {
 	port, ln, err := p.backend.svc.reservePort(p.rec.inst)
 	if err != nil {
@@ -539,7 +539,7 @@ func (p *inProcessPlacement) ProxyAddress(name, kind string) (backend.Endpoint, 
 	}
 
 	ep := backend.Endpoint{Host: inProcessProxyHost, Port: port}
-	if kind == "client" {
+	if kind == "client" || kind == "trace" {
 		ep.Host = inProcessHost
 	}
 

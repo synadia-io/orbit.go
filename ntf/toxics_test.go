@@ -1416,10 +1416,10 @@ func TestToxicsCreateRetryUsesFreshProxies(t *testing.T) {
 }
 
 // TestFrontsByOptIn proves which nodes a cluster create fronts, and with what:
-// under toxics every node, in order, with its live client endpoint and Capture
-// set only on the first node of a traced or proxied instance; without toxics
-// only the first node of a traced one. Only a captured node gets a trace port,
-// and the one agent is stopped once on teardown.
+// every node, in order, with its live client endpoint, and Capture set on every
+// node of a traced or proxied instance, with or without toxics. Every captured
+// node gets its own planned trace port, and the one agent, kept on the
+// instance, is stopped once on teardown.
 func TestFrontsByOptIn(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1430,7 +1430,7 @@ func TestFrontsByOptIn(t *testing.T) {
 		{"toxics only", api.CreateClusterRequest{Servers: 3, Toxics: true}, 3, false},
 		{"toxics and proxy", api.CreateClusterRequest{Servers: 3, Toxics: true, Proxy: true}, 3, true},
 		{"toxics and trace", api.CreateClusterRequest{Servers: 3, Toxics: true, Trace: true}, 3, true},
-		{"trace without toxics", api.CreateClusterRequest{Servers: 3, Trace: true}, 1, true},
+		{"trace without toxics", api.CreateClusterRequest{Servers: 3, Trace: true}, 3, true},
 	}
 
 	for _, tt := range tests {
@@ -1465,17 +1465,19 @@ func TestFrontsByOptIn(t *testing.T) {
 					t.Errorf("front of %s dials %s, want its live client %s", srv.Name, front.Client, live)
 				}
 
-				wantCapture := tt.capture && i == 0
-				if front.Capture != wantCapture {
-					t.Errorf("front of %s has Capture %v, want %v", srv.Name, front.Capture, wantCapture)
+				if front.Capture != tt.capture {
+					t.Errorf("front of %s has Capture %v, want %v", srv.Name, front.Capture, tt.capture)
 				}
 			}
 
-			for i, srv := range created.Servers {
-				_, traced := srv.Ports["trace"]
-				wantTraced := tt.capture && i == 0
-				if traced != wantTraced {
-					t.Errorf("server %s has a trace port: %v, want %v", srv.Name, traced, wantTraced)
+			specs, _ := provider.snapshot()
+			for _, srv := range created.Servers {
+				port, traced := srv.Ports["trace"]
+				if traced != tt.capture {
+					t.Errorf("server %s has a trace port: %v, want %v", srv.Name, traced, tt.capture)
+				}
+				if traced && port != specs[0].CaptureProxies[srv.Name].Port {
+					t.Errorf("server %s trace port = %d, want its planned %d", srv.Name, port, specs[0].CaptureProxies[srv.Name].Port)
 				}
 			}
 

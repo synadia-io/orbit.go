@@ -105,6 +105,7 @@ func examples() []Event {
 		&InstanceAction{Base: base(SourceService, 9), Action: InstanceDestroyed, Reason: ReasonReset},
 		&NodeAction{Base: base(SourceService, 2), Action: NodeStopped, Node: "n1", ServerName: "cluster-n1"},
 		&ShapingAction{Base: base(SourceAgent, 1), Action: ShapingApplied, Set: "slow"},
+		&ShapingAction{Base: base(SourceAgent, 6), Action: ShapingApplied, Set: "drop-n3", Server: "cluster-n3"},
 		&ShapingFired{
 			Base:           base(SourceAgent, 2),
 			Set:            "slow",
@@ -114,6 +115,17 @@ func examples() []Event {
 			ConnectionUUID: "c0ffee",
 			ClientName:     "producer",
 			FrameID:        "c0ffee-12",
+			ServerName:     "cluster-n1",
+		},
+		// An agent from before server_name publishes none.
+		&ShapingFired{
+			Base:           base(SourceAgent, 7),
+			Set:            "slow",
+			Rule:           "drop-pub",
+			RuleAction:     "drop",
+			ConnectionUUID: "c0ffee",
+			ClientName:     "producer",
+			FrameID:        "c0ffee-13",
 		},
 		&CaptureStored{
 			Base:           base(SourceAgent, 3),

@@ -51,7 +51,7 @@ func (s *Service) clock(req micro.Request) {
 	s.mu.Lock()
 	var agents []string
 	for id, inst := range s.instances {
-		if agentOf(inst.Servers) != nil {
+		if inst.agent != nil {
 			agents = append(agents, id)
 		}
 	}

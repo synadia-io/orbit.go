@@ -205,12 +205,40 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 		}
 	}
 
-	// 8. The node the capture proxy fronts.
+	// 8. The nodes the capture proxies front, each on a trace port of its own,
+	// asked for after every other address, so an instance without trace or
+	// proxy places exactly as before.
 	if spec.Proxy {
+		err = planCaptureProxies(plan, place)
+		if err != nil {
+			return fail(planErrPort, err)
+		}
 		plan.ProxyNode = plan.nodes[0].Name
 	}
 
 	return plan, nil
+}
+
+// traceProxyName returns the name of the capture proxy in front of node, the
+// name its trace port is asked for and held under.
+func traceProxyName(node string) string {
+	return "trace:" + node
+}
+
+// planCaptureProxies asks place for the trace port of every node of plan, an
+// instance created with trace or proxy, in start order.
+func planCaptureProxies(plan *instancePlan, place backend.Placement) error {
+	plan.captureProxies = map[string]backend.Endpoint{}
+	for _, n := range plan.nodes {
+		name := traceProxyName(n.Name)
+		ep, err := place.ProxyAddress(name, "trace")
+		if err != nil {
+			return fmt.Errorf("%w: proxy %s: %w", errNoFreePort, name, err)
+		}
+		plan.captureProxies[n.Name] = ep
+	}
+
+	return nil
 }
 
 // planRevision returns the next revision of node n, as an update renders it:

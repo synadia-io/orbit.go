@@ -236,19 +236,22 @@ func WithConnectOptions(opts ...nats.Option) createOpt {
 	return func(o *createOptions) { o.connectOptions = append(o.connectOptions, opts...) }
 }
 
-// WithTraceCapture fronts the instance's first server with a capture proxy on a random
-// port. The proxy keeps running for the life of the instance, but using it is opt-in and
-// a separate usage model from the normal connection: the convenience helpers (WithServer,
-// WithCluster, ...) still connect directly to the server, untraced.
+// WithTraceCapture fronts every server of the instance with a capture proxy of its own, on
+// a trace port from the service's range. The proxies keep running for the life of the
+// instance, but using them is opt-in and a separate usage model from the normal
+// connection: the convenience helpers (WithServer, WithCluster, ...) still connect
+// directly to the servers, untraced.
 //
-// To capture, dial the proxy yourself via ManagedServer.TraceURL (or Ports["trace"]), e.g.
-// nats.Connect(inst.Servers[0].TraceURL). Every connection that reaches the proxy has its
-// trace stored, in the expanded format, as an object in the management server's TRACES
-// object store; read them back with Instance.Captures or Instance.TraceStore. The proxy
-// also applies the shaping sets given to Instance.SetShaping.
+// To capture, dial a proxy yourself via its server's ManagedServer.TraceURL (or
+// Ports["trace"]), e.g. nats.Connect(inst.Servers[0].TraceURL). Every connection that
+// reaches a proxy has its trace stored, in the expanded format, as an object in the
+// management server's TRACES object store, with the server it reached; read them back with
+// Instance.Captures or Instance.TraceStore. The proxies also apply the shaping sets given
+// to Instance.SetShaping, on every server or on the one a set's Server names.
 //
-// For a cluster or super-cluster a single proxy fronts the first node, so only that server
-// carries a TraceURL.
+// In a cluster or super-cluster every server carries a TraceURL; the first server's is
+// the one a single trace URL has always been. With WithToxics as well, each proxy forwards
+// through its server's client proxy, so a capture records the faults its client saw.
 //
 // Trace capture is plaintext-only and is rejected in combination with WithGeneratedTLS.
 func WithTraceCapture() createOpt {
@@ -771,9 +774,9 @@ func (i *Instance) TraceStore(t testing.TB) jetstream.ObjectStore {
 	return store
 }
 
-// SetShaping applies set to this instance's capture proxy, replacing a set with the
-// same ID and resetting its counters. The instance must have been created with
-// WithTraceCapture.
+// SetShaping applies set to this instance's capture proxies, on every server or on the
+// one set.Server names, replacing a set with the same ID and resetting its counters.
+// The instance must have been created with WithTraceCapture.
 func (i *Instance) SetShaping(t testing.TB, set api.ShapingSet) *api.ShapeSetResponse {
 	t.Helper()
 
@@ -785,7 +788,7 @@ func (i *Instance) SetShaping(t testing.TB, set api.ShapingSet) *api.ShapeSetRes
 }
 
 // ClearShaping removes the shaping set with ID setID from this instance's capture
-// proxy, or every set when setID is empty.
+// proxies, or every set when setID is empty.
 func (i *Instance) ClearShaping(t testing.TB, setID string) *api.ShapeClearResponse {
 	t.Helper()
 
@@ -797,7 +800,8 @@ func (i *Instance) ClearShaping(t testing.TB, setID string) *api.ShapeClearRespo
 }
 
 // ShapingReport reports every firing of the shaping set with ID setID on this
-// instance's capture proxy, or of every set when setID is empty.
+// instance's capture proxies, or of every set when setID is empty, each set's
+// firings merged across its servers with a count per server in Servers.
 func (i *Instance) ShapingReport(t testing.TB, setID string) *api.ShapeReportResponse {
 	t.Helper()
 

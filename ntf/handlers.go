@@ -672,9 +672,9 @@ func setSpecTLS(spec *instanceSpec, opts *api.TLSOptions) {
 // createFromSpec runs the part of a create attempt every kind of instance
 // shares, once the request is validated and inst is registered. It asks the
 // backend for a placement, plans inst from spec against it, starts the agent
-// when the instance needs one, provisions the plan, fronts the plan's proxy
-// node, and every node of an instance with toxics, with the agent, publishes
-// the nodes and answers req with the create response.
+// when the instance needs one, provisions the plan, fronts every node of an
+// instance with trace, proxy or toxics with the agent, publishes the nodes and
+// answers req with the create response.
 //
 // It answers req itself, unless a node or the agent could not listen and final
 // is false: it then stops the agent, tears down everything the attempt started
@@ -823,18 +823,17 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 
 		ms := &managedServer{backendNode: node, instanceID: inst.ID, rootDir: filepath.Join(place.InstanceDir(), n.Dir), ports: ports, clientPort: clientPort, advertiseHost: spec.AdvertiseHost, node: n, toxics: spec.Toxics}
 
-		// The agent of an instance with toxics is kept on its first node's
-		// record, which teardown stops it from.
-		if spec.Toxics && i == 0 {
-			ms.agent = netAgent
+		// Front the node's client listener with the agent: with a capture
+		// proxy on the node's own trace port for trace or proxy, and with its
+		// client proxy alone under toxics alone, before the node is published
+		// so its trace port is set atomically. The trace port is handed to the
+		// agent here, just before the agent call that binds it. The live client
+		// address is fronted, since a custom template may set its own client
+		// port.
+		capture := spec.Proxy
+		if capture {
+			s.releaseProxyHolds(inst.ID, []string{traceProxyName(n.Name)})
 		}
-
-		// Front the node's client listener with the agent when the plan
-		// captures it, and every node with its client proxy under toxics,
-		// before the node is published so its trace port and agent are set
-		// atomically. The live client address is fronted, since a custom
-		// template may set its own client port.
-		capture := n.Name == plan.ProxyNode
 		if capture || spec.Toxics {
 			ep, terr := s.frontClient(netAgent, agent.Front{ServerName: n.Name, Client: client.Internal, Capture: capture})
 			if terr != nil {
@@ -847,8 +846,6 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 				return false
 			}
 			if capture {
-				ms.agent = netAgent
-				ms.fronted = true
 				if ports == nil {
 					ports = map[string]int{}
 				}
@@ -892,6 +889,8 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	if alive {
 		inst.Servers = servers
 		inst.links = resp.Links
+		inst.agent = netAgent
+		inst.captured = spec.Proxy
 	}
 	s.mu.Unlock()
 
@@ -992,8 +991,9 @@ func (s *Service) agentDeclares(c agent.Capability) bool {
 // store is passed to the agent as Spec.Store: true keeps every connection's
 // capture, false forwards and shapes without keeping any. The proxies of plan,
 // which has some only when created with toxics, are passed as Spec.Links and
-// Spec.ClientProxies, and then its nodes as Spec.Nodes. The caller must tear
-// the instance down on failure.
+// Spec.ClientProxies, and then its nodes as Spec.Nodes. Its trace ports, which
+// it has only when created with trace or proxy, are passed as
+// Spec.CaptureProxies. The caller must tear the instance down on failure.
 func (s *Service) startAgent(inst *instance, advertiseHost string, store bool, plan *instancePlan) (agent.Agent, error) {
 	if s.agents == nil {
 		return nil, fmt.Errorf("trace capture is not configured on this service")
@@ -1010,12 +1010,13 @@ func (s *Service) startAgent(inst *instance, advertiseHost string, store bool, p
 	}
 
 	return s.agents.Start(ctx, agent.Spec{
-		InstanceID:    inst.ID,
-		ListenHost:    advertiseHost,
-		Store:         store,
-		Links:         slices.Clone(plan.proxies),
-		ClientProxies: maps.Clone(plan.clientProxies),
-		Nodes:         nodes,
+		InstanceID:     inst.ID,
+		ListenHost:     advertiseHost,
+		Store:          store,
+		Links:          slices.Clone(plan.proxies),
+		ClientProxies:  maps.Clone(plan.clientProxies),
+		CaptureProxies: maps.Clone(plan.captureProxies),
+		Nodes:          nodes,
 	})
 }
 
@@ -1965,8 +1966,9 @@ func (s *Service) list(req micro.Request) {
 	req.RespondJSON(resp)
 }
 
-// agentFor finds the agent fronting an instance. It answers the request itself
-// on any failure and returns nil, so a handler returns when it gets nil back.
+// agentFor finds the agent capturing the servers of an instance. It answers the
+// request itself on any failure and returns nil, so a handler returns when it
+// gets nil back.
 func (s *Service) agentFor(req micro.Request, instanceID string) agent.Agent {
 	if instanceID == "" {
 		req.Error("002", "Invalid request: instance_id is required", nil)
@@ -1975,9 +1977,9 @@ func (s *Service) agentFor(req micro.Request, instanceID string) agent.Agent {
 
 	s.mu.Lock()
 	inst, ok := s.instances[instanceID]
-	var servers []*managedServer
+	var a agent.Agent
 	if ok {
-		servers = slices.Clone(inst.Servers)
+		a = capturingAgentOf(inst)
 	}
 	s.mu.Unlock()
 
@@ -1986,7 +1988,6 @@ func (s *Service) agentFor(req micro.Request, instanceID string) agent.Agent {
 		return nil
 	}
 
-	a := frontingAgentOf(servers)
 	if a == nil {
 		req.Error("015", "Instance has no trace proxy", nil)
 		return nil
@@ -2109,10 +2110,10 @@ func (s *Service) toxicsFor(req micro.Request, instanceID string) agent.Toxics {
 
 	s.mu.Lock()
 	inst, ok := s.instances[instanceID]
-	var servers []*managedServer
+	var a agent.Agent
 	var proxied bool
 	if ok {
-		servers = slices.Clone(inst.Servers)
+		a = inst.agent
 		proxied = len(inst.links) > 0
 	}
 	s.mu.Unlock()
@@ -2122,7 +2123,6 @@ func (s *Service) toxicsFor(req micro.Request, instanceID string) agent.Toxics {
 		return nil
 	}
 
-	a := agentOf(servers)
 	if !proxied || a == nil {
 		req.Error("020", "Instance has no link proxies: create it with toxics", nil)
 		return nil
@@ -2319,7 +2319,7 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 
 	var toxics agent.Toxics
 	if len(inst.links) > 0 {
-		tx, ok := agentOf(inst.Servers).(agent.Toxics)
+		tx, ok := inst.agent.(agent.Toxics)
 		if ok {
 			toxics = tx
 		}
@@ -2330,37 +2330,24 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 		kind:        inst.Kind,
 		description: inst.Description,
 		servers:     srvs,
-		agent:       frontingAgentOf(inst.Servers),
+		agent:       capturingAgentOf(inst),
 		eventsSeq:   inst.eventsSeq,
 		links:       slices.Clone(inst.links),
 		toxics:      toxics,
 	}
 }
 
-// agentOf returns the agent fronting one of servers, or nil when none is
-// fronted. agent is set before a server joins its instance and never changes
-// afterwards, so the caller may read the result without holding s.mu.
-func agentOf(servers []*managedServer) agent.Agent {
-	for _, ms := range servers {
-		if ms.agent != nil {
-			return ms.agent
-		}
+// capturingAgentOf returns the agent of inst when it captures the instance's
+// servers for trace or proxy, which the shaping calls act on, or nil
+// otherwise. The agent of an instance created with toxics alone does not
+// count. The caller must hold s.mu; agent and captured never change once set,
+// so the result may be used after the lock is released.
+func capturingAgentOf(inst *instance) agent.Agent {
+	if !inst.captured {
+		return nil
 	}
-	return nil
-}
 
-// frontingAgentOf returns the agent of the one of servers it fronts for trace
-// or proxy, which the shaping calls act on, or nil when none is fronted. The
-// agent an instance created with toxics alone keeps on its first server does
-// not count. Like agent, fronted never changes once the server joins its
-// instance.
-func frontingAgentOf(servers []*managedServer) agent.Agent {
-	for _, ms := range servers {
-		if ms.fronted {
-			return ms.agent
-		}
-	}
-	return nil
+	return inst.agent
 }
 
 // findServerByName scans every instance for a server whose runtime name matches,

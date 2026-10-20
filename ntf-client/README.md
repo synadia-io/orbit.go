@@ -402,9 +402,9 @@ Beyond `Destroy`, an instance exposes per-server and whole-instance operations:
 
 ### Trace capture
 
-`WithTraceCapture` fronts the instance's first server with an in-process capture proxy on a random port. The
-convenience helpers still connect directly to the server (untraced); to capture, dial the proxy yourself via
-`ManagedServer.TraceURL`. Every connection through the proxy has its trace stored — in the
+`WithTraceCapture` fronts every server of the instance with a capture proxy of its own, on a trace port from the
+service's range. The convenience helpers still connect directly to the servers (untraced); to capture, dial a proxy
+yourself via its server's `ManagedServer.TraceURL`. Every connection through a proxy has its trace stored — in the
 [Trace Assert](https://github.com/synadia-labs/traceassert) expanded format — as an object in the management server's
 `TRACES` JetStream object store.
 
@@ -452,9 +452,12 @@ data, err := captures[0].Read(ctx)
 `Manager.Captures(ctx, instanceID, name, want)` is the same call bounded by `ctx` instead, returning
 `ntf.ErrCaptureWait` when fewer than `want` captures land in time.
 
-The proxy of a trace-capture instance also shapes traffic: `inst.SetShaping(t, set)` applies an `api.ShapingSet` to the
-connections whose CONNECT name matches the set's `ConnectionName` regular expression, `inst.ShapingReport(t, setID)`
-lists every time its rules fired, and `inst.ClearShaping(t, setID)` removes it (an empty `setID` means every set):
+The proxies of a trace-capture instance also shape traffic: `inst.SetShaping(t, set)` applies an `api.ShapingSet` to the
+connections whose CONNECT name matches the set's `ConnectionName` regular expression, on every server, or on the one
+server the set's `Server` names; a server the instance does not capture is refused. `inst.ShapingReport(t, setID)`
+lists every time its rules fired, merged across its servers in time order, with the number of firings on each server
+in `Servers`, and `inst.ClearShaping(t, setID)` removes it (an empty `setID` means every set). A set's ID is unique
+across the instance, so setting it again with another `Server` moves it:
 
 ```go
 inst.SetShaping(t, api.ShapingSet{
@@ -472,7 +475,9 @@ inst.SetShaping(t, api.ShapingSet{
 Trace capture is plaintext-only and is rejected in combination with `WithGeneratedTLS`. A service whose agent does
 not declare the `capture` capability refuses it with error code `018`, an `ntf.ErrService` error naming the agent
 and the capability; status reports the agent as `agent` and its capabilities as `agent_capabilities`. On a cluster
-or super-cluster only the first node carries a `TraceURL`. The management server always runs JetStream, which also keeps every
+or super-cluster every node carries a `TraceURL`, and the first node's is the one a single trace URL has always been.
+With `WithToxics` as well, each capture proxy forwards through its node's client proxy, so a capture records the
+faults its client saw. The management server always runs JetStream, which also keeps every
 instance's events, whether or not any instance traces. Captures hold full payloads and headers,
 including the CONNECT frame, so treat the `TRACES` store as sensitive.
 
@@ -591,8 +596,8 @@ debugging):
 | `tester.list`                 | Lightweight summary of every instance.                                    |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                            |
 | `tester.reset`                | Tears down **every** instance — CI-style global wipe.                     |
-| `tester.shape.set`            | Applies a shaping set to a trace-capture instance's proxy.                |
-| `tester.shape.clear`          | Removes one shaping set, or every set, from an instance's proxy.          |
+| `tester.shape.set`            | Applies a shaping set to a trace-capture instance's proxies, or to one `server`'s. |
+| `tester.shape.clear`          | Removes one shaping set, or every set, from an instance's proxies.        |
 | `tester.shape.report`         | Reports the firings of one shaping set, or of every set.                  |
 | `tester.toxic.add`            | Adds a named toxic to the links of an instance created with toxics.       |
 | `tester.toxic.remove`         | Removes one toxic by name.                                                |

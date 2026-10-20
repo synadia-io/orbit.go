@@ -70,8 +70,10 @@ type InstancePlan struct {
 	// generated TLS material. Their paths do not start with any node's Dir.
 	Files []File
 
-	// ProxyNode names the node whose client listener the service fronts with
-	// its capture proxy. Empty when the instance has none.
+	// ProxyNode names the first of the nodes whose client listeners the
+	// service fronts with capture proxies, every node of an instance created
+	// with trace or proxy. Its trace port is the instance's first trace URL.
+	// Empty when the instance has none.
 	ProxyNode string
 }
 

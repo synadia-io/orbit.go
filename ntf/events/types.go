@@ -99,8 +99,9 @@ const (
 )
 
 // ShapingAction is published when a shaping set is applied to or cleared from
-// an instance's capture proxy, one event per set. Clearing every set publishes
-// one cleared event per set removed.
+// an instance's capture proxies, one event per set whatever the number of
+// servers it applies on. Clearing every set publishes one cleared event per set
+// removed.
 //
 // NTF Schema Type io.synadia.ntf.event.v1.shaping_action
 type ShapingAction struct {
@@ -110,6 +111,10 @@ type ShapingAction struct {
 
 	// Set is the shaping set's id.
 	Set string `json:"set"`
+
+	// Server is the one server the set applies on, its server field, and
+	// empty, and omitted, when it applies on every captured server.
+	Server string `json:"server,omitempty"`
 }
 
 func (e *ShapingAction) EventType() string       { return TypeShapingAction }
@@ -148,6 +153,10 @@ type ShapingFired struct {
 
 	// FrameID is the id of the frame the rule acted on in the capture.
 	FrameID string `json:"frame_id"`
+
+	// ServerName is the name of the server whose capture proxy the rule fired
+	// on, as capture_stored's server_name gives it.
+	ServerName string `json:"server_name,omitempty"`
 }
 
 func (e *ShapingFired) EventType() string       { return TypeShapingFired }

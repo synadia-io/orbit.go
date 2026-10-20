@@ -32,9 +32,9 @@ type Capability string
 
 const (
 	// CapabilityCapture means the provider's agents implement ClientEdge,
-	// fronting a managed server's client listener and, when Spec.Store is
-	// true, keeping the captures of the connections through it. Creates with
-	// trace or proxy need it.
+	// fronting each managed server's client listener with a capture proxy
+	// and, when Spec.Store is true, keeping the captures of the connections
+	// through it. Creates with trace or proxy need it.
 	CapabilityCapture Capability = "capture"
 
 	// CapabilityShaping means Agent.Shape, ClearShaping, ShapingReport and
@@ -129,6 +129,16 @@ type Spec struct {
 	// known only once the server runs. Empty for any other instance.
 	ClientProxies map[string]backend.Endpoint
 
+	// CaptureProxies are the capture proxies of an instance created with trace
+	// or proxy, one for every node, keyed by the name of the managed server
+	// each one fronts, which is the Front.ServerName the service fronts that
+	// server with. Each is the endpoint of the proxy as placement returned it;
+	// the agent binds its port on ListenHost when the service fronts that
+	// server with ClientEdge.Front and Front.Capture set, never at Start, since
+	// the backend may hold the port until then. A server with no entry gets a
+	// capture proxy on a port the OS chooses. Empty for any other instance.
+	CaptureProxies map[string]backend.Endpoint
+
 	// Nodes are the nodes of an instance created with toxics, in start
 	// order, each with its cluster, which the agent resolves the selectors of
 	// Toxics calls against. Empty for any other instance.
@@ -183,19 +193,20 @@ type Front struct {
 	// agent dials.
 	Client backend.Endpoint
 
-	// Capture puts a capture proxy in front of the server: clients dial it,
-	// and it forwards to the server's client proxy in Spec.ClientProxies when
-	// it has one, or to Client otherwise. False fronts the server with its
-	// client proxy alone, which only an instance created with toxics has.
+	// Capture puts a capture proxy in front of the server, on its endpoint in
+	// Spec.CaptureProxies: clients dial it, and it forwards to the server's
+	// client proxy in Spec.ClientProxies when it has one, or to Client
+	// otherwise. False fronts the server with its client proxy alone, which
+	// only an instance created with toxics has.
 	Capture bool
 }
 
 // ClientEdge is the capability to front a managed server's client listener.
 // The agents of a provider that declares CapabilityCapture or
-// CapabilityToxics implement it. The service calls Front once the server runs,
-// before clients learn of it: with Capture set for the server of a traced or
-// proxied instance whose clients are captured, and, for an instance created
-// with toxics, for every server, with Capture false for the others.
+// CapabilityToxics implement it. The service calls Front once each server
+// runs, before clients learn of it: with Capture set for every server of a
+// traced or proxied instance, and, for an instance created with toxics alone,
+// for every server with Capture false.
 type ClientEdge interface {
 	// Front starts forwarding to front.Client and returns the endpoint
 	// clients dial instead: the capture proxy's when front.Capture is set,
@@ -262,26 +273,35 @@ type Toxics interface {
 // The service calls an agent's methods concurrently, including while Stop runs
 // and after it returns.
 //
-// The shaping methods act on the connections through the first server the
-// agent fronts with Front.Capture set. An agent without shaping refuses Shape,
-// ClearShaping, ShapingReport and ShapingSets with ErrUnsupported.
+// The shaping methods act on the connections through the servers the agent
+// fronts with Front.Capture set, the captured servers. A set is known by its
+// id across the instance: one with an empty Server applies on every captured
+// server, and one naming a server exists on that server alone. An agent
+// without shaping refuses Shape, ClearShaping, ShapingReport and ShapingSets
+// with ErrUnsupported.
 type Agent interface {
 	// Endpoint returns where clients dial instead of the first managed server
 	// the agent fronts. It is the zero Endpoint until ClientEdge.Front first
 	// returns, and fixed after that.
 	Endpoint() backend.Endpoint
 
-	// Shape adds a set, replacing one with the same id and resetting its
-	// counters. Its error names the rule and field it could not apply, and
-	// reaches the caller as is.
+	// Shape adds a set on every captured server, or on set.Server alone when
+	// it is not empty, replacing one with the same id and resetting its
+	// counters. A replaced set leaves the servers the new set does not apply
+	// on. Its error names the rule and field it could not apply, or a
+	// set.Server that is not a captured server, and reaches the caller as is;
+	// nothing changes on an error.
 	Shape(ctx context.Context, set api.ShapingSet) error
 
-	// ClearShaping removes the set id, or every set when id is empty, and
-	// returns the ids removed.
+	// ClearShaping removes the set id, or every set when id is empty, from
+	// every server it applies on, and returns the ids removed.
 	ClearShaping(ctx context.Context, id string) ([]string, error)
 
 	// ShapingReport returns the firings of the set id, or of every set when
-	// id is empty.
+	// id is empty, one report per set, in the order ShapingSets returns.
+	// Each report merges the firings on every server the set applies on, in
+	// the order of their time, and counts them per server in
+	// api.ShapingReport.Servers.
 	ShapingReport(ctx context.Context, id string) ([]api.ShapingReport, error)
 
 	// ShapingSets returns the ids of the sets applied, in the order they were

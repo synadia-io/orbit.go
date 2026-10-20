@@ -81,6 +81,10 @@
     "frame_id": {
       "type": "string",
       "description": "The id of the frame the rule acted on in the capture"
+    },
+    "server_name": {
+      "type": "string",
+      "description": "The name of the server whose capture proxy the rule fired on, as capture_stored gives it"
     }
   }
 }

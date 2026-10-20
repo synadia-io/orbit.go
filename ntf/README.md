@@ -82,8 +82,9 @@ connection's capture, and `proxy` to front it with the same proxy and store noth
 `trace` implies `proxy`. The service does not implement capture itself: a network agent, defined in package
 `agent`, does. `Options.Agents` registers agent factories by name and `Options.Agent` selects one; with none
 selected those requests are refused with error code `014`, and with `018` when the selected agent does not declare
-the `capture` capability. Only the first node of a cluster or super-cluster is fronted, and combining either flag
-with generated TLS is rejected because the proxy forwards plaintext.
+the `capture` capability. Every node is fronted by a capture proxy of its own, on a trace port from the service's
+range that its `ports["trace"]` reports; the first node's is the instance's trace URL for callers that dial one.
+Combining either flag with generated TLS is rejected with `013` because the proxy forwards plaintext.
 
 ```go
 type Factory func(ctx context.Context, opts Options) (Provider, error)
@@ -105,12 +106,19 @@ the embedded server, which is nil when the service runs on a supplied connection
 
 An agent serves an instance. `Start` runs before the instance's servers start, with a `Spec` naming the instance,
 the host to listen on (the node's `client_advertise`, which must name a local interface), and `Store`, which is
-true for `trace` and false for `proxy` alone; the agent keeps captures only when it is true. Once the servers run,
-the service fronts the first node through `ClientEdge.Front`, which an agent declaring `capture` implements, with
-the node's name, its live client endpoint and `Capture` set, and gets back the endpoint clients reach instead of the
-managed server's own. The `Agent` answers the `tester.shape.*` endpoints and is stopped by the service on teardown and when a create
+true for `trace` and false for `proxy` alone; the agent keeps captures only when it is true. `Spec.CaptureProxies`
+holds each node's trace port, which placement reserves with `ProxyAddress` kind `trace`; the agent binds it when the
+node is fronted, and a node with no entry gets a port the OS chooses. Once the servers run, the service fronts every
+node through `ClientEdge.Front`, which an agent declaring `capture` implements, with the node's name, its live
+client endpoint and `Capture` set, and gets back the endpoint clients reach instead of the managed server's own.
+The `Agent` answers the `tester.shape.*` endpoints and is stopped once by the service on teardown and when a create
 fails. A `Start` or `Front` that could not bind returns an error wrapping `agent.ErrListen`, and the create runs
 again with fresh ports. The agent owns any scratch space it needs.
+
+A shaping set applies on every node's capture proxy, or, with `server` set to a server's name, on that node's alone;
+a server that is not captured is refused with `017`. A set's id is unique across the instance, and setting it again
+moves it to the nodes the new set names. `tester.shape.report` returns one report per set with the firings of every
+node merged in time order and `servers`, the number of firings on each node the set applies on.
 
 ## Link proxies
 
@@ -120,9 +128,9 @@ selected the request is refused with `014`, and with `018` when the agent does n
 the agent its route and gateway proxies, each with the endpoint it listens on and the peer listener it forwards to,
 `Spec.ClientProxies` the endpoint of each node's client proxy, whose upstream is the live client endpoint once
 the node runs, and `Spec.Nodes` every node with its cluster, which toxic selectors resolve against. The service
-fronts every node through `ClientEdge.Front`, which binds that node's client proxy: with `Capture` false the agent returns the client proxy's endpoint, and on the captured first node of a traced or
-proxied instance the capture proxy forwards to the client proxy, so its chain is client, capture, client proxy,
-server.
+fronts every node through `ClientEdge.Front`, which binds that node's client proxy: with `Capture` false the
+agent returns the client proxy's endpoint, and on every node of a traced or proxied instance the capture proxy
+forwards to the client proxy, so its chain is client, capture, client proxy, server.
 
 The configs dial the proxies: `.Routes` lists the route proxy for each peer, and `.Gateways` lists, for each other
 cluster, the proxies the node's cluster shares to that cluster's nodes. Three template variables, empty without
@@ -222,7 +230,7 @@ into one result. The request and reply are the
 | `tester.start.instance`       | Revives a previously-stopped instance.                                      |
 | `tester.update.server`        | Renders a new on-disk config for a server. Optional `snippets`, `template`. |
 | `tester.reload.server`        | Signals a running server to re-read its on-disk config.                     |
-| `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxy of an instance with one. |
+| `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxies of an instance with them, or on one `server`'s. |
 | `tester.shape.clear`          | Removes one shaping set by id, or every set when `set` is empty.            |
 | `tester.shape.report`         | Reports the rule firings of one shaping set, or of every set.               |
 | `tester.toxic.add`            | Adds a named toxic to the links a selector names, on an instance with `toxics`. |
@@ -236,7 +244,7 @@ into one result. The request and reply are the
 | `tester.clock`                | Reports each participant's clock against the service host's. Optional `extra` clock subjects. |
 | `ntf.events.tester.<id>.instance.*` | Published by the service when an instance is `created` or `destroyed`. |
 | `ntf.events.tester.<id>.node.*` | Published by the service when a node is `ready`, `stopped`, `started`, `updated` or `reloaded`. |
-| `ntf.events.tester.<id>.shaping.*` | Published by the agent when a shaping set is `applied` or `cleared`, or a rule `fired`. |
+| `ntf.events.tester.<id>.shaping.*` | Published by the agent when a shaping set is `applied` or `cleared`, with its `server` when it has one, or a rule `fired`, with the `server_name` it fired on. |
 | `ntf.events.tester.<id>.capture.stored` | Published by the agent when a connection's capture is stored. |
 | `ntf.events.tester.<id>.toxic.*` | Published by the agent when a toxic is `added` or `removed`, and once per toxic when they are `cleared`. |
 

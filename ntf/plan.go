@@ -117,6 +117,11 @@ type instancePlan struct {
 	// created with toxics, keyed by node name. Nil without toxics.
 	clientProxies map[string]backend.Endpoint
 
+	// captureProxies are the endpoints of the capture proxies of an instance
+	// created with trace or proxy, the nodes' trace ports, keyed by node name.
+	// Nil without trace or proxy.
+	captureProxies map[string]backend.Endpoint
+
 	// deadAdvertise is the address the nodes of a cluster or super-cluster
 	// created with toxics advertise for their routes and gateways, which
 	// refuses every dial. Zero otherwise.
