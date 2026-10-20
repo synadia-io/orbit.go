@@ -171,14 +171,21 @@ messages travel on the sender's connection only; the downstream carries interest
 node of their source cluster, so a gateway toxic whose `from` is a node acts on its cluster's proxies.
 
 `type` is toxiproxy's `latency`, `bandwidth`, `slow_close`, `timeout`, `reset_peer`, `slicer` or `limit_data`, with
-toxiproxy's attribute names and units, or `cut`. A cut is a blackhole: the proxies keep accepting dials, data is
-dropped both ways, and connections go silent until the servers' ping timers close them, as in a partition. Data
-already inside a later toxic, such as a latency toxic's buffer, is still delivered after a cut starts. A cut that
+toxiproxy's attribute names and units, or `cut` or `lossy`. A cut is a blackhole: the proxies keep accepting dials,
+data is dropped both ways, and connections go silent until the servers' ping timers close them, as in a partition.
+Data already inside a later toxic, such as a latency toxic's buffer, is still delivered after a cut starts. A cut that
 names a node also silences that node's connections through the gateway proxies its cluster shares, existing and new,
 so a cut of `{"node": "<node>"}` unplugs the node. A cut always acts both ways, and removing it closes the connections
-that dropped data while it was in place. `toxicity` is the chance that a toxic acts, 1 by default: toxiproxy rolls it
-for each stream of each connection, and again whenever the stream's chain is rebuilt by adding or removing another
-toxic. A cut cuts every connection and accepts no toxicity other than 1.
+that dropped data while it was in place. `lossy` emulates packet loss as TCP delivers it, as stalls rather than lost
+bytes: the stream is cut into 1460-byte segments, each lost with chance `loss`, above 0 and below 1, and a lost
+segment stalls the stream for `rto` ms, 200 by default, doubling with each lost retransmission up to `max_rto` ms,
+3200 by default, while later data waits behind it. Data that arrives after the stream was idle for 50ms starts a
+segment of its own, as a write after a pause goes in a packet of its own. Its attributes are the agent's own, not toxiproxy's. No byte is
+lost while it is in place; removing it while the stream after it accepts nothing for more than 5s drops the data it
+held, as toxiproxy does when it removes a toxic. `toxicity` is the chance that a toxic acts, 1 by default:
+toxiproxy rolls it for each stream of each connection, and again whenever the stream's chain is rebuilt by adding or
+removing another toxic. `lossy` rolls it once for each stream of each connection and keeps it across rebuilds. A cut
+cuts every connection and accepts no toxicity other than 1.
 
 The toxic calls are refused with `002` without an `instance_id`, `014` when no agent is selected, `018` when the agent
 does not declare `toxics`, `404` for an unknown instance, and `020` for an instance created without `toxics`. A toxic

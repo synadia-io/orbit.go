@@ -556,6 +556,20 @@ const (
 	ToxicSlicer = "slicer"
 	// ToxicLimitData closes the connection once bytes bytes have passed.
 	ToxicLimitData = "limit_data"
+	// ToxicLossy emulates packet loss as TCP delivers it, as stalls rather
+	// than lost bytes. The stream is cut into 1460-byte segments, each lost
+	// with chance loss, above 0 and below 1, which is required, and data that
+	// arrives after the stream was idle for 50ms starts a segment of its own,
+	// as a write after a pause goes in a packet of its own. A lost segment
+	// stalls the stream for rto ms, 200 by default, and each retransmission
+	// lost again doubles the stall, up to max_rto ms, 3200 by default. Later
+	// data waits behind it, and no byte is lost or reordered while it is in
+	// place; removing it while the stream after it accepts nothing for more
+	// than 5s drops the data it held, as toxiproxy does when it removes a
+	// toxic. Its attributes are the agent's own, not toxiproxy's. Its
+	// toxicity is rolled once for each stream of each connection and kept
+	// when the stream's chain is rebuilt.
+	ToxicLossy = "lossy"
 )
 
 // ToxicSelector names the links of an instance created with toxics that a
@@ -592,11 +606,13 @@ type ToxicSelector struct {
 
 // Toxic is a named fault on the links a selector names. Type is one of the
 // Toxic* constants. Attributes are those of toxiproxy's toxic of that type,
-// by toxiproxy's names and in its units, which the agent validates before it
-// applies them. Toxicity is the chance, in [0, 1], that the toxic acts, 1 when
-// nil: toxiproxy rolls it for each stream of each connection, and again
-// whenever the stream's chain is rebuilt by adding or removing another toxic.
-// A cut cuts every connection and accepts no toxicity other than 1.
+// by toxiproxy's names and in its units, or for ToxicLossy the agent's own,
+// which the agent validates before it applies them. Toxicity is the chance,
+// in [0, 1], that the toxic acts, 1 when nil: toxiproxy rolls it for each
+// stream of each connection, and again whenever the stream's chain is rebuilt
+// by adding or removing another toxic, while ToxicLossy rolls it once for
+// each stream. A cut cuts every connection and accepts no toxicity other
+// than 1.
 type Toxic struct {
 	Name       string         `json:"name"`
 	Selector   ToxicSelector  `json:"selector"`
