@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/events/schemas/ntf/event/v1/shaping_action.json",
-  "description": "An event published when a shaping set is applied to or cleared from an instance's capture proxy, one event per set",
+  "description": "An event published when a shaping set is applied to or cleared from an instance's capture proxies, one event per set",
   "title": "io.synadia.ntf.event.v1.shaping_action",
   "type": "object",
   "required": [
@@ -59,6 +59,10 @@
     "set": {
       "type": "string",
       "description": "The shaping set's id"
+    },
+    "server": {
+      "type": "string",
+      "description": "The one server the set applies on, absent when it applies on every captured server"
     }
   }
 }

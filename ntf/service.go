@@ -34,6 +34,7 @@ import (
 	"github.com/nats-io/nuid"
 
 	"github.com/synadia-io/orbit.go/ntf/agent"
+	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 	"github.com/synadia-io/orbit.go/ntf/events"
 )
@@ -184,6 +185,8 @@ type Service struct {
 	// agents starts the network agents of instances created with trace
 	// capture, nil when no agent is selected.
 	agents agent.Provider
+	// agentName is the name agents was registered under. Status reports it.
+	agentName string
 
 	dir string
 	// ownDir reports whether Close may remove dir.
@@ -233,6 +236,22 @@ type instance struct {
 	// no contents of any file or config. Guarded by Service.mu.
 	plan *instancePlan
 
+	// links are the proxied links of an instance created with toxics, as its
+	// create response lists them, set with Servers and never changed after.
+	// Nil for any other instance. Guarded by Service.mu.
+	links []api.Link
+
+	// agent is the instance's network agent, set with Servers when its create
+	// started one, for trace, proxy or toxics, and never changed after. A
+	// teardown stops it once, before the servers go, so in-flight captures
+	// flush. Nil for any other instance. Guarded by Service.mu.
+	agent agent.Agent
+
+	// captured reports whether agent fronts every server's client port with a
+	// capture proxy, for trace or proxy, so the shaping calls act on it. Set
+	// with agent and never changed after. Guarded by Service.mu.
+	captured bool
+
 	// events is the instance's event lock. A create holds it from making its
 	// servers visible until created and ready are published, and a teardown
 	// from stopping the agents until destroyed is published, so no node event
@@ -270,9 +289,10 @@ type managedServer struct {
 	// to an instance nobody will ever tear down.
 	instanceID string
 
-	// clientPort is the server's reserved client listen port, captured at create
-	// time. Unlike the live server's address it survives a stop, so status can
-	// report the client port even for a stopped node.
+	// clientPort is the server's reserved client listen port, or its client
+	// proxy's port when its instance was created with toxics, captured at
+	// create time. Unlike the live server's address it survives a stop, so
+	// status can report the client port even for a stopped node.
 	clientPort int
 
 	// advertiseHost is the resolved client_advertise host for this server,
@@ -288,10 +308,10 @@ type managedServer struct {
 	// swaps in a changed copy on success. Guarded by cfgMu.
 	node *nodePlan
 
-	// agent is the network agent fronting this server's client port, set when
-	// the server was created with trace capture enabled. nil otherwise. Stopped
-	// (flushing in-flight captures) before the server is shut down on teardown.
-	agent agent.Agent
+	// toxics reports whether the server's instance was created with toxics,
+	// so an update checks a custom template, and the config it renders, for
+	// the proxies. Immutable for the life of the server.
+	toxics bool
 
 	// cfgMu guards the server's config (its config path and its snippet
 	// files). Held by update, reload and start operations.
@@ -447,6 +467,7 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 			return fail(fmt.Errorf("could not create the %q agent: the factory returned no provider", opts.Agent))
 		}
 		s.agents = provider
+		s.agentName = opts.Agent
 		unwind = append(unwind, func() { provider.Close() })
 	}
 
@@ -640,6 +661,24 @@ func (s *Service) startServices(name, group string) error {
 		return err
 	}
 
+	toxic := srv.AddGroup("toxic")
+	err = toxic.AddEndpoint("add", micro.HandlerFunc(s.toxicAdd))
+	if err != nil {
+		return err
+	}
+	err = toxic.AddEndpoint("remove", micro.HandlerFunc(s.toxicRemove))
+	if err != nil {
+		return err
+	}
+	err = toxic.AddEndpoint("clear", micro.HandlerFunc(s.toxicClear))
+	if err != nil {
+		return err
+	}
+	err = toxic.AddEndpoint("report", micro.HandlerFunc(s.toxicReport))
+	if err != nil {
+		return err
+	}
+
 	err = srv.AddEndpoint("status", micro.HandlerFunc(s.status))
 	if err != nil {
 		return err
@@ -805,7 +844,7 @@ func (s *Service) dropInstance(inst *instance) {
 	s.tearDownInstance(inst, events.ReasonDestroy)
 }
 
-// tearDownInstance stops the agents and the backend of inst, then records its
+// tearDownInstance stops the agent and the backend of inst, then records its
 // destroyed event with reason if it was announced. It holds the instance's
 // event lock throughout, so the event follows every event of the instance.
 func (s *Service) tearDownInstance(inst *instance, reason events.DestroyReason) {
@@ -813,16 +852,13 @@ func (s *Service) tearDownInstance(inst *instance, reason events.DestroyReason) 
 	defer inst.events.Unlock()
 
 	s.mu.Lock()
-	servers := slices.Clone(inst.Servers)
+	netAgent := inst.agent
 	s.mu.Unlock()
 
-	// Stop the agents first, while the connection they may store through is
+	// Stop the agent first, while the connection it may store through is
 	// still up, so in-flight captures flush before the backend servers go away.
-	for _, ms := range servers {
-		if ms.agent == nil {
-			continue
-		}
-		err := ms.agent.Stop(context.Background())
+	if netAgent != nil {
+		err := netAgent.Stop(context.Background())
 		if err != nil {
 			s.log.Error("Failed to stop agent", "instance", inst.ID, "err", err)
 		}

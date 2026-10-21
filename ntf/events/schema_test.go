@@ -105,6 +105,7 @@ func examples() []Event {
 		&InstanceAction{Base: base(SourceService, 9), Action: InstanceDestroyed, Reason: ReasonReset},
 		&NodeAction{Base: base(SourceService, 2), Action: NodeStopped, Node: "n1", ServerName: "cluster-n1"},
 		&ShapingAction{Base: base(SourceAgent, 1), Action: ShapingApplied, Set: "slow"},
+		&ShapingAction{Base: base(SourceAgent, 6), Action: ShapingApplied, Set: "drop-n3", Server: "cluster-n3"},
 		&ShapingFired{
 			Base:           base(SourceAgent, 2),
 			Set:            "slow",
@@ -114,6 +115,17 @@ func examples() []Event {
 			ConnectionUUID: "c0ffee",
 			ClientName:     "producer",
 			FrameID:        "c0ffee-12",
+			ServerName:     "cluster-n1",
+		},
+		// An agent from before server_name publishes none.
+		&ShapingFired{
+			Base:           base(SourceAgent, 7),
+			Set:            "slow",
+			Rule:           "drop-pub",
+			RuleAction:     "drop",
+			ConnectionUUID: "c0ffee",
+			ClientName:     "producer",
+			FrameID:        "c0ffee-13",
 		},
 		&CaptureStored{
 			Base:           base(SourceAgent, 3),
@@ -123,6 +135,25 @@ func examples() []Event {
 			ClientName:     "producer",
 			ServerName:     "cluster-n1",
 			Shaped:         true,
+		},
+		&ToxicAction{
+			Base:       base(SourceAgent, 4),
+			Action:     ToxicAdded,
+			Name:       "slow-route",
+			Selector:   ToxicSelector{Kind: "route", From: "n1", To: "n2", Direction: "to"},
+			ToxicType:  "latency",
+			Attributes: map[string]any{"latency": 250.0, "jitter": 0.0},
+			Toxicity:   0.5,
+			Links:      []string{"route:n1->n2", "route:n2->n1"},
+		},
+		&ToxicAction{
+			Base:      base(SourceAgent, 5),
+			Action:    ToxicCleared,
+			Name:      "unplug-n3",
+			Selector:  ToxicSelector{Node: "n3", Direction: "both"},
+			ToxicType: "cut",
+			Toxicity:  1,
+			Links:     []string{"route:n1->n3", "route:n3->n1", "client:n3"},
 		},
 	}
 	for _, e := range all {

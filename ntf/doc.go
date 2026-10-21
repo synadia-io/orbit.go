@@ -52,9 +52,9 @@ lives.
 Options.Agents registers network agent factories by name and Options.Agent selects
 one. The agent, defined in package agent, fronts a managed server with a proxy
 recording the traffic that reaches it. With no agent selected, requests asking for
-trace capture are refused. Only the first node of a cluster or super-cluster is
-fronted, and a traced instance cannot use generated TLS: the proxy forwards
-plaintext.
+trace capture are refused. Every node is fronted by a capture proxy of its own,
+on a trace port from the service's range, and a traced instance cannot use
+generated TLS: the proxy forwards plaintext.
 
 # Clocks
 

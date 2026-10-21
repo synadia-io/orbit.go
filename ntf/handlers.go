@@ -31,6 +31,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/nats-io/nats-server/v2/conf"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go/micro"
 
@@ -137,7 +138,9 @@ var serverConfigTemplate = `
 {{ if .Snippets.top }}include "{{ .Snippets.top }}"{{ end }}
 server_name: "{{ .ServerName }}"
 port: {{ .ClientPort }}
-{{ if .AdvertiseHost }}
+{{ if .ClientAdvertise }}
+client_advertise: "{{ .ClientAdvertise }}"
+{{ else if .AdvertiseHost }}
 client_advertise: "{{ hostport .AdvertiseHost .ClientPort }}"
 {{ end }}
 {{ if .LogFile }}
@@ -156,6 +159,9 @@ jetstream {
 cluster {
 	name: "{{ .ClusterName }}"
 	port: {{ .ClusterPort }}
+{{- if .ClusterAdvertise }}
+	advertise: "{{ .ClusterAdvertise }}"
+{{- end }}
 	routes: [
 {{ range .Routes }}
 "nats://{{ . }}"
@@ -168,6 +174,9 @@ cluster {
 gateway {
 	name: "{{ .ClusterName }}"
 	port: {{ .GatewayPort }}
+{{- if .GatewayAdvertise }}
+	advertise: "{{ .GatewayAdvertise }}"
+{{- end }}
 	gateways: [
 {{ range $cluster, $urls := .Gateways }}
 		{ name: "{{ $cluster }}", urls: [
@@ -282,6 +291,197 @@ func validateTLSRequest(opts *api.TLSOptions, snippets map[string]string, custom
 	return nil
 }
 
+// toxicsTemplateRefs are the template variables that carry the proxies of an
+// instance created with toxics, by kind of instance. A custom template must
+// reference each, or the instance's traffic goes around the proxies.
+var toxicsTemplateRefs = map[string][]string{
+	"server":        {".ClientAdvertise"},
+	"cluster":       {".Routes", ".ClusterAdvertise", ".ClientAdvertise"},
+	"super-cluster": {".Routes", ".ClusterAdvertise", ".ClientAdvertise", ".Gateways", ".GatewayAdvertise"},
+}
+
+// validateToxicsTemplate refuses customTemplate, the custom template of an
+// instance of the given kind created with toxics, unless its text references
+// every variable of toxicsTemplateRefs, naming those it lacks. An empty
+// customTemplate is the built-in template, which references them all.
+func validateToxicsTemplate(kind, customTemplate string) error {
+	if customTemplate == "" {
+		return nil
+	}
+
+	var missing []string
+	for _, ref := range toxicsTemplateRefs[kind] {
+		if !strings.Contains(customTemplate, ref) {
+			missing = append(missing, ref)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("WithTemplate must reference %s when toxics is set", strings.Join(missing, ", "))
+}
+
+// toxicsRefusal returns the response code and message a create of an
+// instance of the given kind with toxics is refused with, or two empty
+// strings when it is not refused: 014 when no agent is selected, 018 when the
+// agent does not declare the toxics capability, and 007 for a custom template
+// that does not reference the variables that carry the proxies. What the
+// service supports is checked before the request's template.
+func (s *Service) toxicsRefusal(kind, customTemplate string) (string, string) {
+	if s.agents == nil {
+		return "014", "toxics is not configured on this service"
+	}
+
+	if !s.agentDeclares(agent.CapabilityToxics) {
+		return "018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityToxics)
+	}
+
+	err := validateToxicsTemplate(kind, customTemplate)
+	if err != nil {
+		return "007", err.Error()
+	}
+
+	return "", ""
+}
+
+// toxicsConfigRefusal returns the response code and message a create or
+// update of an instance created with toxics is refused with for node n's
+// rendered config, or two empty strings when it is not refused: 007 for a
+// config that does not parse, 019 for one that enables TLS on routes or
+// gateways, 007 for a gateway not named for its cluster, and failCode when the
+// config could not be checked. dir is where readNodeConfig makes its
+// temporary directory.
+func toxicsConfigRefusal(dir string, n *nodePlan, failCode string) (string, string) {
+	cfg, err := readNodeConfig(dir, n)
+	if errors.Is(err, errConfigParse) {
+		return "007", err.Error()
+	}
+	if err != nil {
+		return failCode, err.Error()
+	}
+
+	err = checkRouteTLS(n, cfg)
+	if err != nil {
+		return "019", err.Error()
+	}
+
+	err = checkGatewayName(n, cfg)
+	if err != nil {
+		return "007", err.Error()
+	}
+
+	return "", ""
+}
+
+// readNodeConfig parses node n's rendered config as the server reads it from
+// disk. It writes the config, every file of n and, when n has managed TLS
+// settings, its managed TLS snippet into a new temporary directory under dir,
+// laid out as in the instance directory, so every include resolves as it does
+// for the server, then parses the config with conf.ParseFile, which reads
+// includes but loads no certificate, and removes the directory. The managed
+// TLS snippet is written whenever n has one, since a revision that does not
+// rewrite it leaves the one on disk. Only n's own files are written, so on
+// update a config that includes a file left on disk by an earlier revision or
+// another node does not parse here and is refused, although the server would
+// load it.
+//
+// A config that does not parse, and a node directory or file path that would
+// leave the temporary directory, is an error wrapping errConfigParse that
+// names the node. Any other error means the config could not be checked.
+func readNodeConfig(dir string, n *nodePlan) (cfg map[string]any, err error) {
+	files := n.Files
+	if n.TLS != nil {
+		files = append([]backend.File{managedTLSFile(n)}, n.Files...)
+	}
+
+	if !filepath.IsLocal(n.Dir) {
+		return nil, fmt.Errorf("%w: node %s: directory %s is outside the instance directory", errConfigParse, n.Name, n.Dir)
+	}
+	for _, f := range files {
+		if !filepath.IsLocal(f.Path) {
+			return nil, fmt.Errorf("%w: node %s: file %s is outside the instance directory", errConfigParse, n.Name, f.Path)
+		}
+	}
+
+	err = os.MkdirAll(dir, 0700)
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+
+	tmp, err := os.MkdirTemp(dir, "config-check-")
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	defer func() {
+		rmErr := os.RemoveAll(tmp)
+		if rmErr != nil && err == nil {
+			cfg = nil
+			err = fmt.Errorf("node %s config check: %w", n.Name, rmErr)
+		}
+	}()
+
+	for _, f := range files {
+		path := filepath.Join(tmp, f.Path)
+		err = os.MkdirAll(filepath.Dir(path), 0700)
+		if err != nil {
+			return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+		}
+		err = os.WriteFile(path, f.Data, 0600)
+		if err != nil {
+			return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+		}
+	}
+
+	nodeDir := filepath.Join(tmp, n.Dir)
+	err = os.MkdirAll(nodeDir, 0700)
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	// The in-process backend writes the config under a random *.cfg name in
+	// the node's directory, so this does too, clear of the node's files.
+	cfgFile, err := os.CreateTemp(nodeDir, "*.cfg")
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	_, err = cfgFile.Write(n.Config)
+	closeErr := cfgFile.Close()
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, closeErr)
+	}
+
+	// A parse error names files by their path in the temporary directory,
+	// which is gone once this returns, so the message names them in the
+	// instance directory instead.
+	cfg, err = conf.ParseFile(cfgFile.Name())
+	if err != nil {
+		scrubbed := strings.ReplaceAll(err.Error(), tmp, nodeInstanceDir(n))
+		return nil, fmt.Errorf("%w: node %s: %s", errConfigParse, n.Name, scrubbed)
+	}
+
+	return cfg, nil
+}
+
+// nodeInstanceDir returns the instance directory node n's files are written
+// under, taken from the node directory its template data names, or "." when
+// that does not end in n.Dir.
+func nodeInstanceDir(n *nodePlan) string {
+	if n.TemplateData == nil {
+		return "."
+	}
+
+	suffix := string(filepath.Separator) + filepath.Clean(n.Dir)
+	serverDir := filepath.Clean(n.TemplateData.ServerDir)
+	if !strings.HasSuffix(serverDir, suffix) {
+		return "."
+	}
+
+	return strings.TrimSuffix(serverDir, suffix)
+}
+
 // tlsInstanceFiles holds on-disk paths for the shared TLS artifacts written
 // once per instance. The server cert/key are reused by every node in the
 // instance — SANs are caller-supplied, so a single leaf covers them all.
@@ -337,15 +537,16 @@ func effectiveSANs(requested []string, advertiseHost string) []string {
 	return sans
 }
 
-// createAttempts is how many times a create runs when one of its servers could not
-// bind a port. The service reserves every port and hands it over just before the
-// server binds it; another program can take the port in that gap, and a retry with
-// freshly reserved ports gets past it.
+// createAttempts is how many times a create runs when one of its servers or its
+// agent could not bind a port. The service reserves every port and hands it over
+// just before the server binds it; another program can take the port in that gap,
+// and a retry with freshly reserved ports gets past it.
 const createAttempts = 3
 
 // createAttempt runs one attempt at a create request. It answers req itself,
-// unless a server could not listen and final is false: it then rolls back
-// everything the attempt started and returns true to have the create run again.
+// unless a server or the agent could not listen and final is false: it then rolls
+// back everything the attempt started and returns true to have the create run
+// again.
 type createAttempt func(req micro.Request, final bool) (retry bool)
 
 // retryCreate runs create until it answers req, at most createAttempts times.
@@ -357,15 +558,19 @@ func retryCreate(req micro.Request, create createAttempt) {
 	}
 }
 
-// retryAfter reports whether a create attempt that failed to start a server with
-// err should run again: only a server that could not listen, and not on the final
-// attempt. The caller must have rolled the attempt back.
+// retryAfter reports whether a create attempt that failed to start a server or the
+// agent with err should run again: only a server or an agent that could not
+// listen, and not on the final attempt. The caller must have rolled the attempt
+// back.
 func (s *Service) retryAfter(err error, final bool, instanceID string) bool {
-	if final || !errors.Is(err, ErrServerListen) {
+	if final {
+		return false
+	}
+	if !errors.Is(err, ErrServerListen) && !errors.Is(err, agent.ErrListen) {
 		return false
 	}
 
-	s.log.Warn("Retrying create with fresh ports after a server could not listen", "instance", instanceID, "err", err)
+	s.log.Warn("Retrying create with fresh ports after a server or the agent could not listen", "instance", instanceID, "err", err)
 
 	return true
 }
@@ -419,6 +624,19 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 		return
 	}
 
+	if proxied && !s.agentDeclares(agent.CapabilityCapture) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityCapture), nil)
+		return
+	}
+
+	if creq.Toxics {
+		code, msg := s.toxicsRefusal("server", creq.Template)
+		if code != "" {
+			req.Error(code, msg, nil)
+			return
+		}
+	}
+
 	inst := s.newInstance("server", creq.Description)
 
 	spec := instanceSpec{
@@ -431,6 +649,7 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
 		Proxy:         proxied,
 		StoreCaptures: creq.Trace,
+		Toxics:        creq.Toxics,
 	}
 	setSpecTLS(&spec, creq.TLS)
 
@@ -453,14 +672,15 @@ func setSpecTLS(spec *instanceSpec, opts *api.TLSOptions) {
 
 // createFromSpec runs the part of a create attempt every kind of instance
 // shares, once the request is validated and inst is registered. It asks the
-// backend for a placement, plans inst from spec against it, provisions the
-// plan, starts the agent when the plan asks for one, publishes the
-// nodes and answers req with the create response.
+// backend for a placement, plans inst from spec against it, starts the agent
+// when the instance needs one, provisions the plan, fronts every node of an
+// instance with trace, proxy or toxics with the agent, publishes the nodes and
+// answers req with the create response.
 //
-// It answers req itself, unless a node could not listen and final is false: it
-// then tears down everything the attempt started and returns true to have the
-// create run again, which plans the instance again from the spec with a fresh
-// placement.
+// It answers req itself, unless a node or the agent could not listen and final
+// is false: it then stops the agent, tears down everything the attempt started
+// and returns true to have the create run again, which plans the instance again
+// from the spec with a fresh placement.
 func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, spec instanceSpec) (retry bool) {
 	if spec.TLS {
 		s.log.Info("Issuing TLS server cert", "instance", inst.ID, "sans", effectiveSANs(spec.TLSSANs, spec.AdvertiseHost))
@@ -483,8 +703,47 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		return false
 	}
 
+	// The proxies of toxics read a plain CONNECT, so routes and gateways must
+	// not use TLS, and the gateway gate admits only a gateway named for its
+	// cluster. A config these checks cannot read is refused.
+	if spec.Toxics {
+		for _, n := range plan.nodes {
+			code, msg := toxicsConfigRefusal(s.dir, n, "002")
+			if code != "" {
+				s.dropInstance(inst)
+				req.Error(code, msg, nil)
+				return false
+			}
+		}
+	}
+
+	// The instance needs an agent when its clients or links go through a
+	// proxy. The agent starts before the servers, so its listeners are up
+	// before they dial them, and the ports of its route and gateway proxies
+	// are handed to it just before it starts. Every failure from here on
+	// stops it.
+	var netAgent agent.Agent
+	if spec.Proxy || spec.Toxics {
+		var names []string
+		for _, p := range plan.proxies {
+			names = append(names, p.Name)
+		}
+		s.releaseProxyHolds(inst.ID, names)
+
+		netAgent, err = s.startAgent(inst, spec.AdvertiseHost, spec.StoreCaptures, plan)
+		if err != nil {
+			s.dropInstance(inst)
+			if s.retryAfter(err, final, inst.ID) {
+				return true
+			}
+			req.Error("012", fmt.Sprintf("trace setup failed: %v", err), nil)
+			return false
+		}
+	}
+
 	started, err := s.backend.Provision(ctx, &plan.InstancePlan)
 	if err != nil {
+		s.stopAgent(inst, netAgent)
 		s.dropInstance(inst)
 		if s.retryAfter(err, final, inst.ID) {
 			return true
@@ -500,6 +759,12 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		Kind:        inst.Kind,
 		Servers:     []*api.ManagedServer{},
 		TLS:         plan.TLS,
+	}
+
+	// The route and gateway links, in plan order. Each node's client link
+	// follows once its live client address is known.
+	for _, p := range plan.proxies {
+		resp.Links = append(resp.Links, api.Link{Name: p.Name, Kind: p.Kind, From: p.From, To: p.To, Proxy: p.Listen.String(), Upstream: p.Upstream.String()})
 	}
 
 	// The nodes in start order. Once the plan is kept on the instance, an update
@@ -523,7 +788,6 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 
 	servers := make([]*managedServer, 0, len(nodes))
 	ready := make([]*events.NodeAction, 0, len(nodes))
-	var netAgent agent.Agent
 
 	for i, n := range nodes {
 		node := started[i]
@@ -544,25 +808,51 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 			ports = maps.Clone(n.TemplateData.Ports)
 		}
 
-		ms := &managedServer{backendNode: node, instanceID: inst.ID, rootDir: filepath.Join(place.InstanceDir(), n.Dir), ports: ports, clientPort: client.External.Port, advertiseHost: spec.AdvertiseHost, node: n}
+		// With toxics, clients reach the node through its client proxy, whose
+		// port is handed to the agent here, just before the agent call that
+		// binds it. The real client port stays reachable as the link's
+		// upstream.
+		clientPort := client.External.Port
+		if spec.Toxics {
+			name := clientLinkName(n.Name)
+			s.releaseProxyHolds(inst.ID, []string{name})
 
-		// Front the node's client listener with the agent when the plan asks
-		// for it, before the node is published so its trace port and agent are
-		// set atomically.
-		if n.Name == plan.ProxyNode {
-			a, terr := s.startAgent(inst, n.Name, client.Internal, spec.AdvertiseHost, spec.StoreCaptures)
+			proxy := plan.clientProxies[n.Name]
+			clientPort = proxy.Port
+			resp.Links = append(resp.Links, api.Link{Name: name, Kind: "client", To: n.Name, Proxy: n.TemplateData.ClientAdvertise, Upstream: client.Internal.String()})
+		}
+
+		ms := &managedServer{backendNode: node, instanceID: inst.ID, rootDir: filepath.Join(place.InstanceDir(), n.Dir), ports: ports, clientPort: clientPort, advertiseHost: spec.AdvertiseHost, node: n, toxics: spec.Toxics}
+
+		// Front the node's client listener with the agent: with a capture
+		// proxy on the node's own trace port for trace or proxy, and with its
+		// client proxy alone under toxics alone, before the node is published
+		// so its trace port is set atomically. The trace port is handed to the
+		// agent here, just before the agent call that binds it. The live client
+		// address is fronted, since a custom template may set its own client
+		// port.
+		capture := spec.Proxy
+		if capture {
+			s.releaseProxyHolds(inst.ID, []string{traceProxyName(n.Name)})
+		}
+		if capture || spec.Toxics {
+			ep, terr := s.frontClient(netAgent, agent.Front{ServerName: n.Name, Client: client.Internal, Capture: capture})
 			if terr != nil {
+				s.stopAgent(inst, netAgent)
 				s.dropInstance(inst)
+				if s.retryAfter(terr, final, inst.ID) {
+					return true
+				}
 				req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
 				return false
 			}
-			netAgent = a
-			ms.agent = a
-			if ports == nil {
-				ports = map[string]int{}
+			if capture {
+				if ports == nil {
+					ports = map[string]int{}
+				}
+				ports["trace"] = ep.Port
+				ms.ports = ports
 			}
-			ports["trace"] = a.Endpoint().Port
-			ms.ports = ports
 		}
 
 		servers = append(servers, ms)
@@ -577,7 +867,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		ready = append(ready, &events.NodeAction{Action: events.NodeReady, Node: n.Name, ServerName: serverName})
 		resp.Servers = append(resp.Servers, &api.ManagedServer{
 			Name:      n.Name,
-			Port:      client.External.Port,
+			Port:      clientPort,
 			Ports:     ports,
 			Cluster:   n.Cluster,
 			Advertise: spec.AdvertiseHost,
@@ -599,6 +889,9 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	_, alive := s.instances[inst.ID]
 	if alive {
 		inst.Servers = servers
+		inst.links = resp.Links
+		inst.agent = netAgent
+		inst.captured = spec.Proxy
 	}
 	s.mu.Unlock()
 
@@ -612,12 +905,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	inst.events.Unlock()
 
 	if !alive {
-		if netAgent != nil {
-			err := netAgent.Stop(context.Background())
-			if err != nil {
-				s.log.Error("Failed to stop agent", "instance", inst.ID, "err", err)
-			}
-		}
+		s.stopAgent(inst, netAgent)
 		s.dropInstance(inst)
 		if !s.preserve {
 			err := os.RemoveAll(inst.RootDir)
@@ -680,21 +968,34 @@ func revisionErrorMessage(err error) string {
 	return fmt.Sprintf("config render failed: %v", perr.Err)
 }
 
-// traceSetupTimeout limits an agent's start for one server, which may include
-// first-use work such as creating the store captures are written to.
+// traceSetupTimeout limits an agent's start, and its fronting of one server, each
+// of which may include first-use work such as creating the store captures are
+// written to.
 const traceSetupTimeout = 30 * time.Second
 
-// startAgent asks the agent provider to front a managed server's client
-// listener, which it dials at client, and returns the agent. Its endpoint's
-// port is the one clients reach it on.
+// agentDeclares reports whether the selected agent declares c. It is false when
+// no agent is selected.
+func (s *Service) agentDeclares(c agent.Capability) bool {
+	if s.agents == nil {
+		return false
+	}
+
+	return slices.Contains(s.agents.Capabilities(), c)
+}
+
+// startAgent asks the agent provider to start the agent of inst, before its
+// servers start, and returns the agent.
 //
 // advertiseHost becomes the agent's listen host, so the advertised trace URL
 // matches the node's client_advertise. It must name a local interface or the
 // agent fails to listen. Empty binds all interfaces (the no-advertise default).
 // store is passed to the agent as Spec.Store: true keeps every connection's
-// capture, false forwards and shapes without keeping any. The caller must tear
-// the instance down on failure.
-func (s *Service) startAgent(inst *instance, serverName string, client backend.Endpoint, advertiseHost string, store bool) (agent.Agent, error) {
+// capture, false forwards and shapes without keeping any. The proxies of plan,
+// which has some only when created with toxics, are passed as Spec.Links and
+// Spec.ClientProxies, and then its nodes as Spec.Nodes. Its trace ports, which
+// it has only when created with trace or proxy, are passed as
+// Spec.CaptureProxies. The caller must tear the instance down on failure.
+func (s *Service) startAgent(inst *instance, advertiseHost string, store bool, plan *instancePlan) (agent.Agent, error) {
 	if s.agents == nil {
 		return nil, fmt.Errorf("trace capture is not configured on this service")
 	}
@@ -702,19 +1003,88 @@ func (s *Service) startAgent(inst *instance, serverName string, client backend.E
 	ctx, cancel := context.WithTimeout(context.Background(), traceSetupTimeout)
 	defer cancel()
 
-	a, err := s.agents.Start(ctx, agent.Spec{
-		InstanceID: inst.ID,
-		ServerName: serverName,
-		Client:     client,
-		ListenHost: advertiseHost,
-		Store:      store,
-	})
-	if err != nil {
-		return nil, err
+	var nodes []agent.Node
+	if plan.clientProxies != nil {
+		for _, n := range plan.nodes {
+			nodes = append(nodes, agent.Node{Name: n.Name, Cluster: n.Cluster})
+		}
 	}
 
-	s.log.Info("Trace proxy listening", "server", serverName, "address", a.Endpoint().String())
-	return a, nil
+	return s.agents.Start(ctx, agent.Spec{
+		InstanceID:     inst.ID,
+		ListenHost:     advertiseHost,
+		Store:          store,
+		Links:          slices.Clone(plan.proxies),
+		ClientProxies:  maps.Clone(plan.clientProxies),
+		CaptureProxies: maps.Clone(plan.captureProxies),
+		Nodes:          nodes,
+	})
+}
+
+// proxyHolder is a backend whose placement holds the port of each proxy until
+// the service hands it to the agent. The in-process backend is one.
+type proxyHolder interface {
+	// releaseProxies closes what holds the ports of the named proxies of the
+	// instance instanceID. The ports stay reserved until Teardown.
+	releaseProxies(instanceID string, names []string)
+}
+
+// releaseProxyHolds hands the ports of the named proxies of the instance
+// instanceID to its agent, just before the agent binds them, when the backend
+// holds them.
+func (s *Service) releaseProxyHolds(instanceID string, names []string) {
+	holder, ok := s.backend.(proxyHolder)
+	if !ok {
+		return
+	}
+
+	holder.releaseProxies(instanceID, names)
+}
+
+// frontClient asks a, a running agent, to front the client listener of the
+// managed server front names, and returns the endpoint clients reach it on. It
+// is called only for an instance whose create asked for the proxy or for
+// toxics, which the create refuses unless the agent declares capture or toxics,
+// so an agent that does not implement agent.ClientEdge is a fault in the agent.
+// The caller must stop the agent and tear the instance down on failure.
+func (s *Service) frontClient(a agent.Agent, front agent.Front) (backend.Endpoint, error) {
+	edge, ok := a.(agent.ClientEdge)
+	if !ok {
+		capability := agent.CapabilityToxics
+		if front.Capture {
+			capability = agent.CapabilityCapture
+		}
+		return backend.Endpoint{}, fmt.Errorf("the %q agent declares the %q capability but does not implement agent.ClientEdge", s.agentName, capability)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), traceSetupTimeout)
+	defer cancel()
+
+	ep, err := edge.Front(ctx, front)
+	if err != nil {
+		return backend.Endpoint{}, err
+	}
+
+	if front.Capture {
+		s.log.Info("Trace proxy listening", "server", front.ServerName, "address", ep.String())
+	} else {
+		s.log.Info("Client proxy listening", "server", front.ServerName, "address", ep.String())
+	}
+
+	return ep, nil
+}
+
+// stopAgent stops a, the agent a create of inst started, when the create fails
+// before the instance is published. A failure is logged. A nil a is no agent.
+func (s *Service) stopAgent(inst *instance, a agent.Agent) {
+	if a == nil {
+		return
+	}
+
+	err := a.Stop(context.Background())
+	if err != nil {
+		s.log.Error("Failed to stop agent", "instance", inst.ID, "err", err)
+	}
 }
 
 func (s *Service) createCluster(req micro.Request) {
@@ -776,6 +1146,19 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		return
 	}
 
+	if proxied && !s.agentDeclares(agent.CapabilityCapture) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityCapture), nil)
+		return
+	}
+
+	if creq.Toxics {
+		code, msg := s.toxicsRefusal("cluster", creq.Template)
+		if code != "" {
+			req.Error(code, msg, nil)
+			return
+		}
+	}
+
 	inst := s.newInstance("cluster", creq.Description)
 	inst.Cluster = "C_" + shortID(inst.ID)
 
@@ -789,6 +1172,7 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
 		Proxy:         proxied,
 		StoreCaptures: creq.Trace,
+		Toxics:        creq.Toxics,
 	}
 	setSpecTLS(&spec, creq.TLS)
 
@@ -861,6 +1245,19 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		return
 	}
 
+	if proxied && !s.agentDeclares(agent.CapabilityCapture) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityCapture), nil)
+		return
+	}
+
+	if creq.Toxics {
+		code, msg := s.toxicsRefusal("super-cluster", creq.Template)
+		if code != "" {
+			req.Error(code, msg, nil)
+			return
+		}
+	}
+
 	inst := s.newInstance("super-cluster", creq.Description)
 
 	spec := instanceSpec{
@@ -874,6 +1271,7 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
 		Proxy:         proxied,
 		StoreCaptures: creq.Trace,
+		Toxics:        creq.Toxics,
 	}
 	setSpecTLS(&spec, creq.TLS)
 
@@ -1251,6 +1649,16 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
+	// The revision renders the proxies' addresses from the node's template
+	// data, so a custom template must reference them as it must on create.
+	if ms.toxics {
+		err := validateToxicsTemplate(node.TemplateData.Kind, creq.Template)
+		if err != nil {
+			req.Error("007", err.Error(), nil)
+			return
+		}
+	}
+
 	mainTmpl := serverConfigTemplate
 	if creq.Template != "" {
 		mainTmpl = creq.Template
@@ -1262,6 +1670,17 @@ func (s *Service) updateServer(req micro.Request) {
 	if err != nil {
 		req.Error("009", revisionErrorMessage(err), nil)
 		return
+	}
+
+	// The proxies of toxics read a plain CONNECT, so the revision must not
+	// enable TLS on routes or gateways either, and must name its gateway for
+	// its cluster. A config these checks cannot read is refused.
+	if ms.toxics {
+		code, msg := toxicsConfigRefusal(s.dir, next, "009")
+		if code != "" {
+			req.Error(code, msg, nil)
+			return
+		}
 	}
 
 	err = ms.backendNode.Apply(context.Background(), &next.NodePlan)
@@ -1411,16 +1830,27 @@ func (s *Service) status(req micro.Request) {
 		capabilities = append(capabilities, string(c))
 	}
 
+	// Likewise the agent, when one is selected.
+	var agentCapabilities []string
+	if s.agents != nil {
+		for _, c := range s.agents.Capabilities() {
+			agentCapabilities = append(agentCapabilities, string(c))
+		}
+	}
+
 	resp := api.StatusResponse{Instances: make([]api.InstanceStatus, 0, len(snapshots))}
 	for _, snap := range snapshots {
 		ist := api.InstanceStatus{
-			ID:           snap.id,
-			Description:  snap.description,
-			Kind:         snap.kind,
-			Servers:      make([]api.ManagedServer, 0, len(snap.servers)),
-			Backend:      s.backendName,
-			Capabilities: capabilities,
-			EventsSeq:    snap.eventsSeq,
+			ID:                snap.id,
+			Description:       snap.description,
+			Kind:              snap.kind,
+			Servers:           make([]api.ManagedServer, 0, len(snap.servers)),
+			Backend:           s.backendName,
+			Capabilities:      capabilities,
+			Agent:             s.agentName,
+			AgentCapabilities: agentCapabilities,
+			Links:             snap.links,
+			EventsSeq:         snap.eventsSeq,
 		}
 		for _, ms := range snap.servers {
 			// Port is the client port; the route/cluster port is exposed under
@@ -1443,10 +1873,29 @@ func (s *Service) status(req micro.Request) {
 			})
 		}
 		ist.ShapingSets = s.shapingSetIDs(snap.id, snap.agent)
+		ist.Toxics = s.activeToxics(snap.id, snap.toxics)
 		resp.Instances = append(resp.Instances, ist)
 	}
 
 	req.RespondJSON(resp)
+}
+
+// activeToxics returns the toxics in place on the links of an instance, in
+// the order tx reports them. A nil tx, for an instance without link proxies,
+// has none. On an error it logs the error and returns none, so status never
+// fails on it.
+func (s *Service) activeToxics(instanceID string, tx agent.Toxics) []api.ActiveToxic {
+	if tx == nil {
+		return nil
+	}
+
+	_, toxics, err := tx.ToxicReport(context.Background())
+	if err != nil {
+		s.log.Warn("Could not read toxics for status", "instance", instanceID, "err", err)
+		return nil
+	}
+
+	return toxics
 }
 
 // shapingSetIDs returns the ids of the shaping sets applied to a, in the order
@@ -1518,8 +1967,9 @@ func (s *Service) list(req micro.Request) {
 	req.RespondJSON(resp)
 }
 
-// agentFor finds the agent fronting an instance. It answers the request itself
-// on any failure and returns nil, so a handler returns when it gets nil back.
+// agentFor finds the agent capturing the servers of an instance. It answers the
+// request itself on any failure and returns nil, so a handler returns when it
+// gets nil back.
 func (s *Service) agentFor(req micro.Request, instanceID string) agent.Agent {
 	if instanceID == "" {
 		req.Error("002", "Invalid request: instance_id is required", nil)
@@ -1528,9 +1978,9 @@ func (s *Service) agentFor(req micro.Request, instanceID string) agent.Agent {
 
 	s.mu.Lock()
 	inst, ok := s.instances[instanceID]
-	var servers []*managedServer
+	var a agent.Agent
 	if ok {
-		servers = slices.Clone(inst.Servers)
+		a = capturingAgentOf(inst)
 	}
 	s.mu.Unlock()
 
@@ -1539,7 +1989,6 @@ func (s *Service) agentFor(req micro.Request, instanceID string) agent.Agent {
 		return nil
 	}
 
-	a := agentOf(servers)
 	if a == nil {
 		req.Error("015", "Instance has no trace proxy", nil)
 		return nil
@@ -1638,6 +2087,174 @@ func (s *Service) shapeReport(req micro.Request) {
 	req.RespondJSON(api.ShapeReportResponse{Sets: sets})
 }
 
+// toxicsFor finds the toxics of the agent of an instance created with toxics.
+// It answers the request itself on any failure and returns nil, so a handler
+// returns when it gets nil back: 002 without an instance id, 014 when no agent
+// is selected, 018 when the agent does not declare toxics, 404 for an unknown
+// instance, 020 for an instance created without toxics, and 022 when the
+// agent declares toxics but does not implement agent.Toxics.
+func (s *Service) toxicsFor(req micro.Request, instanceID string) agent.Toxics {
+	if instanceID == "" {
+		req.Error("002", "Invalid request: instance_id is required", nil)
+		return nil
+	}
+
+	if s.agents == nil {
+		req.Error("014", "toxics is not configured on this service", nil)
+		return nil
+	}
+
+	if !s.agentDeclares(agent.CapabilityToxics) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityToxics), nil)
+		return nil
+	}
+
+	s.mu.Lock()
+	inst, ok := s.instances[instanceID]
+	var a agent.Agent
+	var proxied bool
+	if ok {
+		a = inst.agent
+		proxied = len(inst.links) > 0
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		req.Error("404", "Instance not found", nil)
+		return nil
+	}
+
+	if !proxied || a == nil {
+		req.Error("020", "Instance has no link proxies: create it with toxics", nil)
+		return nil
+	}
+
+	tx, ok := a.(agent.Toxics)
+	if !ok {
+		req.Error("022", fmt.Sprintf("the %q agent declares the %q capability but does not implement agent.Toxics", s.agentName, agent.CapabilityToxics), nil)
+		return nil
+	}
+
+	return tx
+}
+
+// answerToxicError answers req with the error an agent's toxics call
+// returned: 021 with the error's text when the call was refused for what it
+// asked, and 022 with the error's text otherwise.
+func answerToxicError(req micro.Request, err error) {
+	if errors.Is(err, agent.ErrInvalidToxic) {
+		req.Error("021", err.Error(), nil)
+		return
+	}
+
+	req.Error("022", err.Error(), nil)
+}
+
+func (s *Service) toxicAdd(req micro.Request) {
+	s.log.Info("Handling toxic add request")
+
+	creq := api.ToxicAddRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	added, err := tx.AddToxic(context.Background(), creq.Toxic)
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+
+	req.RespondJSON(api.ToxicAddResponse{Toxic: added})
+}
+
+func (s *Service) toxicRemove(req micro.Request) {
+	s.log.Info("Handling toxic remove request")
+
+	creq := api.ToxicRemoveRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	err = tx.RemoveToxic(context.Background(), creq.Name)
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+
+	req.RespondJSON(api.ToxicRemoveResponse{Removed: creq.Name})
+}
+
+func (s *Service) toxicClear(req micro.Request) {
+	s.log.Info("Handling toxic clear request")
+
+	creq := api.ToxicClearRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	cleared, err := tx.ClearToxics(context.Background())
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+	if cleared == nil {
+		cleared = []string{}
+	}
+
+	req.RespondJSON(api.ToxicClearResponse{Cleared: cleared})
+}
+
+func (s *Service) toxicReport(req micro.Request) {
+	s.log.Info("Handling toxic report request")
+
+	creq := api.ToxicReportRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	links, toxics, err := tx.ToxicReport(context.Background())
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+	if links == nil {
+		links = []api.LinkToxics{}
+	}
+	if toxics == nil {
+		toxics = []api.ActiveToxic{}
+	}
+
+	req.RespondJSON(api.ToxicReportResponse{Links: links, Toxics: toxics})
+}
+
 // instanceSnapshot is a lock-released view of an instance's metadata and the
 // reportable state of its servers, taken so a status response can be built
 // without holding s.mu.
@@ -1653,6 +2270,12 @@ type instanceSnapshot struct {
 	// eventsSeq is the instance's events_seq, read with the rest of the
 	// instance before any node state, so the snapshot is no older than it.
 	eventsSeq uint64
+	// links are the instance's proxied links, nil without toxics.
+	links []api.Link
+	// toxics is the toxics of the agent of an instance with link proxies, or
+	// nil for any other instance. The status handler asks it for the toxics
+	// in place after the lock is released.
+	toxics agent.Toxics
 }
 
 // serverSnapshot is a managed server's reportable state. snapshotInstance reads
@@ -1695,26 +2318,37 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 		srvs = append(srvs, snap)
 	}
 
+	var toxics agent.Toxics
+	if len(inst.links) > 0 {
+		tx, ok := inst.agent.(agent.Toxics)
+		if ok {
+			toxics = tx
+		}
+	}
+
 	return instanceSnapshot{
 		id:          inst.ID,
 		kind:        inst.Kind,
 		description: inst.Description,
 		servers:     srvs,
-		agent:       agentOf(inst.Servers),
+		agent:       capturingAgentOf(inst),
 		eventsSeq:   inst.eventsSeq,
+		links:       slices.Clone(inst.links),
+		toxics:      toxics,
 	}
 }
 
-// agentOf returns the agent fronting one of servers, or nil when none is
-// fronted. agent is set before a server joins its instance and never changes
-// afterwards, so the caller may read the result without holding s.mu.
-func agentOf(servers []*managedServer) agent.Agent {
-	for _, ms := range servers {
-		if ms.agent != nil {
-			return ms.agent
-		}
+// capturingAgentOf returns the agent of inst when it captures the instance's
+// servers for trace or proxy, which the shaping calls act on, or nil
+// otherwise. The agent of an instance created with toxics alone does not
+// count. The caller must hold s.mu; agent and captured never change once set,
+// so the result may be used after the lock is released.
+func capturingAgentOf(inst *instance) agent.Agent {
+	if !inst.captured {
+		return nil
 	}
-	return nil
+
+	return inst.agent
 }
 
 // findServerByName scans every instance for a server whose runtime name matches,
@@ -1954,4 +2588,17 @@ type templateData struct {
 	// .TLS.CAFile/.CertFile/.KeyFile, so a listener snippet can build its own
 	// tls{} block (e.g. websocket wss). Nil unless generated TLS is requested.
 	TLS *templateTLS
+
+	// ClientAdvertise is the host:port of the server's client proxy, which an
+	// instance created with toxics renders as client_advertise. Empty without
+	// toxics.
+	ClientAdvertise string
+
+	// ClusterAdvertise and GatewayAdvertise are the host:port of the dead
+	// address an instance created with toxics renders as the advertise of its
+	// cluster and gateway blocks, so a peer that learns of a node by gossip
+	// is refused rather than going around the proxies. Empty without toxics,
+	// and for a block the instance does not have.
+	ClusterAdvertise string
+	GatewayAdvertise string
 }

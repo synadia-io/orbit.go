@@ -67,14 +67,18 @@ type CreateServerRequest struct {
 	Snippets    map[string]string `json:"snippets,omitempty"`
 	Template    string            `json:"template,omitempty"`
 	TLS         *TLSOptions       `json:"tls,omitempty"`
-	// Trace opts the server into a capture proxy on a random port; every connection
-	// that reaches it has its trace stored in the TRACES object store. It implies
-	// Proxy.
+	// Trace opts the server into a capture proxy on a trace port of its own,
+	// which Ports["trace"] reports; every connection that reaches it has its
+	// trace stored in the TRACES object store. It implies Proxy.
 	Trace bool `json:"trace,omitempty"`
 	// Proxy fronts the server with the capture proxy and stores no captures, so
 	// shaping sets apply without filling the store. When Trace is set, Proxy has
 	// no effect.
 	Proxy bool `json:"proxy,omitempty"`
+	// Toxics puts a proxy of the instance's agent in front of the server's client
+	// listener, which Port then reports. It needs an agent that declares the
+	// toxics capability.
+	Toxics bool `json:"toxics,omitempty"`
 }
 
 type CreateClusterRequest struct {
@@ -84,13 +88,18 @@ type CreateClusterRequest struct {
 	Snippets    map[string]string `json:"snippets,omitempty"`
 	Template    string            `json:"template,omitempty"`
 	TLS         *TLSOptions       `json:"tls,omitempty"`
-	// Trace fronts the first node of the cluster with a single capture proxy that
-	// stores every connection's trace. It implies Proxy.
+	// Trace fronts every node of the cluster with a capture proxy of its own,
+	// on the trace port its Ports["trace"] reports, that stores every
+	// connection's trace. It implies Proxy.
 	Trace bool `json:"trace,omitempty"`
-	// Proxy fronts the first node with the capture proxy and stores no captures,
-	// so shaping sets apply without filling the store. When Trace is set, Proxy
+	// Proxy fronts every node with a capture proxy and stores no captures, so
+	// shaping sets apply without filling the store. When Trace is set, Proxy
 	// has no effect.
 	Proxy bool `json:"proxy,omitempty"`
+	// Toxics routes every route between the nodes and every node's clients
+	// through proxies of the instance's agent, which Links lists. It needs an
+	// agent that declares the toxics capability.
+	Toxics bool `json:"toxics,omitempty"`
 }
 
 type CreateSuperClusterRequest struct {
@@ -101,28 +110,36 @@ type CreateSuperClusterRequest struct {
 	Snippets    map[string]string `json:"snippets,omitempty"`
 	Template    string            `json:"template,omitempty"`
 	TLS         *TLSOptions       `json:"tls,omitempty"`
-	// Trace fronts the first node of the first cluster with a single capture proxy
-	// that stores every connection's trace. It implies Proxy.
+	// Trace fronts every node of every cluster with a capture proxy of its
+	// own, on the trace port its Ports["trace"] reports, that stores every
+	// connection's trace. It implies Proxy.
 	Trace bool `json:"trace,omitempty"`
-	// Proxy fronts the first node of the first cluster with the capture proxy and
-	// stores no captures, so shaping sets apply without filling the store. When
-	// Trace is set, Proxy has no effect.
+	// Proxy fronts every node with a capture proxy and stores no captures, so
+	// shaping sets apply without filling the store. When Trace is set, Proxy
+	// has no effect.
 	Proxy bool `json:"proxy,omitempty"`
+	// Toxics routes every route, every gateway between the clusters and every
+	// node's clients through proxies of the instance's agent, which Links lists.
+	// It needs an agent that declares the toxics capability.
+	Toxics bool `json:"toxics,omitempty"`
 }
 
 type ManagedServer struct {
-	Name    string         `json:"name"`
-	Cluster string         `json:"cluster"`
-	Port    int            `json:"port"`
-	Ports   map[string]int `json:"ports,omitempty"`
-	URL     string         `json:"url,omitempty"`
+	Name    string `json:"name"`
+	Cluster string `json:"cluster"`
+	// Port is the server's client port, or the port of its client proxy for an
+	// instance created with toxics.
+	Port  int            `json:"port"`
+	Ports map[string]int `json:"ports,omitempty"`
+	URL   string         `json:"url,omitempty"`
 	// Advertise is the configured client_advertise host for this server, or empty
 	// when the node advertises nothing. Clients prefer it over the management
 	// connection host when building the node's reachable URL.
 	Advertise string `json:"advertise,omitempty"`
 	Running   bool   `json:"running"`
-	// TraceURL is the capture-proxy URL for a server created with trace capture
-	// enabled. Set client-side from Ports["trace"]; empty when not traced.
+	// TraceURL is the URL of the server's own capture proxy, for every server
+	// of an instance created with trace capture enabled. Set client-side from
+	// Ports["trace"]; empty when not traced.
 	TraceURL string `json:"trace_url,omitempty"`
 	// Version is the server version the node runs, in its backend's own version
 	// string. Set by status only; empty when the node could not report it.
@@ -135,6 +152,32 @@ type CreateResponse struct {
 	Kind        string           `json:"kind"`
 	Servers     []*ManagedServer `json:"servers"`
 	TLS         *TLSMaterial     `json:"tls,omitempty"`
+	// Links lists the proxied links of an instance created with toxics: its
+	// routes, then its gateways, then its client proxies. Empty for any other
+	// instance.
+	Links []Link `json:"links,omitempty"`
+}
+
+// Link is one proxied link of an instance created with toxics: a proxy the
+// instance's agent runs, and where it forwards what it accepts.
+type Link struct {
+	// Name names the link: "route:<node>-><node>", "gateway:<cluster>-><node>"
+	// or "client:<node>".
+	Name string `json:"name"`
+	// Kind is "route", "gateway" or "client".
+	Kind string `json:"kind"`
+	// From is the node that dials through a route proxy, or the cluster whose
+	// nodes dial through a gateway proxy. Empty for a client proxy.
+	From string `json:"from,omitempty"`
+	// To is the node the proxy forwards to.
+	To string `json:"to"`
+	// Proxy is the host:port the nodes dial a route or gateway proxy on, and
+	// the host:port clients dial a client proxy on, which is on the advertise
+	// host when one is set, as the server's client_advertise renders it.
+	Proxy string `json:"proxy"`
+	// Upstream is the host:port the proxy forwards to: To's cluster, gateway or
+	// live client listener.
+	Upstream string `json:"upstream"`
 }
 
 type DestroyRequest struct {
@@ -217,8 +260,9 @@ type InstanceStatus struct {
 	Kind        string          `json:"kind"`
 	Servers     []ManagedServer `json:"servers"`
 	// ShapingSets holds the ids of the shaping sets applied to the instance's
-	// capture proxy, in the order they were applied. Empty when the instance has
-	// no proxy or the capturer does not shape.
+	// capture proxies, on every server or on one, in the order they were first
+	// applied. Empty when the instance has no proxy or the capturer does not
+	// shape.
 	ShapingSets []string `json:"shaping_sets,omitempty"`
 	// Backend is the name the backend running the instance's servers was
 	// registered under. Its presence is how a client tells a service whose
@@ -226,8 +270,24 @@ type InstanceStatus struct {
 	Backend string `json:"backend,omitempty"`
 	// Capabilities holds the capabilities the instance's backend declares, such
 	// as "kill", "pause" and "version-change", in the order it declares them.
-	// Empty when it declares none.
+	// Empty when it declares none. The agent's are in AgentCapabilities.
 	Capabilities []string `json:"capabilities,omitempty"`
+	// Agent is the name the service's network agent was registered under.
+	// Empty, and omitted, when the service has no agent.
+	Agent string `json:"agent,omitempty"`
+	// AgentCapabilities holds the capabilities the service's network agent
+	// declares, such as "capture" and "shaping", in the order it declares
+	// them. Empty when the service has no agent or it declares none.
+	AgentCapabilities []string `json:"agent_capabilities,omitempty"`
+	// Links lists the proxied links of an instance created with toxics, as the
+	// create response did. Empty for any other instance.
+	Links []Link `json:"links,omitempty"`
+	// Toxics lists the toxics in place on the links of an instance created
+	// with toxics, in the order they were added, each with the links its
+	// selector resolved to and when it was added, as tester.toxic.report
+	// lists them. Empty when none is in place, for any other instance, and
+	// when the agent could not report them.
+	Toxics []ActiveToxic `json:"toxics,omitempty"`
 	// EventsSeq is the stream sequence of the latest of the service's own
 	// events of the instance in its events stream, read before the rest of the
 	// status, so a reader follows the stream after it without a gap. Agent
@@ -264,13 +324,19 @@ type ReloadServerResponse struct {
 }
 
 // ShapingSet is a named group of traffic shaping rules applied to the connections
-// through an instance's capture proxy whose CONNECT name matches ConnectionName, a
+// through an instance's capture proxies whose CONNECT name matches ConnectionName, a
 // regular expression. Rules are evaluated in order and the first rule that fires
 // takes the frame. The types carry no validation: the capturer compiles a set when
 // it is applied and refuses one it cannot, naming the rule and field.
+//
+// Server, when set, names the one server of the instance whose capture proxy the
+// set applies on, a ManagedServer.Name; a server that is not captured is refused.
+// Empty applies the set on every server's capture proxy. The id is unique across
+// the instance either way.
 type ShapingSet struct {
 	ID             string        `json:"id"`
 	ConnectionName string        `json:"connection_name"`
+	Server         string        `json:"server,omitempty"`
 	Rules          []ShapingRule `json:"rules"`
 }
 
@@ -410,9 +476,9 @@ func (a *ShapingAction) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ShapeSetRequest adds a shaping set to an instance's capture proxy, replacing one
-// with the same id and resetting its counters. The instance must have been created
-// with trace capture.
+// ShapeSetRequest adds a shaping set to an instance's capture proxies, every
+// server's or the one Set.Server names, replacing one with the same id and
+// resetting its counters. The instance must have been created with trace capture.
 type ShapeSetRequest struct {
 	InstanceID string     `json:"instance_id"`
 	Set        ShapingSet `json:"set"`
@@ -444,10 +510,14 @@ type ShapeReportResponse struct {
 	Sets []ShapingReport `json:"sets"`
 }
 
-// ShapingReport lists every time a rule of one set fired.
+// ShapingReport lists every time a rule of one set fired, on every server the set
+// applies on, in the order of their time. Servers counts the firings by the name
+// of the server whose capture proxy they fired on, with an entry, zero included,
+// for every server the set applies on.
 type ShapingReport struct {
 	ID      string          `json:"id"`
 	Firings []ShapingFiring `json:"firings"`
+	Servers map[string]int  `json:"servers,omitempty"`
 }
 
 // ShapingFiring records one rule firing on one frame. FrameID is the frame's id in
@@ -460,6 +530,191 @@ type ShapingFiring struct {
 	Rule           string    `json:"rule"`
 	Action         string    `json:"action"`
 	Time           time.Time `json:"time"`
+}
+
+const (
+	// ToxicKindRoute selects the route links between the nodes of a cluster.
+	ToxicKindRoute = "route"
+	// ToxicKindGateway selects the gateway links between the clusters of a
+	// super-cluster.
+	ToxicKindGateway = "gateway"
+	// ToxicKindClient selects the client links in front of the nodes.
+	ToxicKindClient = "client"
+)
+
+const (
+	// ToxicDirectionTo selects the data flowing from From toward To, and on a
+	// client link the data flowing toward the server.
+	ToxicDirectionTo = "to"
+	// ToxicDirectionFrom selects the data flowing from To back toward From, and
+	// on a client link the data flowing from the server.
+	ToxicDirectionFrom = "from"
+	// ToxicDirectionBoth selects the data flowing either way. It is the default.
+	ToxicDirectionBoth = "both"
+)
+
+const (
+	// ToxicCut blackholes the links: the proxies keep their ports and accept
+	// dials, data is dropped both ways, and connections go silent until the
+	// servers' ping timers close them. It takes no attributes and always acts
+	// both ways. Data already inside a later toxic, such as a latency toxic's
+	// buffer, is still delivered after a cut starts.
+	ToxicCut = "cut"
+	// ToxicLatency delays data by latency ms, give or take jitter ms.
+	ToxicLatency = "latency"
+	// ToxicBandwidth limits data to rate KB/s.
+	ToxicBandwidth = "bandwidth"
+	// ToxicSlowClose delays the close of a connection by delay ms.
+	ToxicSlowClose = "slow_close"
+	// ToxicTimeout drops data and closes the connection after timeout ms, or
+	// never closes it when timeout is 0.
+	ToxicTimeout = "timeout"
+	// ToxicResetPeer resets the connection timeout ms after data arrives.
+	ToxicResetPeer = "reset_peer"
+	// ToxicSlicer cuts data into pieces of average_size bytes, varying by up to
+	// size_variation bytes, sent delay microseconds apart.
+	ToxicSlicer = "slicer"
+	// ToxicLimitData closes the connection once bytes bytes have passed.
+	ToxicLimitData = "limit_data"
+	// ToxicLossy emulates packet loss as TCP delivers it, as stalls rather
+	// than lost bytes. The stream is cut into 1460-byte segments, each lost
+	// with chance loss, above 0 and below 1, which is required, and data that
+	// arrives after the stream was idle for 50ms starts a segment of its own,
+	// as a write after a pause goes in a packet of its own. A lost segment
+	// stalls the stream for rto ms, 200 by default, and each retransmission
+	// lost again doubles the stall, up to max_rto ms, 3200 by default. Later
+	// data waits behind it, and no byte is lost or reordered while it is in
+	// place; removing it while the stream after it accepts nothing for more
+	// than 5s drops the data it held, as toxiproxy does when it removes a
+	// toxic. Its attributes are the agent's own, not toxiproxy's. Its
+	// toxicity is rolled once for each stream of each connection and kept
+	// when the stream's chain is rebuilt.
+	ToxicLossy = "lossy"
+)
+
+// ToxicSelector names the links of an instance created with toxics that a
+// toxic acts on, by what the caller means rather than by the proxies: a link
+// kind, the nodes or clusters at their ends, and the direction the data flows
+// in. The agent resolves it to its proxies and their streams, and refuses a
+// selector that matches no link, names an unknown node or cluster, or
+// contradicts itself, such as a Direction of to or from with neither From nor
+// To, or a Node with From or To.
+//
+// It resolves as agent.Toxics describes. On a route the data from A to B is the
+// upstream of the A to B proxy and the downstream of the B to A proxy. On a
+// gateway it is the upstream of the proxies of A's cluster to B, which every
+// node of that cluster shares, so a gateway toxic whose From is a node acts on
+// its whole cluster, and only a cut acts on the downstream. On a client link
+// the data to the server is the upstream. A Node alone selects every link of
+// the node, and a cut of it unplugs the node, silencing its connections through
+// the gateway proxies its cluster shares too. A cut always acts both ways.
+type ToxicSelector struct {
+	// Kind is one of the ToxicKind* constants. Empty selects every kind.
+	Kind string `json:"kind,omitempty"`
+	// From is a node or a cluster at one end of the links. Empty matches any.
+	// A client link has no From.
+	From string `json:"from,omitempty"`
+	// To is a node or a cluster at the other end of the links, and the server
+	// of a client link. Empty matches any.
+	To string `json:"to,omitempty"`
+	// Node selects every link of one node, both ways. It cannot be combined
+	// with From or To. A cut of a node alone unplugs it.
+	Node string `json:"node,omitempty"`
+	// Direction is one of the ToxicDirection* constants. Empty means both.
+	Direction string `json:"direction,omitempty"`
+}
+
+// Toxic is a named fault on the links a selector names. Type is one of the
+// Toxic* constants. Attributes are those of toxiproxy's toxic of that type,
+// by toxiproxy's names and in its units, or for ToxicLossy the agent's own,
+// which the agent validates before it applies them. Toxicity is the chance,
+// in [0, 1], that the toxic acts, 1 when nil: toxiproxy rolls it for each
+// stream of each connection, and again whenever the stream's chain is rebuilt
+// by adding or removing another toxic, while ToxicLossy rolls it once for
+// each stream. A cut cuts every connection and accepts no toxicity other
+// than 1.
+type Toxic struct {
+	Name       string         `json:"name"`
+	Selector   ToxicSelector  `json:"selector"`
+	Type       string         `json:"type"`
+	Attributes map[string]any `json:"attributes,omitempty"`
+	Toxicity   *float64       `json:"toxicity,omitempty"`
+}
+
+// ActiveToxic is a toxic in place on an instance, with the names of the links
+// its selector resolved to, in report order, and when it was added.
+type ActiveToxic struct {
+	Toxic
+	Links []string  `json:"links"`
+	Since time.Time `json:"since"`
+}
+
+// LinkToxics is one proxied link of an instance and the toxics on it, in the
+// order they were added.
+type LinkToxics struct {
+	Link
+	Toxics []LinkToxic `json:"toxics,omitempty"`
+}
+
+// LinkToxic is one toxic on one link, as the caller sees it. Direction is the
+// data it acts on, relative to the link: ToxicDirectionTo for the data
+// flowing from the link's From toward its To, ToxicDirectionFrom for the
+// reverse, and ToxicDirectionBoth for both. Node, set only on a gateway link,
+// limits a cut to the connections of that source node, since the link's
+// proxy is shared by every node of its cluster.
+type LinkToxic struct {
+	Name       string         `json:"name"`
+	Type       string         `json:"type"`
+	Direction  string         `json:"direction"`
+	Node       string         `json:"node,omitempty"`
+	Attributes map[string]any `json:"attributes,omitempty"`
+	Toxicity   float64        `json:"toxicity"`
+	Since      time.Time      `json:"since"`
+}
+
+// ToxicAddRequest adds a toxic to an instance created with toxics. Its name
+// must not be in use on the instance.
+type ToxicAddRequest struct {
+	InstanceID string `json:"instance_id"`
+	Toxic      Toxic  `json:"toxic"`
+}
+
+type ToxicAddResponse struct {
+	Toxic ActiveToxic `json:"toxic"`
+}
+
+// ToxicRemoveRequest removes the toxic named Name from an instance.
+type ToxicRemoveRequest struct {
+	InstanceID string `json:"instance_id"`
+	Name       string `json:"name"`
+}
+
+type ToxicRemoveResponse struct {
+	Removed string `json:"removed"`
+}
+
+// ToxicClearRequest removes every toxic from an instance.
+type ToxicClearRequest struct {
+	InstanceID string `json:"instance_id"`
+}
+
+// ToxicClearResponse lists the names of the toxics removed, in the order they
+// were added.
+type ToxicClearResponse struct {
+	Cleared []string `json:"cleared"`
+}
+
+// ToxicReportRequest reports the links of an instance and the toxics on them.
+type ToxicReportRequest struct {
+	InstanceID string `json:"instance_id"`
+}
+
+// ToxicReportResponse lists every proxied link of an instance with the toxics
+// on it, in the order the create response lists the links, and every toxic in
+// place, in the order they were added.
+type ToxicReportResponse struct {
+	Links  []LinkToxics  `json:"links"`
+	Toxics []ActiveToxic `json:"toxics"`
 }
 
 // ClockRequest asks the service for the clocks of the participants it knows,
