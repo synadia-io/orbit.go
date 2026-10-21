@@ -2,6 +2,7 @@ package ntf
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -90,47 +91,72 @@ func TestWithTraceCapture_Cluster(t *testing.T) {
 	client := New(t, testServerURL())
 	t.Cleanup(func() { client.Reset(t) })
 
-	inst := client.CreateCluster(t, 2, false, WithTraceCapture())
+	inst := client.CreateCluster(t, 3, false, WithTraceCapture())
 	defer inst.Destroy(t)
 
-	// Exactly one server — the first — is fronted by a single proxy.
-	traced := 0
+	// Every server is fronted by a capture proxy of its own, and the first
+	// server's TraceURL is still its own trace port.
+	urls := map[string]bool{}
 	for _, srv := range inst.Servers {
-		if srv.TraceURL != "" {
-			traced++
+		if srv.TraceURL == "" {
+			t.Fatalf("server %q carries no trace URL", srv.Name)
 		}
-	}
-	if traced != 1 {
-		t.Fatalf("expected exactly 1 traced server, got %d", traced)
+		if urls[srv.TraceURL] {
+			t.Fatalf("server %q shares trace URL %s", srv.Name, srv.TraceURL)
+		}
+		urls[srv.TraceURL] = true
 	}
 	first := inst.Servers[0]
-	if first.TraceURL == "" {
-		t.Fatalf("expected the first server %q to carry the trace proxy", first.Name)
+	if !strings.HasSuffix(first.TraceURL, fmt.Sprintf(":%d", first.Ports["trace"])) {
+		t.Errorf("first server's trace URL %s is not its trace port %d", first.TraceURL, first.Ports["trace"])
 	}
 
-	nc, err := nats.Connect(first.TraceURL, nats.Name("tester/trace/cluster"))
-	if err != nil {
-		t.Fatalf("connect via trace url: %v", err)
+	for _, srv := range inst.Servers {
+		nc, err := nats.Connect(srv.TraceURL, nats.Name("tester/trace/cluster/"+srv.Name))
+		if err != nil {
+			t.Fatalf("connect via %s's trace url: %v", srv.Name, err)
+		}
+		sub, err := nc.SubscribeSync("demo")
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		err = nc.Publish("demo", []byte("hi"))
+		if err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		err = nc.Flush()
+		if err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		_, err = sub.NextMsg(2 * time.Second)
+		if err != nil {
+			t.Fatalf("next msg through %s: %v", srv.Name, err)
+		}
+		nc.Close()
 	}
-	sub, err := nc.SubscribeSync("demo")
-	if err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	if err := nc.Publish("demo", []byte("hi")); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	if err := nc.Flush(); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	if _, err := sub.NextMsg(2 * time.Second); err != nil {
-		t.Fatalf("next msg: %v", err)
-	}
-	nc.Close()
 
 	store := inst.TraceStore(t)
-	info := waitForTraceObject(t, store, inst.ID, 5*time.Second)
-	if got := info.Metadata["server_name"]; got != first.Name {
-		t.Errorf("metadata server_name = %q, want first node %q", got, first.Name)
+	if !waitForTraceCount(t, store, inst.ID, len(inst.Servers), 5*time.Second) {
+		t.Fatalf("want a capture through each of the %d servers", len(inst.Servers))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	infos, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("list captures: %v", err)
+	}
+	servers := map[string]string{}
+	for _, info := range infos {
+		if info.Metadata["instance_id"] == inst.ID {
+			servers[info.Metadata["client_name"]] = info.Metadata["server_name"]
+		}
+	}
+	for _, srv := range inst.Servers {
+		got := servers["tester/trace/cluster/"+srv.Name]
+		if got != srv.Name {
+			t.Errorf("capture through %s has server_name %q", srv.Name, got)
+		}
 	}
 }
 

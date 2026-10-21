@@ -402,9 +402,9 @@ Beyond `Destroy`, an instance exposes per-server and whole-instance operations:
 
 ### Trace capture
 
-`WithTraceCapture` fronts the instance's first server with an in-process capture proxy on a random port. The
-convenience helpers still connect directly to the server (untraced); to capture, dial the proxy yourself via
-`ManagedServer.TraceURL`. Every connection through the proxy has its trace stored — in the
+`WithTraceCapture` fronts every server of the instance with a capture proxy of its own, on a trace port from the
+service's range. The convenience helpers still connect directly to the servers (untraced); to capture, dial a proxy
+yourself via its server's `ManagedServer.TraceURL`. Every connection through a proxy has its trace stored — in the
 [Trace Assert](https://github.com/synadia-labs/traceassert) expanded format — as an object in the management server's
 `TRACES` JetStream object store.
 
@@ -452,9 +452,12 @@ data, err := captures[0].Read(ctx)
 `Manager.Captures(ctx, instanceID, name, want)` is the same call bounded by `ctx` instead, returning
 `ntf.ErrCaptureWait` when fewer than `want` captures land in time.
 
-The proxy of a trace-capture instance also shapes traffic: `inst.SetShaping(t, set)` applies an `api.ShapingSet` to the
-connections whose CONNECT name matches the set's `ConnectionName` regular expression, `inst.ShapingReport(t, setID)`
-lists every time its rules fired, and `inst.ClearShaping(t, setID)` removes it (an empty `setID` means every set):
+The proxies of a trace-capture instance also shape traffic: `inst.SetShaping(t, set)` applies an `api.ShapingSet` to the
+connections whose CONNECT name matches the set's `ConnectionName` regular expression, on every server, or on the one
+server the set's `Server` names; a server the instance does not capture is refused. `inst.ShapingReport(t, setID)`
+lists every time its rules fired, merged across its servers in time order, with the number of firings on each server
+in `Servers`, and `inst.ClearShaping(t, setID)` removes it (an empty `setID` means every set). A set's ID is unique
+across the instance, so setting it again with another `Server` moves it:
 
 ```go
 inst.SetShaping(t, api.ShapingSet{
@@ -469,39 +472,111 @@ inst.SetShaping(t, api.ShapingSet{
 })
 ```
 
-Trace capture is plaintext-only and is rejected in combination with `WithGeneratedTLS`. On a cluster or super-cluster
-only the first node carries a `TraceURL`. The management server always runs JetStream, which also keeps every
+Trace capture is plaintext-only and is rejected in combination with `WithGeneratedTLS`. A service whose agent does
+not declare the `capture` capability refuses it with error code `018`, an `ntf.ErrService` error naming the agent
+and the capability; status reports the agent as `agent` and its capabilities as `agent_capabilities`. On a cluster
+or super-cluster every node carries a `TraceURL`, and the first node's is the one a single trace URL has always been.
+With `WithToxics` as well, each capture proxy forwards through its node's client proxy, so a capture records the
+faults its client saw. The management server always runs JetStream, which also keeps every
 instance's events, whether or not any instance traces. Captures hold full payloads and headers,
 including the CONNECT frame, so treat the `TRACES` store as sensitive.
+
+### Link proxies
+
+`WithToxics` puts a proxy of the service's network agent on every route, every gateway between clusters and every
+server's client listener, so links can be faulted. Each server's `Port` and `URL` report its client proxy, so the
+convenience helpers connect through it, and `inst.Links` lists every proxy with its `Name` (`route:<node>-><node>`,
+`gateway:<cluster>-><node>` or `client:<node>`), `Kind`, `From`, `To`, the `Proxy` address it is dialed on (for a
+client proxy, on the advertise host when one is set) and the `Upstream` it forwards to; `tester.status` reports the
+same list. A service whose agent does not declare the `toxics` capability refuses it with error code `018`, and one
+with no agent with `014`. Generated TLS on client ports works with it; TLS on routes or gateways is refused with
+error code `019`, on create and on `UpdateServer`.
+
+### Faulting links
+
+An instance created with `WithToxics` takes toxics on its links. `inst.AddToxic(t, toxic)` adds an `api.Toxic`: a
+`Name` unique on the instance, a `Selector` naming the links, a `Type` and its `Attributes`, and a `Toxicity`, the
+chance it acts, 1 when nil: toxiproxy rolls it for each stream of each connection, and again whenever the stream's
+chain is rebuilt by adding or removing another toxic. A cut cuts every connection and accepts no toxicity other than
+1. `inst.RemoveToxic(t, name)` removes one, `inst.ClearToxics(t)` removes every toxic, and `inst.ToxicReport(t)` lists
+every link with the toxics on it, and every toxic with the links it resolved to. `Manager.AddToxic`, `RemoveToxic`,
+`ClearToxics` and `ToxicReport` are the same calls by instance ID. `inst.Status(t)` lists the toxics in place as
+`Toxics`, and each change publishes an `events.ToxicAction` on the instance's events, one per toxic `added`,
+`removed` or `cleared`.
+
+A selector names links by what you mean: a `Kind` (`api.ToxicKindRoute`, `ToxicKindGateway` or `ToxicKindClient`;
+empty for every kind), `From` and `To` as a server or a cluster name, and a `Direction`: `api.ToxicDirectionTo` for
+the data flowing from `From` toward `To`, and on a client link toward the server, `ToxicDirectionFrom` for the
+reverse, and `ToxicDirectionBoth`, the default; to or from needs `From` or `To`. `Node` alone selects every link of
+one server, both ways. Gateway proxies are shared by every server of their source cluster, so a gateway toxic from a
+server acts on its cluster's gateways.
+
+The types are toxiproxy's `latency`, `bandwidth`, `slow_close`, `timeout`, `reset_peer`, `slicer` and `limit_data`,
+with toxiproxy's attribute names and units (`latency` and `jitter` in ms, `rate` in KB/s, and so on), and `cut`, a
+blackhole that keeps the proxies accepting but drops data both ways, so connections go silent until the servers'
+ping timers close them. Data already inside a later toxic, such as a latency toxic's buffer, is still delivered after
+a cut starts. `inst.Unplug(t, server)` cuts every link of a server and returns a function that restores it:
+
+```go
+client.WithJetStreamCluster(t, 3, func(t testing.TB, nc *nats.Conn, inst *ntf.Instance) {
+    restore := inst.Unplug(t, inst.Servers[2])
+    // ... the cluster carries on without the third server ...
+    restore()
+
+    inst.AddToxic(t, api.Toxic{
+        Name:       "slow-routes",
+        Selector:   api.ToxicSelector{Kind: api.ToxicKindRoute, Node: inst.Servers[0].Name},
+        Type:       api.ToxicLatency,
+        Attributes: map[string]any{"latency": 50, "jitter": 10},
+    })
+}, ntf.WithToxics())
+```
+
+A cut acts both ways, and removing it closes the connections that dropped data while it was in place. The service
+refuses the toxic calls with error code `002` without an instance ID, `014` without an agent, `018` when its agent
+does not declare `toxics`, and `020` for an instance created without `WithToxics`. A toxic the agent refuses for what
+it asks, such as a name in use, a selector that matches no link, a one-way cut, or an attribute that is unknown or out
+of range, is refused with `021`, and the `ntf.ErrService` error names the toxic and the field; any other failure of
+the agent answers `022`.
 
 ## Template environment
 
 When you write a snippet body or a full template (`WithTemplate`), it is rendered with Go `text/template` against this
 environment. Cluster fields are zero on a single server; super-cluster fields are zero on a single cluster.
 
-| Field            | Type                | Notes                                                                              |
-|------------------|---------------------|------------------------------------------------------------------------------------|
-| `.ServerName`    | string              | globally unique; `<short>-n<i>` or `<short>-c<c>_s<i>`                             |
-| `.ShortID`       | string              | 8-char tail of the instance UUID                                                   |
-| `.InstanceID`    | string              | full instance UUID                                                                 |
-| `.ServerIndex`   | int                 | 1-based index within the cluster                                                   |
-| `.ServerDir`     | string              | absolute path to the server's storage dir                                          |
-| `.StoreDir`      | string              | currently equal to `.ServerDir`                                                    |
-| `.Host`          | string              | always `localhost` today                                                           |
-| `.AdvertiseHost` | string              | `--advertise` value; empty when unset                                              |
-| `.ClientPort`    | int                 | client listener port, reserved by the service                                      |
-| `.JetStream`     | bool                | mirrors the `jetstream` request field                                              |
-| `.ClusterName`   | string              | empty for single-server instances                                                  |
-| `.ClusterPort`   | int                 | cluster route listener port                                                        |
-| `.Routes`        | []string            | `host:port` strings of every cluster peer                                          |
-| `.Gateways`      | map[string][]string | cluster name → gateway URLs (super-cluster only)                                   |
-| `.Ports`         | map[string]int      | listener ports keyed by name (auto-populated for WS/MQTT/LeafNode)                 |
-| `.Snippets`      | map[string]string   | rendered-snippet paths by name; empty when no snippets passed                      |
-| `.TLS`           | struct              | `.TLS.CAFile`/`.CertFile`/`.KeyFile` cert paths; nil unless `WithGeneratedTLS` set |
+| Field               | Type                | Notes                                                                              |
+|---------------------|---------------------|------------------------------------------------------------------------------------|
+| `.ServerName`       | string              | globally unique; `<short>-n<i>` or `<short>-c<c>_s<i>`                             |
+| `.ShortID`          | string              | 8-char tail of the instance UUID                                                   |
+| `.InstanceID`       | string              | full instance UUID                                                                 |
+| `.ServerIndex`      | int                 | 1-based index within the cluster                                                   |
+| `.ServerDir`        | string              | absolute path to the server's storage dir                                          |
+| `.StoreDir`         | string              | currently equal to `.ServerDir`                                                    |
+| `.Host`             | string              | always `localhost` today                                                           |
+| `.AdvertiseHost`    | string              | `--advertise` value; empty when unset                                              |
+| `.ClientPort`       | int                 | client listener port, reserved by the service                                      |
+| `.JetStream`        | bool                | mirrors the `jetstream` request field                                              |
+| `.ClusterName`      | string              | empty for single-server instances                                                  |
+| `.ClusterPort`      | int                 | cluster route listener port                                                        |
+| `.Routes`           | []string            | `host:port` strings of every cluster peer                                          |
+| `.Gateways`         | map[string][]string | cluster name → gateway URLs (super-cluster only)                                   |
+| `.Ports`            | map[string]int      | listener ports keyed by name (auto-populated for WS/MQTT/LeafNode)                 |
+| `.Snippets`         | map[string]string   | rendered-snippet paths by name; empty when no snippets passed                      |
+| `.TLS`              | struct              | `.TLS.CAFile`/`.CertFile`/`.KeyFile` cert paths; nil unless `WithGeneratedTLS` set |
+| `.ClientAdvertise`  | string              | client proxy `host:port`, the `client_advertise`; empty without `WithToxics`       |
+| `.ClusterAdvertise` | string              | dead `host:port`, the cluster `advertise`; empty without `WithToxics`              |
+| `.GatewayAdvertise` | string              | dead `host:port`, the gateway `advertise`; empty without `WithToxics`              |
+
+With `WithToxics`, `.Routes` lists the route proxy for each peer and `.Gateways` lists, for each other cluster, the
+proxies the server's cluster shares to that cluster's servers.
 
 `WithTemplate` replaces the entire main template with your own body. It composes with the typed helpers (their rendered
 files are exposed via `.Snippets.<name>`), but you become responsible for emitting correct `cluster { … }` /
-`gateway { … }` wiring — reach for it only when no typed helper expresses the change.
+`gateway { … }` wiring — reach for it only when no typed helper expresses the change. With `WithToxics` the template must
+render `.ClientAdvertise` as `client_advertise`, in a cluster `.Routes` and `.ClusterAdvertise` as the cluster
+`advertise`, and in a super-cluster `.Gateways` and `.GatewayAdvertise` as the gateway `advertise` as well, or traffic
+goes around the proxies; the service refuses a template that does not reference them with error code `007`, on create
+and on `UpdateServer`.
 
 ## Service subjects
 
@@ -510,7 +585,7 @@ debugging):
 
 | Subject                       | Description                                                               |
 |-------------------------------|---------------------------------------------------------------------------|
-| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `tls`, `trace`. |
+| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `tls`, `trace`, `toxics`. |
 | `tester.create.cluster`       | Creates a cluster.                                                        |
 | `tester.create.super-cluster` | Creates a super-cluster.                                                  |
 | `tester.stop.server`          | Stops a running server by name.                                           |
@@ -521,6 +596,10 @@ debugging):
 | `tester.list`                 | Lightweight summary of every instance.                                    |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                            |
 | `tester.reset`                | Tears down **every** instance — CI-style global wipe.                     |
-| `tester.shape.set`            | Applies a shaping set to a trace-capture instance's proxy.                |
-| `tester.shape.clear`          | Removes one shaping set, or every set, from an instance's proxy.          |
+| `tester.shape.set`            | Applies a shaping set to a trace-capture instance's proxies, or to one `server`'s. |
+| `tester.shape.clear`          | Removes one shaping set, or every set, from an instance's proxies.        |
 | `tester.shape.report`         | Reports the firings of one shaping set, or of every set.                  |
+| `tester.toxic.add`            | Adds a named toxic to the links of an instance created with toxics.       |
+| `tester.toxic.remove`         | Removes one toxic by name.                                                |
+| `tester.toxic.clear`          | Removes every toxic of an instance.                                       |
+| `tester.toxic.report`         | Lists every link with its toxics, and every toxic with its links.         |

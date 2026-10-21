@@ -61,6 +61,9 @@ type Instance struct {
 	// by the service when WithGeneratedTLS was set on the create call.
 	// Nil otherwise. Use TLSConfig(inst) to build a *tls.Config from it.
 	TLS *api.TLSMaterial
+	// Links lists the proxied links of an instance created WithToxics: its
+	// routes, gateways and client proxies. Nil otherwise.
+	Links []api.Link
 
 	m *Manager
 }
@@ -78,6 +81,7 @@ type createOptions struct {
 	connectOptions []nats.Option
 	tls            *api.TLSOptions
 	trace          bool
+	toxics         bool
 }
 
 // TLSOpt customizes a WithGeneratedTLS call.
@@ -232,24 +236,44 @@ func WithConnectOptions(opts ...nats.Option) createOpt {
 	return func(o *createOptions) { o.connectOptions = append(o.connectOptions, opts...) }
 }
 
-// WithTraceCapture fronts the instance's first server with a capture proxy on a random
-// port. The proxy keeps running for the life of the instance, but using it is opt-in and
-// a separate usage model from the normal connection: the convenience helpers (WithServer,
-// WithCluster, ...) still connect directly to the server, untraced.
+// WithTraceCapture fronts every server of the instance with a capture proxy of its own, on
+// a trace port from the service's range. The proxies keep running for the life of the
+// instance, but using them is opt-in and a separate usage model from the normal
+// connection: the convenience helpers (WithServer, WithCluster, ...) still connect
+// directly to the servers, untraced.
 //
-// To capture, dial the proxy yourself via ManagedServer.TraceURL (or Ports["trace"]), e.g.
-// nats.Connect(inst.Servers[0].TraceURL). Every connection that reaches the proxy has its
-// trace stored, in the expanded format, as an object in the management server's TRACES
-// object store; read them back with Instance.Captures or Instance.TraceStore. The proxy
-// also applies the shaping sets given to Instance.SetShaping.
+// To capture, dial a proxy yourself via its server's ManagedServer.TraceURL (or
+// Ports["trace"]), e.g. nats.Connect(inst.Servers[0].TraceURL). Every connection that
+// reaches a proxy has its trace stored, in the expanded format, as an object in the
+// management server's TRACES object store, with the server it reached; read them back with
+// Instance.Captures or Instance.TraceStore. The proxies also apply the shaping sets given
+// to Instance.SetShaping, on every server or on the one a set's Server names.
 //
-// For a cluster or super-cluster a single proxy fronts the first node, so only that server
-// carries a TraceURL.
+// In a cluster or super-cluster every server carries a TraceURL; the first server's is
+// the one a single trace URL has always been. With WithToxics as well, each proxy forwards
+// through its server's client proxy, so a capture records the faults its client saw.
 //
 // Trace capture is plaintext-only and is rejected in combination with WithGeneratedTLS.
 func WithTraceCapture() createOpt {
 	return func(o *createOptions) {
 		o.trace = true
+	}
+}
+
+// WithToxics puts a proxy of the service's network agent on every route, every
+// gateway between clusters and every server's client listener, so links can
+// be faulted. Each ManagedServer's Port and URL report its client proxy, so
+// the convenience helpers connect through it, and Instance.Links lists every
+// proxy and what it forwards to.
+//
+// It needs a service whose agent declares the toxics capability; any other
+// service refuses it with error code 014 or 018. Generated TLS on client ports
+// works with it, but TLS on routes or gateways is refused with 019. With
+// WithTemplate, the template must reference the variables that carry the
+// proxies; see the template environment.
+func WithToxics() createOpt {
+	return func(o *createOptions) {
+		o.toxics = true
 	}
 }
 
@@ -328,6 +352,13 @@ func WithTopLevel(body string) snippetOpt { return snippetOpt{key: "top", body: 
 // …), so the user's template has full access to topology data — but it
 // becomes responsible for emitting correct cluster {…} / gateway {…} blocks;
 // the service no longer guarantees topology correctness when this is set.
+//
+// With WithToxics the template must render .ClientAdvertise as
+// client_advertise; in a cluster also .Routes and .ClusterAdvertise as the
+// cluster advertise; and in a super-cluster also .Gateways and
+// .GatewayAdvertise as the gateway advertise, or traffic goes around the
+// proxies. The service refuses one that does not reference them, on create and
+// on UpdateServer.
 //
 // Reach for this only when no typed snippet helper expresses the change.
 // Composes with the typed helpers: snippet files are still rendered to disk
@@ -743,9 +774,9 @@ func (i *Instance) TraceStore(t testing.TB) jetstream.ObjectStore {
 	return store
 }
 
-// SetShaping applies set to this instance's capture proxy, replacing a set with the
-// same ID and resetting its counters. The instance must have been created with
-// WithTraceCapture.
+// SetShaping applies set to this instance's capture proxies, on every server or on the
+// one set.Server names, replacing a set with the same ID and resetting its counters.
+// The instance must have been created with WithTraceCapture.
 func (i *Instance) SetShaping(t testing.TB, set api.ShapingSet) *api.ShapeSetResponse {
 	t.Helper()
 
@@ -757,7 +788,7 @@ func (i *Instance) SetShaping(t testing.TB, set api.ShapingSet) *api.ShapeSetRes
 }
 
 // ClearShaping removes the shaping set with ID setID from this instance's capture
-// proxy, or every set when setID is empty.
+// proxies, or every set when setID is empty.
 func (i *Instance) ClearShaping(t testing.TB, setID string) *api.ShapeClearResponse {
 	t.Helper()
 
@@ -769,7 +800,8 @@ func (i *Instance) ClearShaping(t testing.TB, setID string) *api.ShapeClearRespo
 }
 
 // ShapingReport reports every firing of the shaping set with ID setID on this
-// instance's capture proxy, or of every set when setID is empty.
+// instance's capture proxies, or of every set when setID is empty, each set's
+// firings merged across its servers with a count per server in Servers.
 func (i *Instance) ShapingReport(t testing.TB, setID string) *api.ShapeReportResponse {
 	t.Helper()
 
@@ -778,6 +810,74 @@ func (i *Instance) ShapingReport(t testing.TB, setID string) *api.ShapeReportRes
 		t.Fatalf("could not report shaping: %v", err)
 	}
 	return resp
+}
+
+// AddToxic adds toxic to this instance's links. The instance must have been
+// created with WithToxics. See Manager.AddToxic.
+func (i *Instance) AddToxic(t testing.TB, toxic api.Toxic) *api.ToxicAddResponse {
+	t.Helper()
+
+	resp, err := i.m.AddToxic(context.Background(), i.ID, toxic)
+	if err != nil {
+		t.Fatalf("could not add toxic %s: %v", toxic.Name, err)
+	}
+	return resp
+}
+
+// RemoveToxic removes the toxic named name from this instance's links.
+func (i *Instance) RemoveToxic(t testing.TB, name string) *api.ToxicRemoveResponse {
+	t.Helper()
+
+	resp, err := i.m.RemoveToxic(context.Background(), i.ID, name)
+	if err != nil {
+		t.Fatalf("could not remove toxic %s: %v", name, err)
+	}
+	return resp
+}
+
+// ClearToxics removes every toxic from this instance's links.
+func (i *Instance) ClearToxics(t testing.TB) *api.ToxicClearResponse {
+	t.Helper()
+
+	resp, err := i.m.ClearToxics(context.Background(), i.ID)
+	if err != nil {
+		t.Fatalf("could not clear toxics: %v", err)
+	}
+	return resp
+}
+
+// ToxicReport reports every proxied link of this instance with the toxics on
+// it, and every toxic in place.
+func (i *Instance) ToxicReport(t testing.TB) *api.ToxicReportResponse {
+	t.Helper()
+
+	resp, err := i.m.ToxicReport(context.Background(), i.ID)
+	if err != nil {
+		t.Fatalf("could not report toxics: %v", err)
+	}
+	return resp
+}
+
+// Unplug cuts every route, gateway and client link of server, both ways, with a
+// cut named "unplug-<server name>", as pulling its network cable would: its
+// connections go silent until the servers' ping timers close them. It returns
+// restore, which removes the cut. The instance must have been created with
+// WithToxics.
+func (i *Instance) Unplug(t testing.TB, server *api.ManagedServer) (restore func()) {
+	t.Helper()
+
+	if serverName(server) == "" {
+		t.Fatalf("could not unplug: %v", ErrServerRequired)
+	}
+
+	name := "unplug-" + server.Name
+	i.AddToxic(t, api.Toxic{Name: name, Selector: api.ToxicSelector{Node: server.Name}, Type: api.ToxicCut})
+
+	return func() {
+		t.Helper()
+
+		i.RemoveToxic(t, name)
+	}
 }
 
 // Captures returns this instance's captures whose CONNECT name is clientName,
