@@ -15,6 +15,7 @@ package pcgroups
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -49,6 +50,66 @@ type ConsumerGroupMsg struct {
 type ConsumerGroupConsumeContext interface {
 	Stop()
 	Done() <-chan error
+}
+
+// ConsumeOpt is an option that can be passed to [ElasticConsume] and [StaticConsume]
+type ConsumeOpt func(*consumeOptions) error
+
+type consumeOptions struct {
+	errHandler func(err error)
+}
+
+// WithConsumeErrHandler sets a handler that is invoked with the errors reported by the underlying
+// JetStream consumer, for example when the member's consumer gets deleted.
+// The handler is called from the library's goroutines and must not block.
+func WithConsumeErrHandler(handler func(err error)) ConsumeOpt {
+	return func(o *consumeOptions) error {
+		if handler == nil {
+			return errors.New("the consume error handler must not be nil")
+		}
+		o.errHandler = handler
+		return nil
+	}
+}
+
+func applyConsumeOpts(opts []ConsumeOpt) (consumeOptions, error) {
+	var o consumeOptions
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt(&o); err != nil {
+			return consumeOptions{}, err
+		}
+	}
+	return o, nil
+}
+
+// terminalConsumeError is a terminal error reported by a consume context, which stops after reporting it
+type terminalConsumeError struct {
+	consumeContext jetstream.ConsumeContext
+	err            error
+}
+
+// isTerminalConsumeError returns true for the errors after which nats.go stops the consume context
+func isTerminalConsumeError(err error) bool {
+	return errors.Is(err, jetstream.ErrConsumerDeleted) || errors.Is(err, jetstream.ErrBadRequest)
+}
+
+// newConsumeErrHandler returns the pull consume option that forwards every error to the user's handler (if any)
+// and reports the terminal ones to the instance's control routine through the terminal channel.
+func newConsumeErrHandler(userHandler func(err error), terminal chan<- terminalConsumeError) jetstream.PullConsumeOpt {
+	return jetstream.ConsumeErrHandler(func(cc jetstream.ConsumeContext, err error) {
+		if userHandler != nil {
+			userHandler(err)
+		}
+		if isTerminalConsumeError(err) {
+			select {
+			case terminal <- terminalConsumeError{consumeContext: cc, err: err}:
+			default:
+			}
+		}
+	})
 }
 
 // Compose the consumer group's config key name

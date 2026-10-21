@@ -107,6 +107,8 @@ The arguments are:
 
 Consumption stops either when some error is encountered (for example, any change to the consumer group's config in the case of a static consumer group), the consumer group's config gets deleted, or you invoke `Stop()` on the `ConsumerGroupConsumeContext`. Invoking `Done()` on the `ConsumerGroupConsumeContext` will return a channel on which you can receive the error code indicating why the consumption was stopped. This error code will be `nil` if the consumption terminates normally (due to the consumer group getting deleted or `Stop()` being invoked on the `ConsumerGroupConsumeContext`).
 
+Both consume functions accept an optional `pcgroups.WithConsumeErrHandler(func(err error))` that is invoked with the errors reported by the member's underlying JetStream consumer (for example when it gets deleted). The handler must not block. When the member's consumer is terminated by such an error, a static consumer group member stops consuming and the error is returned on the `Done()` channel, while an elastic consumer group member drops its consumer and re-creates it (re-joining the group) instead of staying in the membership without consuming.
+
 You can look at the `cg` CLI tool's source code for examples of how to create and consume for both static and elastic consumer groups.
 # Requirements
 
