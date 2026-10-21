@@ -21,8 +21,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"text/template"
 
+	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 )
@@ -54,7 +56,7 @@ const (
 )
 
 // errNoFreePort is the cause of a planErrPort failure for a client, cluster or
-// gateway listener.
+// gateway listener, or a proxy.
 var errNoFreePort = errors.New("could not get free port")
 
 // planError is a failure to plan an instance. Its message is the message the
@@ -166,8 +168,16 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 		return fail(planErrPort, err)
 	}
 
-	// 4. The links between the nodes.
+	// 4. The links between the nodes and, with toxics, the proxies they go
+	// through. No proxy address is asked for without toxics.
 	plan.Links = planLinks(plan)
+
+	if spec.Toxics {
+		err = planProxies(plan, place)
+		if err != nil {
+			return fail(planErrPort, err)
+		}
+	}
 
 	for _, n := range plan.nodes {
 		// 5. The node's store directory, which survives a revision, and its
@@ -195,12 +205,40 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 		}
 	}
 
-	// 8. The node the capture proxy fronts.
+	// 8. The nodes the capture proxies front, each on a trace port of its own,
+	// asked for after every other address, so an instance without trace or
+	// proxy places exactly as before.
 	if spec.Proxy {
+		err = planCaptureProxies(plan, place)
+		if err != nil {
+			return fail(planErrPort, err)
+		}
 		plan.ProxyNode = plan.nodes[0].Name
 	}
 
 	return plan, nil
+}
+
+// traceProxyName returns the name of the capture proxy in front of node, the
+// name its trace port is asked for and held under.
+func traceProxyName(node string) string {
+	return "trace:" + node
+}
+
+// planCaptureProxies asks place for the trace port of every node of plan, an
+// instance created with trace or proxy, in start order.
+func planCaptureProxies(plan *instancePlan, place backend.Placement) error {
+	plan.captureProxies = map[string]backend.Endpoint{}
+	for _, n := range plan.nodes {
+		name := traceProxyName(n.Name)
+		ep, err := place.ProxyAddress(name, "trace")
+		if err != nil {
+			return fmt.Errorf("%w: proxy %s: %w", errNoFreePort, name, err)
+		}
+		plan.captureProxies[n.Name] = ep
+	}
+
+	return nil
 }
 
 // planRevision returns the next revision of node n, as an update renders it:
@@ -413,6 +451,108 @@ func planLinks(plan *instancePlan) []backend.Link {
 	return links
 }
 
+// routeLinkName names the route link of an instance created with toxics from
+// node from to node to.
+func routeLinkName(from, to string) string {
+	return "route:" + from + "->" + to
+}
+
+// gatewayLinkName names the gateway link of an instance created with toxics
+// from cluster from to node to.
+func gatewayLinkName(from, to string) string {
+	return "gateway:" + from + "->" + to
+}
+
+// clientLinkName names the client link of an instance created with toxics in
+// front of node.
+func clientLinkName(node string) string {
+	return "client:" + node
+}
+
+// planProxies asks place for the address of every proxy of plan, an instance
+// created with toxics, in this order: one for each route link; one for each
+// cluster and each node of another cluster, shared by the cluster's gateway
+// links to that node; one for each node's client listener; and last, for a
+// cluster or super-cluster, the dead advertise address. Each route link and
+// each gateway link to a node of another cluster then dials its proxy. A
+// gateway link within a cluster stays direct, since nats-server ignores the
+// gateway URLs of its own cluster.
+func planProxies(plan *instancePlan, place backend.Placement) error {
+	proxy := func(name, kind string) (backend.Endpoint, error) {
+		ep, err := place.ProxyAddress(name, kind)
+		if err != nil {
+			return backend.Endpoint{}, fmt.Errorf("%w: proxy %s: %w", errNoFreePort, name, err)
+		}
+		return ep, nil
+	}
+
+	for i, lk := range plan.Links {
+		if lk.Kind != "route" {
+			continue
+		}
+
+		name := routeLinkName(lk.Node, lk.Peer)
+		ep, err := proxy(name, "route")
+		if err != nil {
+			return err
+		}
+		plan.proxies = append(plan.proxies, agent.Link{Name: name, Kind: "route", From: lk.Node, To: lk.Peer, Listen: ep, Upstream: lk.Dial})
+		plan.Links[i].Dial = ep
+	}
+
+	if plan.Kind == "super-cluster" {
+		gateways := map[string]backend.Endpoint{}
+		for _, cluster := range plan.Clusters {
+			for _, peer := range plan.nodes {
+				if peer.Cluster == cluster {
+					continue
+				}
+
+				name := gatewayLinkName(cluster, peer.Name)
+				ep, err := proxy(name, "gateway")
+				if err != nil {
+					return err
+				}
+				plan.proxies = append(plan.proxies, agent.Link{Name: name, Kind: "gateway", From: cluster, To: peer.Name, Listen: ep, Upstream: listenerOf(peer, "gateway").Endpoint})
+				gateways[name] = ep
+			}
+		}
+
+		clusterOf := map[string]string{}
+		for _, n := range plan.nodes {
+			clusterOf[n.Name] = n.Cluster
+		}
+		for i, lk := range plan.Links {
+			if lk.Kind != "gateway" {
+				continue
+			}
+			ep, ok := gateways[gatewayLinkName(clusterOf[lk.Node], lk.Peer)]
+			if ok {
+				plan.Links[i].Dial = ep
+			}
+		}
+	}
+
+	plan.clientProxies = map[string]backend.Endpoint{}
+	for _, n := range plan.nodes {
+		ep, err := proxy(clientLinkName(n.Name), "client")
+		if err != nil {
+			return err
+		}
+		plan.clientProxies[n.Name] = ep
+	}
+
+	if plan.Kind != "server" {
+		ep, err := proxy("advertise", "advertise")
+		if err != nil {
+			return err
+		}
+		plan.deadAdvertise = ep
+	}
+
+	return nil
+}
+
 // planTemplateData returns the template data node n of plan renders its
 // snippets and config with, short of the managed TLS settings. A node's own
 // .Routes and .Gateways entries come from its own listeners, every other entry
@@ -456,6 +596,24 @@ func planTemplateData(plan *instancePlan, n *nodePlan, spec instanceSpec, dir, s
 		l, ok := findListener(n, name)
 		if ok {
 			td.Ports[name] = l.Endpoint.Port
+		}
+	}
+
+	// With toxics, clients are told the node's client proxy, on the advertise
+	// host when one is set, and peers the dead address, so gossip does not go
+	// around the proxies.
+	if spec.Toxics {
+		client := plan.clientProxies[n.Name]
+		if spec.AdvertiseHost != "" {
+			client.Host = spec.AdvertiseHost
+		}
+		td.ClientAdvertise = client.String()
+
+		if n.Cluster != "" {
+			td.ClusterAdvertise = plan.deadAdvertise.String()
+		}
+		if plan.Kind == "super-cluster" {
+			td.GatewayAdvertise = plan.deadAdvertise.String()
 		}
 	}
 
@@ -566,4 +724,106 @@ func renderSnippets(td *templateData, snippets map[string]string, snippetsDir st
 	}
 
 	return files, nil
+}
+
+// checkRouteTLS returns an error wrapping errRouteTLS when cfg, node n's
+// parsed config, has a tls block in its cluster or gateway block or in an
+// entry of its gateway block's gateways list. Keys match in any case, as the
+// server matches them.
+func checkRouteTLS(n *nodePlan, cfg map[string]any) error {
+	for key, value := range cfg {
+		block := strings.ToLower(key)
+		if block != "cluster" && block != "gateway" {
+			continue
+		}
+
+		fields, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		for field, fieldValue := range fields {
+			if strings.EqualFold(field, "tls") {
+				return fmt.Errorf("%w: node %s enables TLS in its %s block", errRouteTLS, n.Name, block)
+			}
+
+			if block != "gateway" || !strings.EqualFold(field, "gateways") {
+				continue
+			}
+
+			entries, ok := fieldValue.([]any)
+			if !ok {
+				continue
+			}
+			for i, entry := range entries {
+				entryFields, ok := entry.(map[string]any)
+				if !ok {
+					continue
+				}
+				for entryField := range entryFields {
+					if strings.EqualFold(entryField, "tls") {
+						return fmt.Errorf("%w: node %s enables TLS in its gateway entry %s", errRouteTLS, n.Name, gatewayEntryName(entryFields, i))
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// gatewayEntryName returns the name of entry, the fields of the entry at index
+// i of a gateways list, or its 1-based position when it has no name.
+func gatewayEntryName(entry map[string]any, i int) string {
+	for field, value := range entry {
+		if !strings.EqualFold(field, "name") {
+			continue
+		}
+		name, ok := value.(string)
+		if ok && name != "" {
+			return name
+		}
+	}
+
+	return strconv.Itoa(i + 1)
+}
+
+// checkGatewayName returns an error wrapping errGatewayName when node n is in
+// a super-cluster and the gateway block of cfg, n's parsed config, has no name
+// or a name other than n's planned cluster name, which the gateway gate admits
+// a connection by. A config without a gateway block, and a node of any other
+// kind of instance, is passed over. Keys match in any case, as the server
+// matches them.
+func checkGatewayName(n *nodePlan, cfg map[string]any) error {
+	if n.TemplateData == nil || n.TemplateData.Kind != "super-cluster" {
+		return nil
+	}
+
+	for key, value := range cfg {
+		if !strings.EqualFold(key, "gateway") {
+			continue
+		}
+
+		fields, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		named := false
+		for field, fieldValue := range fields {
+			if !strings.EqualFold(field, "name") {
+				continue
+			}
+			named = true
+
+			name := fmt.Sprint(fieldValue)
+			if name != n.Cluster {
+				return fmt.Errorf("%w: node %s names its gateway %q, want %q", errGatewayName, n.Name, name, n.Cluster)
+			}
+		}
+		if !named {
+			return fmt.Errorf("%w: node %s does not name its gateway, want %q", errGatewayName, n.Name, n.Cluster)
+		}
+	}
+
+	return nil
 }

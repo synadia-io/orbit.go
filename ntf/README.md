@@ -81,27 +81,126 @@ between concurrent instances.
 connection's capture, and `proxy` to front it with the same proxy and store nothing, for shaping without captures.
 `trace` implies `proxy`. The service does not implement capture itself: a network agent, defined in package
 `agent`, does. `Options.Agents` registers agent factories by name and `Options.Agent` selects one; with none
-selected those requests are refused with error code `014`. Only the first node of a cluster or super-cluster is
-fronted, and combining either flag with generated TLS is rejected because the proxy forwards plaintext.
+selected those requests are refused with error code `014`, and with `018` when the selected agent does not declare
+the `capture` capability. Every node is fronted by a capture proxy of its own, on a trace port from the service's
+range that its `ports["trace"]` reports; the first node's is the instance's trace URL for callers that dial one.
+Combining either flag with generated TLS is rejected with `013` because the proxy forwards plaintext.
 
 ```go
 type Factory func(ctx context.Context, opts Options) (Provider, error)
 
 type Provider interface {
+    Capabilities() []Capability
     Start(ctx context.Context, spec Spec) (Agent, error)
     Close() error
 }
 ```
 
+`Capabilities` declares what the provider's agents do: `capture`, `shaping` and `toxics`, the `Capability*`
+constants. Status reports the selected agent's registered name as `agent` and its capabilities as
+`agent_capabilities`, beside the backend's `backend` and `capabilities`, and omits both when no agent is selected.
+
 `New` calls the selected factory once, after the management connection and embedded server exist and before the
 endpoints start. Its `Options` carry the service directory, `Preserve`, the logger, the management connection and
 the embedded server, which is nil when the service runs on a supplied connection.
 
-`Spec` names the instance and server being fronted, the node's client endpoint to dial, the host to listen on
-(the node's `client_advertise`, which must name a local interface), and `Store`, which is true for `trace` and
-false for `proxy` alone; the agent keeps captures only when it is true. The `Agent` that comes back reports the
-endpoint clients reach instead of the managed server's own, answers the `tester.shape.*` endpoints, and is stopped
-by the service on teardown. The agent owns any scratch space it needs.
+An agent serves an instance. `Start` runs before the instance's servers start, with a `Spec` naming the instance,
+the host to listen on (the node's `client_advertise`, which must name a local interface), and `Store`, which is
+true for `trace` and false for `proxy` alone; the agent keeps captures only when it is true. `Spec.CaptureProxies`
+holds each node's trace port, which placement reserves with `ProxyAddress` kind `trace`; the agent binds it when the
+node is fronted, and a node with no entry gets a port the OS chooses. Once the servers run, the service fronts every
+node through `ClientEdge.Front`, which an agent declaring `capture` implements, with the node's name, its live
+client endpoint and `Capture` set, and gets back the endpoint clients reach instead of the managed server's own.
+The `Agent` answers the `tester.shape.*` endpoints and is stopped once by the service on teardown and when a create
+fails. A `Start` or `Front` that could not bind returns an error wrapping `agent.ErrListen`, and the create runs
+again with fresh ports. The agent owns any scratch space it needs.
+
+A shaping set applies on every node's capture proxy, or, with `server` set to a server's name, on that node's alone;
+a server that is not captured is refused with `017`. A set's id is unique across the instance, and setting it again
+moves it to the nodes the new set names. `tester.shape.report` returns one report per set with the firings of every
+node merged in time order and `servers`, the number of firings on each node the set applies on.
+
+## Link proxies
+
+`Create*` requests accept `toxics` to put a proxy of the agent on every route, every gateway between clusters and
+every node's client listener, so links can be faulted. The agent must declare the `toxics` capability: with no agent
+selected the request is refused with `014`, and with `018` when the agent does not declare it. `Spec.Links` hands
+the agent its route and gateway proxies, each with the endpoint it listens on and the peer listener it forwards to,
+`Spec.ClientProxies` the endpoint of each node's client proxy, whose upstream is the live client endpoint once
+the node runs, and `Spec.Nodes` every node with its cluster, which toxic selectors resolve against. The service
+fronts every node through `ClientEdge.Front`, which binds that node's client proxy: with `Capture` false the
+agent returns the client proxy's endpoint, and on every node of a traced or proxied instance the capture proxy
+forwards to the client proxy, so its chain is client, capture, client proxy, server.
+
+The configs dial the proxies: `.Routes` lists the route proxy for each peer, and `.Gateways` lists, for each other
+cluster, the proxies the node's cluster shares to that cluster's nodes. Three template variables, empty without
+`toxics`, carry the rest:
+
+| Variable            | Rendered by the built-in template as                                                 |
+|---------------------|--------------------------------------------------------------------------------------|
+| `.ClientAdvertise`  | `client_advertise`: the `host:port` of the node's client proxy.                      |
+| `.ClusterAdvertise` | `advertise` in the `cluster` block: a dead `host:port` that refuses every dial.      |
+| `.GatewayAdvertise` | `advertise` in the `gateway` block: the same dead address.                           |
+
+The dead address keeps gossip on the proxies. In-process every node advertises the same dead address, so nats-server
+takes a gossiped route to it for a route to itself and never dials it; on a backend where that is not so, a peer that
+dials it is refused and drops it. A custom `template` must reference `.ClientAdvertise`, and in a cluster `.Routes`
+and `.ClusterAdvertise`, and in a super-cluster `.Gateways` and `.GatewayAdvertise` as well, or the create, and an
+update of one of its servers, is refused with `007` naming what is missing. A config that enables TLS on routes or
+gateways is refused with `019`, on create and on update, since the gateway proxies read a plain CONNECT; generated
+TLS on client ports is allowed. A `tls` inside one entry of the `gateway` block's `gateways` list is refused the same
+way, naming the entry. In a super-cluster the `gateway` block's `name` must be the node's cluster name, the only
+gateway name its proxies admit, or the create, and an update, is refused with `007` naming the node and the name it
+found or that it found none. These checks parse each node's config with its includes as nats-server reads them, and a
+config that does not parse is refused with `007`, on create and on update, naming the node and the parse error.
+
+A server's `port` reports its client proxy, and the create response and status list every proxy under `links`, each
+with its `name` (`route:<node>-><node>`, `gateway:<cluster>-><node>` or `client:<node>`), `kind`, `from`, `to`, the
+`proxy` address it is dialed on (for a client proxy, on the advertise host when one is set) and the `upstream` it
+forwards to.
+
+### Faulting links
+
+`tester.toxic.add`, `remove`, `clear` and `report` fault the links of an instance created with `toxics`. The service
+forwards each to the agent's `agent.Toxics` interface, which an agent declaring the `toxics` capability implements,
+and the agent works out the proxies. `add` takes a `toxic`: a `name` unique on the instance, a `selector`, a `type`,
+the `attributes` of that type and a `toxicity`. `remove` takes a `name`, `clear` removes every toxic, and `report`
+lists every link with the toxics on it, and every toxic with the `links` its selector resolved to and `since` when
+it is in place. Status lists the same toxics under `toxics`. Each change publishes a `toxic_action` event carrying the
+toxic, one per toxic `added`, `removed` or `cleared`. Callers' toxics never remove or change what the agent keeps on
+its proxies for itself, the gate of a gateway proxy and the cut stages, though cuts act through them.
+
+A selector names what the caller means rather than a proxy: a `kind` (`route`, `gateway` or `client`; empty selects
+every kind), `from` and `to` as a node or a cluster, and a `direction`: `to` for the data flowing from `from` toward
+`to`, and on a client link toward the server, `from` for the reverse, and `both`, the default. `node` alone selects
+every link of one node, both ways, and cannot be combined with `from` or `to`; a `direction` of `to` or `from` needs
+`from` or `to`. On a route the data from A to B is the upstream of the A to B proxy and the downstream of the B to A
+proxy, since either side may dial a pooled connection. On a gateway it is the upstream of A's proxies to B, since
+messages travel on the sender's connection only; the downstream carries interest. Gateway proxies are shared by every
+node of their source cluster, so a gateway toxic whose `from` is a node acts on its cluster's proxies.
+
+`type` is toxiproxy's `latency`, `bandwidth`, `slow_close`, `timeout`, `reset_peer`, `slicer` or `limit_data`, with
+toxiproxy's attribute names and units, or `cut` or `lossy`. A cut is a blackhole: the proxies keep accepting dials,
+data is dropped both ways, and connections go silent until the servers' ping timers close them, as in a partition.
+Data already inside a later toxic, such as a latency toxic's buffer, is still delivered after a cut starts. A cut that
+names a node also silences that node's connections through the gateway proxies its cluster shares, existing and new,
+so a cut of `{"node": "<node>"}` unplugs the node. A cut always acts both ways, and removing it closes the connections
+that dropped data while it was in place. `lossy` emulates packet loss as TCP delivers it, as stalls rather than lost
+bytes: the stream is cut into 1460-byte segments, each lost with chance `loss`, above 0 and below 1, and a lost
+segment stalls the stream for `rto` ms, 200 by default, doubling with each lost retransmission up to `max_rto` ms,
+3200 by default, while later data waits behind it. Data that arrives after the stream was idle for 50ms starts a
+segment of its own, as a write after a pause goes in a packet of its own. Its attributes are the agent's own, not toxiproxy's. No byte is
+lost while it is in place; removing it while the stream after it accepts nothing for more than 5s drops the data it
+held, as toxiproxy does when it removes a toxic. `toxicity` is the chance that a toxic acts, 1 by default:
+toxiproxy rolls it for each stream of each connection, and again whenever the stream's chain is rebuilt by adding or
+removing another toxic. `lossy` rolls it once for each stream of each connection and keeps it across rebuilds. A cut
+cuts every connection and accepts no toxicity other than 1.
+
+The toxic calls are refused with `002` without an `instance_id`, `014` when no agent is selected, `018` when the agent
+does not declare `toxics`, `404` for an unknown instance, and `020` for an instance created without `toxics`. A toxic
+the agent refuses for what it asks, such as a name in use or unknown, a selector that matches no link or names an
+unknown node or cluster, a one-way cut, or an unknown attribute or one out of range, is refused with `021` naming the
+toxic and the field. Any other failure of the agent answers `022`.
 
 ## Clocks
 
@@ -122,27 +221,32 @@ into one result. The request and reply are the
 
 | Subject                       | Description                                                                 |
 |-------------------------------|-----------------------------------------------------------------------------|
-| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `trace`, `proxy`. |
-| `tester.create.cluster`       | Creates a cluster. Optional `snippets`, `template`, `trace`, `proxy`.       |
-| `tester.create.super-cluster` | Creates a super-cluster. Optional `snippets`, `template`, `trace`, `proxy`. |
+| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`. |
+| `tester.create.cluster`       | Creates a cluster. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`.       |
+| `tester.create.super-cluster` | Creates a super-cluster. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`. |
 | `tester.stop.server`          | Stops a running server by name (names are globally unique).                 |
 | `tester.start.server`         | Starts a previously-stopped server by name.                                 |
 | `tester.stop.instance`        | Stops every server in an instance, keeping config and storage.              |
 | `tester.start.instance`       | Revives a previously-stopped instance.                                      |
 | `tester.update.server`        | Renders a new on-disk config for a server. Optional `snippets`, `template`. |
 | `tester.reload.server`        | Signals a running server to re-read its on-disk config.                     |
-| `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxy of an instance with one. |
+| `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxies of an instance with them, or on one `server`'s. |
 | `tester.shape.clear`          | Removes one shaping set by id, or every set when `set` is empty.            |
 | `tester.shape.report`         | Reports the rule firings of one shaping set, or of every set.               |
-| `tester.status`               | Status of every instance and its `shaping_sets`; optional `instance_id`.    |
+| `tester.toxic.add`            | Adds a named toxic to the links a selector names, on an instance with `toxics`. |
+| `tester.toxic.remove`         | Removes one toxic by `name`.                                                |
+| `tester.toxic.clear`          | Removes every toxic of an instance.                                         |
+| `tester.toxic.report`         | Lists every link with its toxics, and every toxic with its links.          |
+| `tester.status`               | Status of every instance, its `shaping_sets`, `links` and `toxics`; optional `instance_id`. |
 | `tester.list`                 | Lightweight summary of every instance (id, kind, servers count).            |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                              |
 | `tester.reset`                | Tears down **every** instance — CI-style global wipe.                       |
 | `tester.clock`                | Reports each participant's clock against the service host's. Optional `extra` clock subjects. |
 | `ntf.events.tester.<id>.instance.*` | Published by the service when an instance is `created` or `destroyed`. |
 | `ntf.events.tester.<id>.node.*` | Published by the service when a node is `ready`, `stopped`, `started`, `updated` or `reloaded`. |
-| `ntf.events.tester.<id>.shaping.*` | Published by the agent when a shaping set is `applied` or `cleared`, or a rule `fired`. |
+| `ntf.events.tester.<id>.shaping.*` | Published by the agent when a shaping set is `applied` or `cleared`, with its `server` when it has one, or a rule `fired`, with the `server_name` it fired on. |
 | `ntf.events.tester.<id>.capture.stored` | Published by the agent when a connection's capture is stored. |
+| `ntf.events.tester.<id>.toxic.*` | Published by the agent when a toxic is `added` or `removed`, and once per toxic when they are `cleared`. |
 
 The subjects above assume the default `Group`. The Go types for these requests and responses live in the `api`
 package, and the events in the `events` package. The service keeps its group's events in the stream

@@ -40,6 +40,9 @@ func TestSubjectEveryAction(t *testing.T) {
 		{&ShapingAction{Base: b, Action: ShapingCleared}, "ntf.events.tester.INST.shaping.cleared"},
 		{&ShapingFired{Base: b}, "ntf.events.tester.INST.shaping.fired"},
 		{&CaptureStored{Base: b}, "ntf.events.tester.INST.capture.stored"},
+		{&ToxicAction{Base: b, Action: ToxicAdded}, "ntf.events.tester.INST.toxic.added"},
+		{&ToxicAction{Base: b, Action: ToxicRemoved}, "ntf.events.tester.INST.toxic.removed"},
+		{&ToxicAction{Base: b, Action: ToxicCleared}, "ntf.events.tester.INST.toxic.cleared"},
 	}
 
 	for _, c := range cases {

@@ -35,6 +35,7 @@ var registry = map[string]func() Event{
 	TypeShapingAction:  func() Event { return &ShapingAction{} },
 	TypeShapingFired:   func() Event { return &ShapingFired{} },
 	TypeCaptureStored:  func() Event { return &CaptureStored{} },
+	TypeToxicAction:    func() Event { return &ToxicAction{} },
 }
 
 // clockTypes lists the type ids of the clock request and reply. They have

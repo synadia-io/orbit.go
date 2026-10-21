@@ -212,6 +212,43 @@ func goldenCases() []goldenCase {
 				MainTemplate: goldenCustomTemplate,
 			},
 		},
+		{
+			name:    "cluster-toxics",
+			subject: "tester.create.cluster",
+			req: api.CreateClusterRequest{
+				Servers:     3,
+				Description: "golden cluster with toxics",
+				TLS:         &api.TLSOptions{Mode: api.TLSModeServer},
+				Toxics:      true,
+			},
+			spec: instanceSpec{
+				Kind:          "cluster",
+				Servers:       3,
+				Description:   "golden cluster with toxics",
+				MainTemplate:  serverConfigTemplate,
+				AdvertiseHost: "localhost",
+				TLS:           true,
+				Toxics:        true,
+			},
+		},
+		{
+			name:    "super-cluster-toxics",
+			subject: "tester.create.super-cluster",
+			req: api.CreateSuperClusterRequest{
+				Servers:     2,
+				Clusters:    2,
+				Description: "golden super-cluster with toxics",
+				Toxics:      true,
+			},
+			spec: instanceSpec{
+				Kind:         "super-cluster",
+				Servers:      2,
+				Clusters:     2,
+				Description:  "golden super-cluster with toxics",
+				MainTemplate: serverConfigTemplate,
+				Toxics:       true,
+			},
+		},
 	}
 }
 
@@ -219,13 +256,18 @@ func goldenCases() []goldenCase {
 // compares every config and snippet it wrote with the case's golden file, after
 // the instance id, short id, instance directory and ports are replaced with
 // placeholders. The generated PEM files differ on every run, so they are parsed
-// and their SANs and file modes checked instead.
+// and their SANs and file modes checked instead. A case with toxics runs with
+// an agent that declares them.
 func TestCreateRendersGoldenFiles(t *testing.T) {
 	for _, tc := range goldenCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := startTestService(t, func(o *Options) {
+			opts := []func(*Options){func(o *Options) {
 				o.PortRange = goldenPorts
-			})
+			}}
+			if tc.spec.Toxics {
+				opts = append(opts, withAgent(&fakeProvider{toxics: true}))
+			}
+			svc := startTestService(t, opts...)
 
 			var created api.CreateResponse
 			mustRequest(t, svc.nc, tc.subject, tc.req, &created)

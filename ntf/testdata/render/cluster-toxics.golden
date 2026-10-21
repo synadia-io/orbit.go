@@ -1,0 +1,222 @@
+=== n1/config.cfg
+
+
+server_name: "<SHORT>-n1"
+port: <PORT1>
+
+client_advertise: "localhost:<PORT2>"
+
+
+log_file: "<INSTANCE_DIR>/n1/server.log"
+
+
+
+
+
+cluster {
+	name: "C_<SHORT>"
+	port: <PORT3>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://localhost:<PORT3>"
+
+"nats://127.0.0.1:<PORT5>"
+
+"nats://127.0.0.1:<PORT6>"
+
+	]
+}
+
+
+
+
+
+include "snippets/_tls_managed.conf"
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== n1/snippets/_tls_managed.conf
+tls {
+    cert_file: "<INSTANCE_DIR>/tls/server.crt"
+    key_file:  "<INSTANCE_DIR>/tls/server.key"
+    ca_file:   "<INSTANCE_DIR>/tls/ca.pem"
+    verify:    false
+    timeout:   2
+}
+
+=== n2/config.cfg
+
+
+server_name: "<SHORT>-n2"
+port: <PORT7>
+
+client_advertise: "localhost:<PORT8>"
+
+
+log_file: "<INSTANCE_DIR>/n2/server.log"
+
+
+
+
+
+cluster {
+	name: "C_<SHORT>"
+	port: <PORT9>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://127.0.0.1:<PORT10>"
+
+"nats://localhost:<PORT9>"
+
+"nats://127.0.0.1:<PORT11>"
+
+	]
+}
+
+
+
+
+
+include "snippets/_tls_managed.conf"
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== n2/snippets/_tls_managed.conf
+tls {
+    cert_file: "<INSTANCE_DIR>/tls/server.crt"
+    key_file:  "<INSTANCE_DIR>/tls/server.key"
+    ca_file:   "<INSTANCE_DIR>/tls/ca.pem"
+    verify:    false
+    timeout:   2
+}
+
+=== n3/config.cfg
+
+
+server_name: "<SHORT>-n3"
+port: <PORT12>
+
+client_advertise: "localhost:<PORT13>"
+
+
+log_file: "<INSTANCE_DIR>/n3/server.log"
+
+
+
+
+
+cluster {
+	name: "C_<SHORT>"
+	port: <PORT14>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://127.0.0.1:<PORT15>"
+
+"nats://127.0.0.1:<PORT16>"
+
+"nats://localhost:<PORT14>"
+
+	]
+}
+
+
+
+
+
+include "snippets/_tls_managed.conf"
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== n3/snippets/_tls_managed.conf
+tls {
+    cert_file: "<INSTANCE_DIR>/tls/server.crt"
+    key_file:  "<INSTANCE_DIR>/tls/server.key"
+    ca_file:   "<INSTANCE_DIR>/tls/ca.pem"
+    verify:    false
+    timeout:   2
+}
+

@@ -357,7 +357,7 @@ func TestStatusReportsEventsSeq(t *testing.T) {
 // TestFailedCreatePublishesNothing proves a create that fails after its nodes
 // are provisioned stores no event.
 func TestFailedCreatePublishesNothing(t *testing.T) {
-	svc := startTestService(t, withAgent(&fakeProvider{err: errors.New("agent refused")}))
+	svc := startTestService(t, withAgent(&fakeProvider{frontErrs: []error{errors.New("agent refused")}}))
 
 	if got := errorCodeFor(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}); got != "012" {
 		t.Fatalf("create answered %q, want 012", got)

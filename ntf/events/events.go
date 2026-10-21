@@ -26,6 +26,7 @@ const (
 	TypeShapingAction  = "io.synadia.ntf.event.v1.shaping_action"
 	TypeShapingFired   = "io.synadia.ntf.event.v1.shaping_fired"
 	TypeCaptureStored  = "io.synadia.ntf.event.v1.capture_stored"
+	TypeToxicAction    = "io.synadia.ntf.event.v1.toxic_action"
 )
 
 // Source names the component that published an event.
@@ -51,6 +52,7 @@ const (
 	CategoryNode     Category = "node"
 	CategoryShaping  Category = "shaping"
 	CategoryCapture  Category = "capture"
+	CategoryToxic    Category = "toxic"
 )
 
 // Base holds the fields every event carries. Every event struct embeds it.
