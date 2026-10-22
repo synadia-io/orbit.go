@@ -46,6 +46,8 @@ type StaticConsumerGroupConsumerInstance struct {
 	contextCancel          context.CancelFunc
 	keyWatcher             jetstream.KeyWatcher
 	doneChan               chan error
+	errHandler             func(err error)
+	terminalErrChan        chan terminalConsumeError
 }
 
 // StaticConsumerGroupConfig is the configuration for a static consumer group
@@ -73,8 +75,16 @@ func GetStaticConsumerGroupConfig(ctx context.Context, js jetstream.JetStream, s
 }
 
 // StaticConsume is the function that will start a go routine to consume messages from the stream (when active)
-func StaticConsume(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig) (ConsumerGroupConsumeContext, error) {
+// Use [WithConsumeErrHandler] to be notified of the errors reported by the member's consumer.
+// If the member's consumer is terminated by an error (e.g. it gets deleted), the member stops consuming and
+// the error is returned on the channel returned by Done().
+func StaticConsume(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig, opts ...ConsumeOpt) (ConsumerGroupConsumeContext, error) {
 	var err error
+
+	consumeOpts, err := applyConsumeOpts(opts)
+	if err != nil {
+		return nil, err
+	}
 
 	if messageHandler == nil {
 		return nil, errors.New("a message handler must be provided")
@@ -90,6 +100,8 @@ func StaticConsume(ctx context.Context, js jetstream.JetStream, streamName strin
 		MemberName:         memberName,
 		consumerUserConfig: config,
 		MessageHandlerCB:   messageHandler,
+		errHandler:         consumeOpts.errHandler,
+		terminalErrChan:    make(chan terminalConsumeError, 1),
 	}
 
 	instance.js = js
@@ -186,6 +198,14 @@ func (instance *StaticConsumerGroupConsumerInstance) instanceRoutine(ctx context
 					// No change in the config, ignore
 				}
 			}
+		case terminalErr := <-instance.terminalErrChan:
+			// ignore errors from a consume context that was already replaced
+			if terminalErr.consumeContext != instance.consumerConsumeContext {
+				break
+			}
+			instance.stopConsuming()
+			instance.doneChan <- fmt.Errorf("static consumer group %s member %s stopped consuming: %w", composeKey(instance.StreamName, instance.ConsumerGroupName), instance.MemberName, terminalErr.err)
+			return
 		case <-ctx.Done():
 			instance.stopConsuming()
 			instance.doneChan <- nil
@@ -444,7 +464,7 @@ func (instance *StaticConsumerGroupConsumerInstance) joinMemberConsumerStatic(ct
 func (instance *StaticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
-	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(max(instance.consumerUserConfig.AckWait/pullTimeoutDivider, minPullExpiryPinnedTTL)), jetstream.PullPriorityGroup(priorityGroupName))
+	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(max(instance.consumerUserConfig.AckWait/pullTimeoutDivider, minPullExpiryPinnedTTL)), jetstream.PullPriorityGroup(priorityGroupName), newConsumeErrHandler(instance.errHandler, instance.terminalErrChan))
 	if err != nil {
 		log.Printf("Error starting to consume on my consumer: %v\n", err)
 		return
