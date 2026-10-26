@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/synadia-io/orbit.go/ntf/backend"
+	"github.com/synadia-io/orbit.go/ntf/events"
 )
 
 // Kind is a named factory of actions: a disruptive thing a worker does, such
@@ -110,66 +111,29 @@ type Effect interface {
 
 // StepReporter is how an Apply tells the engine what it acts on and how it
 // progresses. The engine makes one for each Apply and publishes what it is
-// told on the events of that action. It is safe to call concurrently.
+// told on the chaos_action events of that action, an events.ChaosAction each.
+// It is safe to call concurrently.
 type StepReporter interface {
-	// Acted records targets the Apply acted on, which the engine names on
-	// the action's applied or apply_failed event. Each call adds to what the
+	// Acted records targets the Apply acted on, which the engine names as
+	// the targets of the action's applied or apply_failed event, and of its
+	// reverted or revert_failed event later. Each call adds to what the
 	// earlier ones recorded.
-	Acted(targets Targets)
+	Acted(targets events.ChaosTargets)
 
 	// Step reports one step of a long Apply, such as a rolling restart
-	// stopping one node, which the engine publishes as a step of the action.
+	// stopping one node, which the engine publishes as a step event of the
+	// action.
 	Step(step Step)
 }
 
-// Step is one step of a long Apply.
+// Step is one step of a long Apply. The engine publishes it as a chaos_action
+// step event carrying its description and targets.
 type Step struct {
 	// Description says what happened, such as "stopped n1".
 	Description string `json:"description"`
 
 	// Targets are what the step acted on.
-	Targets Targets `json:"targets,omitzero"`
-}
-
-// Targets names what an Apply or one of its steps acted on.
-type Targets struct {
-	// Nodes are server names.
-	Nodes []string `json:"nodes,omitempty"`
-
-	// Toxics are toxic names.
-	Toxics []string `json:"toxics,omitempty"`
-
-	// Streams are streams by account and name.
-	Streams []StreamRef `json:"streams,omitempty"`
-
-	// Consumers are consumers by account, stream and name.
-	Consumers []ConsumerRef `json:"consumers,omitempty"`
-
-	// Clients are client connections by server and client id, since a client
-	// id is unique on its server only.
-	Clients []ClientRef `json:"clients,omitempty"`
-}
-
-// StreamRef names one stream.
-type StreamRef struct {
-	Account string `json:"account"`
-	Name    string `json:"name"`
-}
-
-// ConsumerRef names one consumer.
-type ConsumerRef struct {
-	Account string `json:"account"`
-	Stream  string `json:"stream"`
-	Name    string `json:"name"`
-}
-
-// ClientRef names one client connection.
-type ClientRef struct {
-	// Server is the name of the server the client is connected to.
-	Server string `json:"server"`
-
-	// ID is the client id the server gave the connection.
-	ID uint64 `json:"id"`
+	Targets events.ChaosTargets `json:"targets,omitzero"`
 }
 
 // DecodeParams decodes the params of a driver or kind into v, refusing fields

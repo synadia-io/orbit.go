@@ -266,3 +266,168 @@ type ToxicAction struct {
 func (e *ToxicAction) EventType() string       { return TypeToxicAction }
 func (e *ToxicAction) EventCategory() Category { return CategoryToxic }
 func (e *ToxicAction) EventAction() string     { return string(e.Action) }
+
+// ChaosRunEventAction is what happened to a chaos run.
+type ChaosRunEventAction string
+
+const (
+	ChaosRunStarted  ChaosRunEventAction = "started"
+	ChaosRunPaused   ChaosRunEventAction = "paused"
+	ChaosRunResumed  ChaosRunEventAction = "resumed"
+	ChaosRunStopped  ChaosRunEventAction = "stopped"
+	ChaosRunFinished ChaosRunEventAction = "finished"
+)
+
+// ChaosRun is published when a chaos run on an instance starts, is paused or
+// resumed, is stopped before its end, or finishes.
+//
+// NTF Schema Type io.synadia.ntf.event.v1.chaos_run
+type ChaosRun struct {
+	Base
+
+	Action ChaosRunEventAction `json:"action"`
+
+	// RunID is the id of the run.
+	RunID string `json:"run_id"`
+
+	// Reason says why the run stopped, such as a stop request or the
+	// instance being destroyed. Set on stopped.
+	Reason string `json:"reason,omitempty"`
+}
+
+func (e *ChaosRun) EventType() string       { return TypeChaosRun }
+func (e *ChaosRun) EventCategory() Category { return CategoryChaos }
+func (e *ChaosRun) EventAction() string     { return string(e.Action) }
+
+// ChaosEventAction is what happened to one action of a chaos run's worker.
+type ChaosEventAction string
+
+const (
+	ChaosActionApplied      ChaosEventAction = "applied"
+	ChaosActionStep         ChaosEventAction = "step"
+	ChaosActionApplyFailed  ChaosEventAction = "apply_failed"
+	ChaosActionReverted     ChaosEventAction = "reverted"
+	ChaosActionRevertFailed ChaosEventAction = "revert_failed"
+)
+
+// ChaosTargets names what a chaos action, or one of its steps, acted on.
+type ChaosTargets struct {
+	// Servers are server names, as node_action's server_name gives them.
+	Servers []string `json:"servers,omitempty"`
+
+	// Toxics are toxic names, as toxic_action's name gives them.
+	Toxics []string `json:"toxics,omitempty"`
+
+	// Streams are streams by account and name.
+	Streams []ChaosStreamRef `json:"streams,omitempty"`
+
+	// Consumers are consumers by account, stream and name.
+	Consumers []ChaosConsumerRef `json:"consumers,omitempty"`
+
+	// Clients are client connections by server and client id, since a client
+	// id is unique on its server only.
+	Clients []ChaosClientRef `json:"clients,omitempty"`
+}
+
+// ChaosStreamRef names one stream.
+type ChaosStreamRef struct {
+	// Account is the name of the stream's account.
+	Account string `json:"account"`
+
+	// Name is the stream's name.
+	Name string `json:"name"`
+}
+
+// ChaosConsumerRef names one consumer.
+type ChaosConsumerRef struct {
+	// Account is the name of the consumer's account.
+	Account string `json:"account"`
+
+	// Stream is the name of the consumer's stream.
+	Stream string `json:"stream"`
+
+	// Name is the consumer's name.
+	Name string `json:"name"`
+}
+
+// ChaosClientRef names one client connection.
+type ChaosClientRef struct {
+	// ServerName is the name of the server the client is connected to.
+	ServerName string `json:"server_name"`
+
+	// ID is the client id the server gave the connection.
+	ID uint64 `json:"id"`
+}
+
+// ChaosAction is published for one action of a chaos run's worker: when it
+// was applied or failed to apply, for each step of a long apply, and when its
+// effect was reverted or failed to revert. Every event of one action carries
+// its action_id, so a reader pairs applied with reverted and attaches steps to
+// their action, and names the worker and the kind, so a reader needs no
+// earlier event.
+//
+// NTF Schema Type io.synadia.ntf.event.v1.chaos_action
+type ChaosAction struct {
+	Base
+
+	Action ChaosEventAction `json:"action"`
+
+	// RunID is the id of the run.
+	RunID string `json:"run_id"`
+
+	// ActionID is the id of the action, the same on every event of it.
+	ActionID string `json:"action_id"`
+
+	// Worker is the name of the worker that acted.
+	Worker string `json:"worker"`
+
+	// Kind is the name of the worker's kind, such as client_disconnect.
+	Kind string `json:"kind"`
+
+	// Targets are what the action acted on: on step what the step acted on,
+	// and on every other action what the whole action acted on. When it
+	// acted on nothing it is absent if every list is nil, and an empty object
+	// otherwise.
+	Targets ChaosTargets `json:"targets,omitzero"`
+
+	// Description says what the step did, such as "stopped n1". Set on step.
+	Description string `json:"description,omitempty"`
+
+	// Error is why the apply or revert failed. Set on apply_failed and
+	// revert_failed.
+	Error string `json:"error,omitempty"`
+}
+
+func (e *ChaosAction) EventType() string       { return TypeChaosAction }
+func (e *ChaosAction) EventCategory() Category { return CategoryChaos }
+func (e *ChaosAction) EventAction() string     { return string(e.Action) }
+
+// ChaosWindowEventAction is what happened to a quiet window of a chaos run.
+type ChaosWindowEventAction string
+
+const (
+	ChaosWindowOpened ChaosWindowEventAction = "opened"
+	ChaosWindowClosed ChaosWindowEventAction = "closed"
+)
+
+// ChaosWindow is published when a quiet window of a chaos run opens, once
+// every effect is reverted, and when it closes.
+//
+// NTF Schema Type io.synadia.ntf.event.v1.chaos_window
+type ChaosWindow struct {
+	Base
+
+	Action ChaosWindowEventAction `json:"action"`
+
+	// RunID is the id of the run.
+	RunID string `json:"run_id"`
+
+	// Overrun is how far past the run's max_fault the window opened. Set on
+	// opened when the window opened late, and absent otherwise. It is encoded
+	// in nanoseconds.
+	Overrun time.Duration `json:"overrun,omitempty"`
+}
+
+func (e *ChaosWindow) EventType() string       { return TypeChaosWindow }
+func (e *ChaosWindow) EventCategory() Category { return CategoryChaos }
+func (e *ChaosWindow) EventAction() string     { return string(e.Action) }

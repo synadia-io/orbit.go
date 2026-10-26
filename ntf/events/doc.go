@@ -50,6 +50,18 @@ shown inside this package, embedded and returned by Schema:
 	    ntf.events.<group>.<instance>.toxic.<added|removed|cleared>
 	    schemas/ntf/event/v1/toxic_action.json
 
+	io.synadia.ntf.event.v1.chaos_run
+	    ntf.events.<group>.<instance>.chaos.<started|paused|resumed|stopped|finished>
+	    schemas/ntf/event/v1/chaos_run.json
+
+	io.synadia.ntf.event.v1.chaos_action
+	    ntf.events.<group>.<instance>.chaos.<applied|step|apply_failed|reverted|revert_failed>
+	    schemas/ntf/event/v1/chaos_action.json
+
+	io.synadia.ntf.event.v1.chaos_window
+	    ntf.events.<group>.<instance>.chaos.<opened|closed>
+	    schemas/ntf/event/v1/chaos_window.json
+
 A breaking change to a type is a new v2 id. An additive field is not, so the
 schemas allow additional properties and an older schema accepts a newer event.
 ParseEvent returns an *UnknownEvent for a type it does not know, so an older
@@ -70,16 +82,19 @@ overlap in subjects.
 
 # Sources and order
 
-source is service for events the ntf service publishes, the instance and node
-events, and agent for events a network agent publishes, the shaping, capture
-and toxic events. backend and chaos are reserved. source_seq counts from 1 per
-instance and source with no gaps, so a reader sees one source's order directly
-and a dropped event shows as a gap.
+source names the component that published an event. It is service for the
+instance and node events, which the ntf service publishes. It is agent for the
+shaping, capture and toxic events, which a network agent publishes. It is chaos
+for the chaos events, which a chaos engine publishes. backend is reserved.
+source_seq counts from 1 per instance and source with no gaps, so a reader sees
+one source's order directly and a dropped event shows as a gap.
 
 The order of events is the stream sequence, total across the service and its
 agents. timestamp is the publisher's clock, comparable across components within
 the bound the clock check reports. The service publishes its events with an
-ack. Agent events are not acked and may be lost.
+ack. Agent events are not acked and may be lost. Chaos events may be lost too:
+a chaos engine whose publish fails logs a warning and carries on with its run,
+and the gap in source_seq shows the loss.
 
 # Joins
 

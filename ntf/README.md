@@ -247,6 +247,7 @@ into one result. The request and reply are the
 | `ntf.events.tester.<id>.shaping.*` | Published by the agent when a shaping set is `applied` or `cleared`, with its `server` when it has one, or a rule `fired`, with the `server_name` it fired on. |
 | `ntf.events.tester.<id>.capture.stored` | Published by the agent when a connection's capture is stored. |
 | `ntf.events.tester.<id>.toxic.*` | Published by the agent when a toxic is `added` or `removed`, and once per toxic when they are `cleared`. |
+| `ntf.events.tester.<id>.chaos.*` | Published by a chaos engine when a run is `started`, `paused`, `resumed`, `stopped` or `finished`, an action is `applied`, reports a `step`, is `reverted`, or fails as `apply_failed` or `revert_failed`, and a quiet window is `opened` or `closed`. |
 
 The subjects above assume the default `Group`. The Go types for these requests and responses live in the `api`
 package, and the events in the `events` package. The service keeps its group's events in the stream

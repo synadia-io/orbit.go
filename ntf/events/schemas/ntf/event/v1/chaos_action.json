@@ -1,0 +1,216 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/events/schemas/ntf/event/v1/chaos_action.json",
+  "description": "An event published for one action of a chaos run's worker: when it was applied or failed to apply, for each step of a long apply, and when its effect was reverted or failed to revert",
+  "title": "io.synadia.ntf.event.v1.chaos_action",
+  "type": "object",
+  "required": [
+    "type",
+    "id",
+    "timestamp",
+    "instance_id",
+    "source",
+    "source_seq",
+    "action",
+    "run_id",
+    "action_id",
+    "worker",
+    "kind"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.event.v1.chaos_action"
+    },
+    "id": {
+      "type": "string",
+      "description": "Unique id of this event, a nuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The publisher's clock when the event was made, in RFC 3339 with nanoseconds"
+    },
+    "instance_id": {
+      "type": "string",
+      "description": "The instance the event is about"
+    },
+    "source": {
+      "type": "string",
+      "description": "The component that published the event",
+      "enum": [
+        "service",
+        "agent",
+        "backend",
+        "chaos"
+      ]
+    },
+    "source_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Counts the source's events for the instance from 1 with no gaps"
+    },
+    "action": {
+      "type": "string",
+      "description": "What happened to the action",
+      "enum": [
+        "applied",
+        "step",
+        "apply_failed",
+        "reverted",
+        "revert_failed"
+      ]
+    },
+    "run_id": {
+      "type": "string",
+      "description": "The id of the run"
+    },
+    "action_id": {
+      "type": "string",
+      "description": "The id of the action, the same on every event of it"
+    },
+    "worker": {
+      "type": "string",
+      "description": "The name of the worker that acted"
+    },
+    "kind": {
+      "type": "string",
+      "description": "The name of the worker's kind, such as client_disconnect"
+    },
+    "targets": {
+      "type": "object",
+      "description": "What the action acted on, or on step what the step acted on; when it acted on nothing, absent or an empty object",
+      "additionalProperties": true,
+      "properties": {
+        "servers": {
+          "type": "array",
+          "description": "Server names, as node_action's server_name gives them",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toxics": {
+          "type": "array",
+          "description": "Toxic names, as toxic_action's name gives them",
+          "items": {
+            "type": "string"
+          }
+        },
+        "streams": {
+          "type": "array",
+          "description": "Streams by account and name",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "account",
+              "name"
+            ],
+            "properties": {
+              "account": {
+                "type": "string",
+                "description": "The name of the stream's account"
+              },
+              "name": {
+                "type": "string",
+                "description": "The stream's name"
+              }
+            }
+          }
+        },
+        "consumers": {
+          "type": "array",
+          "description": "Consumers by account, stream and name",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "account",
+              "stream",
+              "name"
+            ],
+            "properties": {
+              "account": {
+                "type": "string",
+                "description": "The name of the consumer's account"
+              },
+              "stream": {
+                "type": "string",
+                "description": "The name of the consumer's stream"
+              },
+              "name": {
+                "type": "string",
+                "description": "The consumer's name"
+              }
+            }
+          }
+        },
+        "clients": {
+          "type": "array",
+          "description": "Client connections by server and client id, since a client id is unique on its server only",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "server_name",
+              "id"
+            ],
+            "properties": {
+              "server_name": {
+                "type": "string",
+                "description": "The name of the server the client is connected to"
+              },
+              "id": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "The client id the server gave the connection"
+              }
+            }
+          }
+        }
+      }
+    },
+    "description": {
+      "type": "string",
+      "description": "What the step did, such as \"stopped n1\", set on step"
+    },
+    "error": {
+      "type": "string",
+      "description": "Why the apply or revert failed, set on apply_failed and revert_failed"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "step"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "description"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "enum": [
+              "apply_failed",
+              "revert_failed"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "error"
+        ]
+      }
+    }
+  ]
+}

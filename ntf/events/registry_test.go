@@ -49,7 +49,7 @@ func TestParseEventRoundTrip(t *testing.T) {
 // message.
 func TestParseEventUnknown(t *testing.T) {
 	cases := map[string]string{
-		"later type": `{"type":"io.synadia.ntf.event.v1.chaos_action","id":"abc","timestamp":"2026-10-15T12:30:45.123456789Z","instance_id":"inst","source":"chaos","source_seq":4,"scenario":"partition"}`,
+		"later type": `{"type":"io.synadia.ntf.event.v1.later_action","id":"abc","timestamp":"2026-10-15T12:30:45.123456789Z","instance_id":"inst","source":"chaos","source_seq":4,"scenario":"partition"}`,
 		"no type":    `{"id":"abc","instance_id":"inst","source_seq":4}`,
 	}
 
