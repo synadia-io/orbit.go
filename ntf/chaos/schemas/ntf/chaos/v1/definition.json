@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/chaos/schemas/ntf/chaos/v1/definition.json",
+  "description": "The definition of a chaos run: its duration, its quiet windows, the credentials it authenticates with and its workers. The params of each driver and action are left open here and checked against the schema the named driver or kind publishes",
+  "title": "io.synadia.ntf.chaos.v1.definition",
+  "type": "object",
+  "required": [
+    "duration",
+    "workers"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "duration": {
+      "$ref": "#/definitions/duration",
+      "description": "How long the run lasts"
+    },
+    "quiet": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "The run's quiet windows, the fault-free stretches it guarantees. Null is read as absent",
+      "additionalProperties": false,
+      "properties": {
+        "min": {
+          "$ref": "#/definitions/duration",
+          "description": "The shortest quiet window, 30s when absent"
+        },
+        "max_fault": {
+          "$ref": "#/definitions/duration",
+          "description": "The longest stretch before a quiet window is due, 2m when absent"
+        }
+      }
+    },
+    "credentials": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "How the engine authenticates to each account, keyed by account name, $SYS for the system account. Null is read as absent",
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/credential"
+      }
+    },
+    "workers": {
+      "type": "array",
+      "description": "The workers, which act concurrently through the run",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/worker"
+      }
+    }
+  },
+  "definitions": {
+    "duration": {
+      "type": "string",
+      "description": "A Go duration string such as 30s or 1m30s, as time.ParseDuration reads it. Whether its value is in range is checked when the definition is validated",
+      "pattern": "^[-+]?(0|(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$"
+    },
+    "credential": {
+      "type": "object",
+      "description": "A credential in the keyed form: one key naming its type, whose value holds it",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "user_password": {
+          "type": "object",
+          "description": "A user and password",
+          "required": [
+            "user"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "user": {
+              "type": "string",
+              "minLength": 1
+            },
+            "password": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The password, empty when absent or null"
+            }
+          }
+        }
+      }
+    },
+    "keyed": {
+      "type": "object",
+      "description": "A driver or kind in the keyed form: one key naming it, whose value holds its params",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": [
+          "object",
+          "null"
+        ]
+      }
+    },
+    "worker": {
+      "type": "object",
+      "description": "A worker, pairing a driver that decides when to act with a kind that decides what to do",
+      "required": [
+        "name",
+        "driver",
+        "action"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The worker's name, unique in the run",
+          "pattern": "^[A-Za-z0-9_-]{1,32}$"
+        },
+        "driver": {
+          "$ref": "#/definitions/keyed",
+          "description": "The driver and its params"
+        },
+        "action": {
+          "$ref": "#/definitions/keyed",
+          "description": "The kind and its params"
+        }
+      }
+    }
+  }
+}
