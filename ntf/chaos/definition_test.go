@@ -298,6 +298,42 @@ func TestParseDefinitionYAMLDocuments(t *testing.T) {
 	}
 }
 
+// TestParseDefinitionYAMLHidesSource checks a YAML error names its line and
+// column without quoting the source, so a password near it is not shown.
+func TestParseDefinitionYAMLHidesSource(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			"malformed line after the password",
+			"duration: 1m\ncredentials:\n  A:\n    user_password:\n      user: u\n      password: hunter2\n     oops: [\nworkers: [{name: a, driver: {once: {}}, action: {x: {}}}]\n",
+			"[7:",
+		},
+		{
+			"duplicate password key",
+			"duration: 1m\ncredentials:\n  A:\n    user_password:\n      user: u\n      password: hunter2\n      password: hunter2\nworkers: [{name: a, driver: {once: {}}, action: {x: {}}}]\n",
+			`[7:7] mapping key "password" already defined at [6:7]`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseDefinitionYAML([]byte(tc.yaml))
+			if !errors.Is(err, ErrInvalidDefinition) {
+				t.Fatalf("got %v, want ErrInvalidDefinition", err)
+			}
+			if strings.Contains(err.Error(), "hunter2") {
+				t.Fatalf("error shows the password:\n%v", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseDefinitionRefusesDuplicateKeys(t *testing.T) {
 	cases := map[string]string{
 		"top level":       `{"duration":"1m","duration":"2m","workers":[{"name":"a","driver":{"once":{}},"action":{"x":{}}}]}`,

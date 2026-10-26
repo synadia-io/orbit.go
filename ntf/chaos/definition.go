@@ -199,11 +199,12 @@ func ParseDefinition(data []byte) (*Definition, error) {
 
 // ParseDefinitionYAML decodes a definition from YAML as ParseDefinition does
 // from JSON, refusing unknown fields, duplicate keys and more than one YAML
-// document.
+// document. A YAML error names the line and column it is at but does not quote
+// the source, which may hold a credential.
 func ParseDefinitionYAML(data []byte) (*Definition, error) {
 	file, err := parser.ParseBytes(data, 0)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidDefinition, err)
+		return nil, yamlError(err)
 	}
 	if len(file.Docs) > 1 {
 		return nil, fmt.Errorf("%w: holds %d YAML documents, want one", ErrInvalidDefinition, len(file.Docs))
@@ -211,10 +212,18 @@ func ParseDefinitionYAML(data []byte) (*Definition, error) {
 
 	j, err := yaml.YAMLToJSON(data)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidDefinition, err)
+		return nil, yamlError(err)
 	}
 
 	return ParseDefinition(j)
+}
+
+// yamlError wraps ErrInvalidDefinition with a YAML error's position and
+// message, leaving out the lines of source goccy/go-yaml's errors quote, so a
+// credential near the error is not shown. The YAML error itself is not
+// wrapped, since its Error method quotes the source.
+func yamlError(err error) error {
+	return fmt.Errorf("%w: %s", ErrInvalidDefinition, yaml.FormatError(err, false, false))
 }
 
 // SetDefaults fills the quiet window fields left zero with their defaults.
