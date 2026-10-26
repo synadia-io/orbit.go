@@ -71,6 +71,16 @@ type Target interface {
 
 	// Events returns the sink the engine publishes the run's events through.
 	Events() events.Publisher
+
+	// Held returns what the worker's open effects hold now: the union of
+	// the targets each of their Applies reported through StepReporter.Acted,
+	// from when the Apply returns until its effect is reverted, or, as the
+	// run ends, until the engine gives up reverting it. A kind that
+	// holds its effects leaves these targets out of what its selectors pick,
+	// so a worker holding several effects at once, as one keeping n open
+	// does, never acts twice on one target, and an Apply that finds no
+	// target left fails rather than stacking a second effect on one.
+	Held() events.ChaosTargets
 }
 
 // TesterError is an error reply to a tester.* request: the micro error code
