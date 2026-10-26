@@ -105,7 +105,8 @@ type Effect interface {
 	// Revert undoes the effect. It runs on a context of its own, not the one
 	// the Apply had. A Revert that finds its target already in the wanted
 	// state, such as a node already running or a toxic already gone,
-	// succeeds.
+	// succeeds. Revert must return when ctx is done, since a run waits for
+	// its final reverts before it ends and frees its instance.
 	Revert(ctx context.Context) error
 }
 

@@ -267,3 +267,6 @@ account and scope subject permissions to its group. The service also needs `ntf.
 and `$JS.API.>` for their stream. `Group` namespaces the endpoints but not Micro's own `$SRV` discovery subjects, so
 two services on one connection still collide there. On an unauthenticated server any client can publish forged
 events or delete the events stream.
+
+`ntf-server serve` also hosts a chaos service beside it, which answers on `chaos.>`. A client that can publish
+there can stop, reload and fault any instance through it, so scope `chaos.>` as you scope the group.
