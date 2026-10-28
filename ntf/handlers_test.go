@@ -15,11 +15,15 @@ package ntf
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,8 +34,10 @@ import (
 	"github.com/nats-io/nats-server/v2/conf"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/micro"
 
 	"github.com/synadia-io/orbit.go/ntf/api"
+	"github.com/synadia-io/orbit.go/ntf/backend"
 )
 
 func TestPlanInstanceTemplateDataAdvertiseHost(t *testing.T) {
@@ -835,6 +841,271 @@ func TestReloadStoppedServerIsRejected(t *testing.T) {
 	got := errorCodeFor(t, ms.nc, "tester.reload.server", api.ReloadServerRequest{Name: name})
 	if got != "002" {
 		t.Errorf("error code = %q, want 002", got)
+	}
+}
+
+// gatedNode holds the node calls named in ops until the test lets them go: each
+// sends its call and node name on entered, then waits for a value on release,
+// or for done, which closes when the test ends.
+type gatedNode struct {
+	backend.Node
+	ops     []string
+	entered chan string
+	release chan struct{}
+	done    chan struct{}
+}
+
+func (n *gatedNode) gate(op string) {
+	if !slices.Contains(n.ops, op) {
+		return
+	}
+
+	select {
+	case n.entered <- op + " " + n.Name():
+	case <-n.done:
+		return
+	}
+
+	select {
+	case <-n.release:
+	case <-n.done:
+	}
+}
+
+func (n *gatedNode) Start(ctx context.Context) error {
+	n.gate("start")
+	return n.Node.Start(ctx)
+}
+
+func (n *gatedNode) Stop(ctx context.Context) error {
+	n.gate("stop")
+	return n.Node.Stop(ctx)
+}
+
+func (n *gatedNode) Reload(ctx context.Context) error {
+	n.gate("reload")
+	return n.Node.Reload(ctx)
+}
+
+// gateNodes swaps the backend node of each server named in names for a
+// gatedNode holding ops, and returns the channels the gated calls report on and
+// wait for. The swap is safe because it is made before any request for the
+// servers is sent: findServerByName, the status snapshot and each handler's
+// lookup before cfgMu read the node without that lock, so swapping it while
+// requests are in flight would race.
+func gateNodes(t *testing.T, svc *Service, ops []string, names ...string) (chan string, chan struct{}) {
+	t.Helper()
+
+	entered := make(chan string)
+	release := make(chan struct{})
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+
+	for _, name := range names {
+		ms := svc.findServerByName(name)
+		if ms == nil {
+			t.Fatalf("server %q not found", name)
+		}
+
+		ms.cfgMu.Lock()
+		ms.backendNode = &gatedNode{Node: ms.backendNode, ops: ops, entered: entered, release: release, done: done}
+		ms.cfgMu.Unlock()
+	}
+
+	return entered, release
+}
+
+// requestAsync sends req to subject in a goroutine of its own and delivers the
+// reply, or the transport error, on the returned channel.
+func requestAsync(t *testing.T, nc *nats.Conn, subject string, req any) chan error {
+	t.Helper()
+
+	payload, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal %s: %v", subject, err)
+	}
+
+	res := make(chan error, 1)
+	go func() {
+		msg, err := nc.Request(subject, payload, 30*time.Second)
+		if err == nil && msg.Header.Get("Nats-Service-Error") != "" {
+			err = fmt.Errorf("%s: %s", msg.Header.Get("Nats-Service-Error-Code"), msg.Header.Get("Nats-Service-Error"))
+		}
+		res <- err
+	}()
+
+	return res
+}
+
+// TestDetachedRequestErrors proves a detachedRequest returns the errors micro's
+// own request returns: Respond wraps a send failure in ErrRespond, formatting
+// the cause as text, while Error returns it as it is.
+func TestDetachedRequestErrors(t *testing.T) {
+	ms := startTestService(t)
+
+	noReply := &detachedRequest{nc: ms.nc}
+
+	err := noReply.Respond([]byte("x"))
+	if !errors.Is(err, micro.ErrRespond) || errors.Is(err, nats.ErrMsgNoReply) {
+		t.Errorf("Respond without a reply = %v, want ErrRespond with the cause as text", err)
+	}
+	want := micro.ErrRespond.Error() + ": " + nats.ErrMsgNoReply.Error()
+	if err != nil && err.Error() != want {
+		t.Errorf("Respond without a reply = %q, want %q", err, want)
+	}
+
+	err = noReply.Error("001", "failed", nil)
+	if err != nats.ErrMsgNoReply {
+		t.Errorf("Error without a reply = %v, want %v", err, nats.ErrMsgNoReply)
+	}
+
+	err = noReply.RespondJSON(make(chan int))
+	if err != micro.ErrMarshalResponse {
+		t.Errorf("RespondJSON of an unencodable value = %v, want %v", err, micro.ErrMarshalResponse)
+	}
+
+	err = noReply.Error("", "failed", nil)
+	if !errors.Is(err, micro.ErrArgRequired) {
+		t.Errorf("Error without a code = %v, want ErrArgRequired", err)
+	}
+
+	err = noReply.Error("001", "", nil)
+	if !errors.Is(err, micro.ErrArgRequired) {
+		t.Errorf("Error without a description = %v, want ErrArgRequired", err)
+	}
+
+	nc, err := nats.Connect(ms.ClientURL())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	nc.Close()
+	closed := &detachedRequest{nc: nc, reply: "reply"}
+
+	err = closed.Respond([]byte("x"))
+	if !errors.Is(err, micro.ErrRespond) || errors.Is(err, nats.ErrConnectionClosed) {
+		t.Errorf("Respond on a closed connection = %v, want ErrRespond with the cause as text", err)
+	}
+
+	err = closed.Error("001", "failed", nil)
+	if err != nats.ErrConnectionClosed {
+		t.Errorf("Error on a closed connection = %v, want %v", err, nats.ErrConnectionClosed)
+	}
+}
+
+// TestStopServerNotQueuedBehindAnotherNode proves a stop of one node runs while a
+// slow stop of another is still in progress, so a start of the first node sent
+// once its stop answered finds it stopped and starts it. A stop queued behind
+// the slow one would answer only after it, by when a start would have found the
+// node running and answered 003, and the queued stop would leave it down.
+func TestStopServerNotQueuedBehindAnotherNode(t *testing.T) {
+	ms := startTestService(t)
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 3}, &created)
+	slow, other := created.Servers[0].Name, created.Servers[1].Name
+
+	entered, release := gateNodes(t, ms, []string{"stop"}, slow)
+
+	slowDone := requestAsync(t, ms.nc, "tester.stop.server", api.StopServerRequest{Name: slow})
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("stop of %s never reached its node", slow)
+	}
+
+	// The stop of slow is held, so the stop of other answers only if it does
+	// not wait behind it.
+	payload, err := json.Marshal(api.StopServerRequest{Name: other})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := ms.nc.Request("tester.stop.server", payload, 5*time.Second)
+	if err != nil {
+		t.Fatalf("stop of %s waited behind the held stop of %s: %v", other, slow, err)
+	}
+	if e := msg.Header.Get("Nats-Service-Error"); e != "" {
+		t.Fatalf("stop of %s failed: %s", other, e)
+	}
+
+	var started api.StartServerResponse
+	mustRequest(t, ms.nc, "tester.start.server", api.StartServerRequest{Name: other}, &started)
+	if !started.Started {
+		t.Fatalf("start of %s reported not started", other)
+	}
+
+	release <- struct{}{}
+	err = <-slowDone
+	if err != nil {
+		t.Fatalf("stop of %s: %v", slow, err)
+	}
+
+	var status api.StatusResponse
+	mustRequest(t, ms.nc, "tester.status", api.StatusRequest{InstanceID: created.ID}, &status)
+	for _, srv := range status.Instances[0].Servers {
+		switch srv.Name {
+		case slow:
+			if srv.Running {
+				t.Errorf("server %s running, want stopped", slow)
+			}
+		case other:
+			if !srv.Running {
+				t.Errorf("server %s stopped, want running: its stop ran after its start", other)
+			}
+		}
+	}
+}
+
+// TestNodeRequestsForDifferentNodesRunAtOnce proves the stop, start and reload
+// endpoints each handle requests for different nodes at once: both requests of
+// each pair reach their node before either is let go.
+func TestNodeRequestsForDifferentNodesRunAtOnce(t *testing.T) {
+	ms := startTestService(t)
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 3}, &created)
+	names := []string{created.Servers[0].Name, created.Servers[1].Name}
+
+	entered, release := gateNodes(t, ms, []string{"stop", "start", "reload"}, names...)
+
+	// Each phase leaves the nodes as the next needs them: stopped to start,
+	// running to reload.
+	phases := []struct {
+		op  string
+		req func(name string) any
+	}{
+		{op: "stop", req: func(name string) any { return api.StopServerRequest{Name: name} }},
+		{op: "start", req: func(name string) any { return api.StartServerRequest{Name: name} }},
+		{op: "reload", req: func(name string) any { return api.ReloadServerRequest{Name: name} }},
+	}
+
+	for _, phase := range phases {
+		op := phase.op
+		subject := "tester." + op + ".server"
+
+		var replies []chan error
+		for _, name := range names {
+			replies = append(replies, requestAsync(t, ms.nc, subject, phase.req(name)))
+		}
+
+		var reached []string
+		for range names {
+			select {
+			case call := <-entered:
+				reached = append(reached, call)
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s: only %v reached their node while held; the requests ran one at a time", op, reached)
+			}
+		}
+
+		for range names {
+			release <- struct{}{}
+		}
+		for i, res := range replies {
+			err := <-res
+			if err != nil {
+				t.Errorf("%s of %s: %v", op, names[i], err)
+			}
+		}
 	}
 }
 
