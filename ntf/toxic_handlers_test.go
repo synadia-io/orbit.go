@@ -15,11 +15,13 @@ package ntf
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +32,14 @@ import (
 var _ agent.Toxics = (*fakeAgent)(nil)
 
 func (a *fakeAgent) AddToxic(_ context.Context, toxic api.Toxic) (api.ActiveToxic, error) {
+	a.mu.Lock()
+	gate := a.addGate
+	a.mu.Unlock()
+
+	if gate != nil {
+		gate()
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -140,6 +150,76 @@ func TestToxicCallsReachTheAgent(t *testing.T) {
 	fake.mu.Unlock()
 	if !slices.Equal(removedNames, []string{"slow"}) {
 		t.Errorf("agent removed %v, want [slow]", removedNames)
+	}
+}
+
+// TestToxicAddNotQueuedBehindAnotherInstance proves a toxic add for one
+// instance answers while an add for another is held in its agent. An add
+// queued behind the held one would reach its agent only after it, by when a
+// remove reverting it could have run and found nothing, and the add would then
+// leave the toxic in place.
+func TestToxicAddNotQueuedBehindAnotherInstance(t *testing.T) {
+	provider := &fakeProvider{toxics: true}
+	svc := startTestService(t, withAgent(provider))
+
+	var held, other api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Toxics: true}, &held)
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Toxics: true}, &other)
+
+	_, agents := provider.frontSnapshot()
+	if len(agents) != 2 {
+		t.Fatalf("provider started %d agents, want 2", len(agents))
+	}
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	// Close waits for the held add, so let it go before the service closes
+	// when the test fails first: cleanups run last registered first.
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	agents[0].mu.Lock()
+	agents[0].addGate = func() {
+		entered <- struct{}{}
+		<-release
+	}
+	agents[0].mu.Unlock()
+
+	heldDone := requestAsync(t, svc.nc, "tester.toxic.add", api.ToxicAddRequest{InstanceID: held.ID, Toxic: api.Toxic{Name: "held", Type: api.ToxicCut}})
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("add for %s never reached its agent", held.ID)
+	}
+
+	// The add for held is held in its agent, so the add for other answers
+	// only if it does not wait behind it.
+	payload, err := json.Marshal(api.ToxicAddRequest{InstanceID: other.ID, Toxic: api.Toxic{Name: "other", Type: api.ToxicCut}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := svc.nc.Request("tester.toxic.add", payload, 5*time.Second)
+	if err != nil {
+		t.Fatalf("add for %s waited behind the held add for %s: %v", other.ID, held.ID, err)
+	}
+	e := msg.Header.Get("Nats-Service-Error")
+	if e != "" {
+		t.Fatalf("add for %s failed: %s", other.ID, e)
+	}
+
+	var added api.ToxicAddResponse
+	err = json.Unmarshal(msg.Data, &added)
+	if err != nil {
+		t.Fatalf("unmarshal %s: %v", msg.Data, err)
+	}
+	if added.Toxic.Name != "other" {
+		t.Errorf("add response = %+v, want the toxic other", added.Toxic)
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	err = <-heldDone
+	if err != nil {
+		t.Fatalf("add for %s: %v", held.ID, err)
 	}
 }
 

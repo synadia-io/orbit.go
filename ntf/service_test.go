@@ -314,7 +314,8 @@ func (f *fakeProvider) startCount() int {
 // Endpoint until a Front succeeds. A Front with Capture set returns the
 // server's port in captures, the Spec.CaptureProxies Start was handed, and port
 // otherwise. The toxics methods record what they were handed in added and
-// removed and return toxicErr when it is set.
+// removed and return toxicErr when it is set. AddToxic calls addGate, when
+// set, as it begins.
 type fakeAgent struct {
 	mu        sync.Mutex
 	port      int
@@ -334,6 +335,7 @@ type fakeAgent struct {
 	added     []api.Toxic
 	removed   []string
 	toxicErr  error
+	addGate   func()
 }
 
 func (a *fakeAgent) Endpoint() backend.Endpoint {

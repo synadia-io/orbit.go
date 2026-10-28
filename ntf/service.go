@@ -217,14 +217,14 @@ type Service struct {
 	mu        sync.Mutex
 	instances map[string]*instance
 
-	// nodeRequests counts the stop.server, start.server and reload.server
-	// requests running in goroutines of their own, so Close waits for them
-	// before it tears the instances down. Add is called only under
-	// nodeRequestsMu while nodeRequestsClosed is false, so no Add races the
-	// Wait in Close.
-	nodeRequests       sync.WaitGroup
-	nodeRequestsMu     sync.Mutex
-	nodeRequestsClosed bool
+	// detachedRequests counts the requests perRequest runs in goroutines of
+	// their own, for the stop, start and reload of a server and for the toxic
+	// endpoints, so Close waits for them before it tears the instances down.
+	// Add is called only under detachedRequestsMu while
+	// detachedRequestsClosed is false, so no Add races the Wait in Close.
+	detachedRequests       sync.WaitGroup
+	detachedRequestsMu     sync.Mutex
+	detachedRequestsClosed bool
 }
 
 type instance struct {
@@ -674,19 +674,19 @@ func (s *Service) startServices(name, group string) error {
 	}
 
 	toxic := srv.AddGroup("toxic")
-	err = toxic.AddEndpoint("add", micro.HandlerFunc(s.toxicAdd))
+	err = toxic.AddEndpoint("add", s.perRequest(s.toxicAdd))
 	if err != nil {
 		return err
 	}
-	err = toxic.AddEndpoint("remove", micro.HandlerFunc(s.toxicRemove))
+	err = toxic.AddEndpoint("remove", s.perRequest(s.toxicRemove))
 	if err != nil {
 		return err
 	}
-	err = toxic.AddEndpoint("clear", micro.HandlerFunc(s.toxicClear))
+	err = toxic.AddEndpoint("clear", s.perRequest(s.toxicClear))
 	if err != nil {
 		return err
 	}
-	err = toxic.AddEndpoint("report", micro.HandlerFunc(s.toxicReport))
+	err = toxic.AddEndpoint("report", s.perRequest(s.toxicReport))
 	if err != nil {
 		return err
 	}
@@ -719,12 +719,16 @@ func (s *Service) startServices(name, group string) error {
 	return nil
 }
 
-// perRequest returns the handler of a node endpoint, stop.server, start.server
-// or reload.server. A micro endpoint handles one request at a time, so a
-// request for one node would otherwise wait behind a slow request for another,
-// and a stop queued that way could run after a later start of its node had
-// already answered. perRequest runs h for each request in a goroutine of its
-// own instead, and the node's cfgMu keeps the requests for one node apart.
+// perRequest returns the handler of an endpoint whose requests each act on one
+// node or one instance: stop.server, start.server, reload.server and the
+// toxic endpoints. A micro endpoint handles one request at a time, so a
+// request for one node or instance would otherwise wait behind a slow request
+// for another, and a stop or a toxic add queued that way could run after the
+// request undoing it had already answered. perRequest runs h for each request
+// in a goroutine of its own instead. The node's cfgMu keeps the requests for
+// one node apart. The toxic requests for one instance may reach its agent at
+// once and in any order, which agent.Toxics allows: its agents accept
+// concurrent calls.
 //
 // The goroutine answers through a detachedRequest, since the micro service
 // reads its own request once the handler returns. Once Close has begun, a
@@ -732,12 +736,12 @@ func (s *Service) startServices(name, group string) error {
 // endpoint's does.
 func (s *Service) perRequest(h micro.HandlerFunc) micro.HandlerFunc {
 	return func(req micro.Request) {
-		s.nodeRequestsMu.Lock()
-		closed := s.nodeRequestsClosed
+		s.detachedRequestsMu.Lock()
+		closed := s.detachedRequestsClosed
 		if !closed {
-			s.nodeRequests.Add(1)
+			s.detachedRequests.Add(1)
 		}
-		s.nodeRequestsMu.Unlock()
+		s.detachedRequestsMu.Unlock()
 
 		if closed {
 			h(req)
@@ -753,7 +757,7 @@ func (s *Service) perRequest(h micro.HandlerFunc) micro.HandlerFunc {
 		}
 
 		go func() {
-			defer s.nodeRequests.Done()
+			defer s.detachedRequests.Done()
 			h(r)
 		}()
 	}
@@ -896,11 +900,11 @@ func (s *Service) resetWith(reason events.DestroyReason) error {
 }
 
 // Close stops serving and releases everything the service owns: it stops answering
-// requests, waits for the server stop, start and reload requests still running,
-// tears down every instance (flushing captures while the connection is
-// still up), closes the agent provider, and shuts down the embedded server. A connection
-// supplied through Options is left open, as is a directory supplied through
-// Options.Dir.
+// requests, waits for the server stop, start and reload requests and the toxic
+// requests still running, tears down every instance (flushing captures while
+// the connection is still up), closes the agent provider, and shuts down the
+// embedded server. A connection supplied through Options is left open, as is a
+// directory supplied through Options.Dir.
 func (s *Service) Close() error {
 	var errs []error
 
@@ -910,12 +914,12 @@ func (s *Service) Close() error {
 		}
 	}
 
-	// Wait for the node requests still running in their own goroutines, so
-	// none acts on an instance while it is torn down below.
-	s.nodeRequestsMu.Lock()
-	s.nodeRequestsClosed = true
-	s.nodeRequestsMu.Unlock()
-	s.nodeRequests.Wait()
+	// Wait for the requests still running in their own goroutines, so none
+	// acts on an instance while it is torn down below.
+	s.detachedRequestsMu.Lock()
+	s.detachedRequestsClosed = true
+	s.detachedRequestsMu.Unlock()
+	s.detachedRequests.Wait()
 
 	// The connection and JetStream are still up, so the destroyed events are
 	// stored.
