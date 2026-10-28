@@ -92,22 +92,40 @@ func (s NodeSelector) Select(servers []api.ManagedServer, rng *rand.Rand) ([]api
 	return Pick(matched, s.Count, s.Fraction, rng), nil
 }
 
-// StreamSelector matches streams by account and name.
+// StreamSelector matches streams by account and name, and picks Count or a
+// Fraction of the matches, at random. When both are zero it picks one match,
+// unlike NodeSelector and ClientSelector, which pick every match then: acting
+// on every stream of an account at once is rarely what a worker means, so it
+// has to be asked for, with a Fraction of 1. A kind picks with Pick, passing
+// what Amount returns.
 type StreamSelector struct {
 	// Account is the account the streams are in. It is required.
 	Account string `json:"account"`
 
 	// Name is a pattern of stream names.
 	Name string `json:"name,omitempty"`
+
+	// Count picks this many of the matching streams, or all of them when
+	// fewer match.
+	Count int `json:"count,omitempty"`
+
+	// Fraction picks this share of the matching streams, above 0 and at most
+	// 1, rounded up, so at least one is picked whenever one matches.
+	Fraction float64 `json:"fraction,omitempty"`
 }
 
-// Validate checks that Account is set and Name is a valid pattern.
+// Validate checks that Account is set, Name is a valid pattern, and Count and
+// Fraction are in range and not both set.
 func (s StreamSelector) Validate() error {
 	if s.Account == "" {
 		return fmt.Errorf("%w: streams need an account", ErrInvalidSelector)
 	}
+	err := validatePattern("name", s.Name)
+	if err != nil {
+		return err
+	}
 
-	return validatePattern("name", s.Name)
+	return validateAmount(s.Count, s.Fraction)
 }
 
 // Match reports whether the stream named name in account matches.
@@ -115,8 +133,17 @@ func (s StreamSelector) Match(account string, name string) bool {
 	return account == s.Account && matchPattern(s.Name, name)
 }
 
+// Amount returns the count and fraction to pick the matching streams with,
+// through Pick: Count and Fraction, or a count of one when both are zero.
+func (s StreamSelector) Amount() (int, float64) {
+	return amountOrOne(s.Count, s.Fraction)
+}
+
 // ConsumerSelector matches consumers by account, stream name and consumer
-// name.
+// name, and picks Count or a Fraction of the matches, at random. When both are
+// zero it picks one match, as StreamSelector does and unlike NodeSelector and
+// ClientSelector, which pick every match then. A kind picks with Pick, passing
+// what Amount returns.
 type ConsumerSelector struct {
 	// Account is the account the consumers are in. It is required.
 	Account string `json:"account"`
@@ -126,9 +153,18 @@ type ConsumerSelector struct {
 
 	// Name is a pattern of consumer names.
 	Name string `json:"name,omitempty"`
+
+	// Count picks this many of the matching consumers, or all of them when
+	// fewer match.
+	Count int `json:"count,omitempty"`
+
+	// Fraction picks this share of the matching consumers, above 0 and at
+	// most 1, rounded up, so at least one is picked whenever one matches.
+	Fraction float64 `json:"fraction,omitempty"`
 }
 
-// Validate checks that Account is set and the patterns are valid.
+// Validate checks that Account is set, the patterns are valid, and Count and
+// Fraction are in range and not both set.
 func (s ConsumerSelector) Validate() error {
 	if s.Account == "" {
 		return fmt.Errorf("%w: consumers need an account", ErrInvalidSelector)
@@ -137,13 +173,23 @@ func (s ConsumerSelector) Validate() error {
 	if err != nil {
 		return err
 	}
+	err = validatePattern("name", s.Name)
+	if err != nil {
+		return err
+	}
 
-	return validatePattern("name", s.Name)
+	return validateAmount(s.Count, s.Fraction)
 }
 
 // Match reports whether the consumer named name on stream in account matches.
 func (s ConsumerSelector) Match(account string, stream string, name string) bool {
 	return account == s.Account && matchPattern(s.Stream, stream) && matchPattern(s.Name, name)
+}
+
+// Amount returns the count and fraction to pick the matching consumers with,
+// through Pick: Count and Fraction, or a count of one when both are zero.
+func (s ConsumerSelector) Amount() (int, float64) {
+	return amountOrOne(s.Count, s.Fraction)
 }
 
 // ClientSelector matches client connections by account and connection name,
@@ -343,6 +389,16 @@ func validateAmount(count int, fraction float64) error {
 	}
 
 	return nil
+}
+
+// amountOrOne returns count and fraction, or a count of one when both are
+// zero.
+func amountOrOne(count int, fraction float64) (int, float64) {
+	if count == 0 && fraction == 0 {
+		return 1, 0
+	}
+
+	return count, fraction
 }
 
 // validatePattern checks that pattern is a valid glob.

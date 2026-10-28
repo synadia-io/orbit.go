@@ -177,11 +177,77 @@ func TestStreamSelector(t *testing.T) {
 		t.Error("an empty name pattern does not match every stream")
 	}
 
-	for _, bad := range []StreamSelector{{Name: "X"}, {Account: "A", Name: "[x"}} {
+	for _, bad := range []StreamSelector{
+		{Name: "X"},
+		{Account: "A", Name: "[x"},
+		{Account: "A", Count: -1},
+		{Account: "A", Fraction: -0.5},
+		{Account: "A", Fraction: 1.5},
+		{Account: "A", Count: 1, Fraction: 0.5},
+	} {
 		err = bad.Validate()
 		if !errors.Is(err, ErrInvalidSelector) {
 			t.Errorf("%+v: got %v, want ErrInvalidSelector", bad, err)
 		}
+	}
+}
+
+// TestStreamAndConsumerSelectorAmount checks stream and consumer selectors
+// pick one match when they set neither count nor fraction, unlike node and
+// client selectors, and Count or Fraction otherwise, rounding a fraction up.
+func TestStreamAndConsumerSelectorAmount(t *testing.T) {
+	streams := []string{"S1", "S2", "S3", "S4", "S5"}
+
+	cases := []struct {
+		name     string
+		count    int
+		fraction float64
+		want     int
+	}{
+		{"neither picks one", 0, 0, 1},
+		{"count", 2, 0, 2},
+		{"count above the matches", 10, 0, 5},
+		{"fraction rounds up", 0, 0.5, 3},
+		{"whole", 0, 1, 5},
+		{"small fraction picks one", 0, 0.01, 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ss := StreamSelector{Account: "A", Count: tc.count, Fraction: tc.fraction}
+			err := ss.Validate()
+			if err != nil {
+				t.Fatal(err)
+			}
+			count, fraction := ss.Amount()
+			got := Pick(streams, count, fraction, nil)
+			if len(got) != tc.want {
+				t.Errorf("streams: picked %v, want %d", got, tc.want)
+			}
+
+			cs := ConsumerSelector{Account: "A", Count: tc.count, Fraction: tc.fraction}
+			err = cs.Validate()
+			if err != nil {
+				t.Fatal(err)
+			}
+			count, fraction = cs.Amount()
+			got = Pick(streams, count, fraction, nil)
+			if len(got) != tc.want {
+				t.Errorf("consumers: picked %v, want %d", got, tc.want)
+			}
+		})
+	}
+
+	all := Pick(streams, 0, 0, nil)
+	if len(all) != len(streams) {
+		t.Fatalf("Pick with neither set picked %v, want every item as node selectors do", all)
+	}
+	nodes, err := (NodeSelector{}).Select(superCluster, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != len(superCluster) {
+		t.Fatalf("a node selector with neither set picked %v, want every server", names(nodes))
 	}
 }
 
@@ -211,7 +277,14 @@ func TestConsumerSelector(t *testing.T) {
 		}
 	}
 
-	for _, bad := range []ConsumerSelector{{Stream: "X"}, {Account: "A", Stream: "[x"}, {Account: "A", Name: "[x"}} {
+	for _, bad := range []ConsumerSelector{
+		{Stream: "X"},
+		{Account: "A", Stream: "[x"},
+		{Account: "A", Name: "[x"},
+		{Account: "A", Count: -1},
+		{Account: "A", Fraction: 2},
+		{Account: "A", Count: 1, Fraction: 0.5},
+	} {
 		err = bad.Validate()
 		if !errors.Is(err, ErrInvalidSelector) {
 			t.Errorf("%+v: got %v, want ErrInvalidSelector", bad, err)
