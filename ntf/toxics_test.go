@@ -336,9 +336,10 @@ func emptyDir(t *testing.T, dir string) {
 // TestToxicsConfigRefusal proves the checks of an instance created with
 // toxics, run on each planned node's config as the server reads it, refuse
 // TLS in a cluster or gateway block or a gateway entry with 019, a gateway not
-// named for its cluster and a config that does not parse with 007, wherever
-// an include puts what they look for, pass a valid config with its includes,
-// and leave no temporary directory behind.
+// named for its cluster, a server_name other than the node's name or none,
+// and a config that does not parse with 007, wherever an include puts what
+// they look for, pass a valid config with its includes, and leave no
+// temporary directory behind.
 func TestToxicsConfigRefusal(t *testing.T) {
 	id := nuid.Next()
 	short := shortID(id)
@@ -413,6 +414,24 @@ func TestToxicsConfigRefusal(t *testing.T) {
 			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: gatewayNoNameTemplate(t), Toxics: true},
 			code: "007",
 			want: fmt.Sprintf(`%s: node %s-c1_s1 does not name its gateway, want "SC_%s_1"`, errGatewayName, short, short),
+		},
+		{
+			name: "renamed server",
+			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: serverNameTemplate(t, renamedServerLine), Toxics: true},
+			code: "007",
+			want: fmt.Sprintf(`%s: node %s-n2 sets server_name "renamed", want "%s-n2"`, errServerName, short, short),
+		},
+		{
+			name: "server_name in mixed case from a snippet",
+			spec: instanceSpec{Kind: "server", Servers: 1, MainTemplate: serverNameTemplate(t, ""), Snippets: map[string]string{"top": "Server_Name: elsewhere\n"}, Toxics: true},
+			code: "007",
+			want: fmt.Sprintf(`%s: node %s-n1 sets server_name "elsewhere", want "%s-n1"`, errServerName, short, short),
+		},
+		{
+			name: "no server_name",
+			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: serverNameTemplate(t, ""), Toxics: true},
+			code: "007",
+			want: fmt.Sprintf(`%s: node %s-n1 sets no server_name, want "%s-n1"`, errServerName, short, short),
 		},
 		{
 			name: "unparseable config",
@@ -1219,6 +1238,99 @@ func TestToxicsUnparseableConfigIsRefused(t *testing.T) {
 		t.Errorf("update error code = %q, want 007", code)
 	}
 	if !strings.HasPrefix(msg, fmt.Sprintf("%s: node %s: ", errConfigParse, name)) {
+		t.Errorf("update error %q does not explain the refusal", msg)
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Errorf("a refused update changed the config\n%s\nwant\n%s", after, before)
+	}
+	noConfigCheckDirs(t, svc)
+}
+
+// serverNameLine is the built-in template's server_name line, which
+// serverNameTemplate replaces.
+const serverNameLine = `server_name: "{{ .ServerName }}"`
+
+// renamedServerLine names the second server of each cluster "renamed", apart
+// from its node name, and every other server by its node name.
+const renamedServerLine = `server_name: "{{ if eq .ServerIndex 2 }}renamed{{ else }}{{ .ServerName }}{{ end }}"`
+
+// serverNameTemplate returns the built-in template with its server_name line
+// replaced by to.
+func serverNameTemplate(t *testing.T, to string) string {
+	t.Helper()
+
+	if strings.Count(serverConfigTemplate, serverNameLine) != 1 {
+		t.Fatalf("the built-in template does not hold %q once", serverNameLine)
+	}
+
+	return strings.Replace(serverConfigTemplate, serverNameLine, to, 1)
+}
+
+// TestToxicsRenamedServerIsRefused proves a create with toxics from a custom
+// template that sets one server's server_name apart from its node name is
+// refused with 007, naming the node, the name it sets and the name it must
+// set, before the agent starts, and leaves no instance, reserved port or
+// config check directory behind. The same template without toxics is
+// accepted, and an update of a server created with toxics that renames it is
+// refused the same way and writes nothing.
+func TestToxicsRenamedServerIsRefused(t *testing.T) {
+	provider := &fakeProvider{toxics: true}
+	svc := startTestService(t, withAgent(provider))
+	renamed := serverNameTemplate(t, renamedServerLine)
+
+	code, msg := serviceError(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Template: renamed, Toxics: true})
+	if code != "007" {
+		t.Errorf("create error code = %q, want 007", code)
+	}
+	if !strings.HasPrefix(msg, errServerName.Error()+": node ") || !strings.Contains(msg, `-n2 sets server_name "renamed", want "`) {
+		t.Errorf("create error %q does not explain the refusal", msg)
+	}
+	if provider.startCount() != 0 {
+		t.Errorf("provider started %d agents, want none", provider.startCount())
+	}
+	if trackedPorts(svc) != 0 {
+		t.Errorf("%d ports still reserved after the refusal", trackedPorts(svc))
+	}
+	noConfigCheckDirs(t, svc)
+
+	var status api.StatusResponse
+	mustRequest(t, svc.nc, "tester.status", nil, &status)
+	if len(status.Instances) != 0 {
+		t.Errorf("status lists %d instances after the refusal, want none", len(status.Instances))
+	}
+	var list api.ListResponse
+	mustRequest(t, svc.nc, "tester.list", nil, &list)
+	if len(list.Instances) != 0 {
+		t.Errorf("list lists %d instances after the refusal, want none", len(list.Instances))
+	}
+
+	var plain api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Template: renamed}, &plain)
+	mustRequest(t, svc.nc, "tester.status", api.StatusRequest{InstanceID: plain.ID}, &status)
+	if len(status.Instances) != 1 || len(status.Instances[0].Servers) != 2 || status.Instances[0].Servers[1].Name != "renamed" {
+		t.Errorf("status of the instance without toxics = %+v, want its second server named renamed", status.Instances)
+	}
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Toxics: true}, &created)
+
+	name := created.Servers[1].Name
+	cfgPath := svc.findServerByName(name).backendNode.(*inProcessNode).cfgPath
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	code, msg = serviceError(t, svc.nc, "tester.update.server", api.UpdateServerRequest{Name: name, Template: renamed})
+	if code != "007" {
+		t.Errorf("update error code = %q, want 007", code)
+	}
+	if msg != fmt.Sprintf(`%s: node %s sets server_name "renamed", want %q`, errServerName, name, name) {
 		t.Errorf("update error %q does not explain the refusal", msg)
 	}
 

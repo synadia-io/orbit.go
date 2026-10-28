@@ -151,8 +151,13 @@ gateways is refused with `019`, on create and on update, since the gateway proxi
 TLS on client ports is allowed. A `tls` inside one entry of the `gateway` block's `gateways` list is refused the same
 way, naming the entry. In a super-cluster the `gateway` block's `name` must be the node's cluster name, the only
 gateway name its proxies admit, or the create, and an update, is refused with `007` naming the node and the name it
-found or that it found none. These checks parse each node's config with its includes as nats-server reads them, and a
-config that does not parse is refused with `007`, on create and on update, naming the node and the parse error.
+found or that it found none. `toxics` requires each node to set `server_name` to its node name, the name toxic
+selectors and the agent's gateway cut know it by and the name status reports for a running server. A config that sets
+another `server_name`, or sets none, is refused with `007`, on create and on update, naming the node, the name it must
+set and any other name it sets; a custom `template` without `toxics` may still name its servers as it likes. These
+checks run before a create starts anything or an update writes anything, and parse each node's config with its
+includes as nats-server reads them, and a config that does not parse is refused with `007`, on create and on update,
+naming the node and the parse error.
 
 A server's `port` reports its client proxy, and the create response and status list every proxy under `links`, each
 with its `name` (`route:<node>-><node>`, `gateway:<cluster>-><node>` or `client:<node>`), `kind`, `from`, `to`, the

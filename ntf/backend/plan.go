@@ -83,7 +83,8 @@ type InstancePlan struct {
 type NodePlan struct {
 	// Name is the plan's identity for the node. It identifies the node and
 	// never changes. It is not necessarily the server's own name, which a
-	// custom template can set; see NodeStatus.ServerName.
+	// custom template can set, though an instance created with toxics must
+	// keep the server's name as Name; see NodeStatus.ServerName.
 	Name string
 
 	// Dir is the node's directory, relative to the instance directory. Every
