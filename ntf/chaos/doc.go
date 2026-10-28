@@ -25,8 +25,8 @@
 //	  min: 30s
 //	  max_fault: 2m
 //	credentials:
-//	  USERS1:
-//	    user_password: {user: user1, password: password}
+//	  $SYS:
+//	    user_password: {user: system, password: password}
 //	workers:
 //	  - name: kicks
 //	    driver:
@@ -34,8 +34,11 @@
 //	    action:
 //	      client_disconnect: {mode: kick, clients: {fraction: 0.1}}
 //
-// The client_disconnect kind in the example arrives in a later release; a
-// chaos service's chaos.info and chaos.schema list the kinds it has.
+// A chaos service's chaos.info and chaos.schema list the kinds it has, such
+// as the client_disconnect kind in the example, with the params of each.
+// That kind acts as the system account, so the example gives a credential
+// for SystemAccount, the default template's own; a run uses the default
+// template's user for an account its definition gives no credential for.
 //
 // The driver and the action are written in the keyed form: an object whose
 // single key names the driver or kind and whose value holds its params, which
