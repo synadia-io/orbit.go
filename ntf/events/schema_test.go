@@ -103,6 +103,8 @@ func examples() []Event {
 	all := []Event{
 		&InstanceAction{Base: base(SourceService, 1), Action: InstanceCreated, Kind: "cluster", Backend: "inprocess"},
 		&InstanceAction{Base: base(SourceService, 9), Action: InstanceDestroyed, Reason: ReasonReset},
+		&InstanceAction{Base: base(SourceService, 1), Action: InstanceCreated, Kind: "server", Backend: "inprocess", Description: "leader election test"},
+		&InstanceAction{Base: base(SourceService, 4), Action: InstanceDestroyed, Description: "leader election test", Reason: ReasonDestroy},
 		&NodeAction{Base: base(SourceService, 2), Action: NodeStopped, Node: "n1", ServerName: "cluster-n1"},
 		&ShapingAction{Base: base(SourceAgent, 1), Action: ShapingApplied, Set: "slow"},
 		&ShapingAction{Base: base(SourceAgent, 6), Action: ShapingApplied, Set: "drop-n3", Server: "cluster-n3"},

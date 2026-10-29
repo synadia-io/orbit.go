@@ -63,6 +63,10 @@
       "type": "string",
       "description": "The name of the backend running the instance's servers, set on created"
     },
+    "description": {
+      "type": "string",
+      "description": "The instance's description, as given when it was created, set on created and destroyed when the instance has one"
+    },
     "reason": {
       "type": "string",
       "description": "The request that destroyed the instance, set on destroyed",

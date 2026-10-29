@@ -48,6 +48,11 @@ type InstanceAction struct {
 	// on created.
 	Backend string `json:"backend,omitempty"`
 
+	// Description is the instance's description, as given when it was
+	// created. Set on created and destroyed, and empty when the instance has
+	// none.
+	Description string `json:"description,omitempty"`
+
 	// Reason is the request that destroyed the instance. Set on destroyed.
 	Reason DestroyReason `json:"reason,omitempty"`
 }

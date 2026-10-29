@@ -331,6 +331,39 @@ func TestEventsDestroyReasons(t *testing.T) {
 	}
 }
 
+// TestEventsRecordDescription proves created and destroyed carry the
+// instance's description when it has one, and leave the field out of the
+// stored event when it has none.
+func TestEventsRecordDescription(t *testing.T) {
+	svc := startTestService(t)
+	stream := eventsStream(t, svc.nc, DefaultGroup)
+
+	for _, description := range []string{"leader election test", ""} {
+		var created api.CreateResponse
+		mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Description: description}, &created)
+		mustRequest(t, svc.nc, "tester.destroy", api.DestroyRequest{InstanceID: created.ID}, nil)
+
+		stored := storedEvents(t, svc.nc, DefaultGroup, created.ID)
+		checkServiceEvents(t, stored, DefaultGroup, created.ID, []string{"instance.created", "node.ready", "instance.destroyed"})
+
+		for _, s := range []storedEvent{stored[0], stored[2]} {
+			inst := s.event.(*events.InstanceAction)
+			if inst.Description != description {
+				t.Errorf("%s description = %q, want %q", inst.Action, inst.Description, description)
+			}
+
+			msg, err := stream.GetMsg(t.Context(), s.seq)
+			if err != nil {
+				t.Fatalf("get message %d: %v", s.seq, err)
+			}
+			has := strings.Contains(string(msg.Data), `"description"`)
+			if has != (description != "") {
+				t.Errorf("%s stored %s, want description present %t", inst.Action, msg.Data, description != "")
+			}
+		}
+	}
+}
+
 // TestStatusReportsEventsSeq proves status reports, per instance, the stream
 // sequence of the latest service event of that instance.
 func TestStatusReportsEventsSeq(t *testing.T) {

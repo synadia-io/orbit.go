@@ -1019,7 +1019,7 @@ func (s *Service) tearDownInstance(inst *instance, reason events.DestroyReason) 
 		return
 	}
 
-	s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceDestroyed, Reason: reason})
+	s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceDestroyed, Description: inst.Description, Reason: reason})
 	inst.announced = false
 }
 

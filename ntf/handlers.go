@@ -904,7 +904,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	s.mu.Unlock()
 
 	if alive {
-		s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceCreated, Kind: inst.Kind, Backend: s.backendName})
+		s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceCreated, Kind: inst.Kind, Backend: s.backendName, Description: inst.Description})
 		for _, e := range ready {
 			s.publishEvent(inst, e)
 		}
