@@ -235,8 +235,9 @@ type Address struct {
 // NodeStatus is a node's state as Node.Status reads it from where the node
 // runs.
 type NodeStatus struct {
-	// ServerName is the server's own name, which a custom template can set.
-	// It is reported while the node is stopped as well.
+	// ServerName is the server's own name, which a custom template can set,
+	// though an instance created with toxics must keep it as the node's name,
+	// NodePlan.Name. It is reported while the node is stopped as well.
 	ServerName string
 
 	// Cluster is the name of the server's cluster, empty for none. It is

@@ -103,6 +103,8 @@ func examples() []Event {
 	all := []Event{
 		&InstanceAction{Base: base(SourceService, 1), Action: InstanceCreated, Kind: "cluster", Backend: "inprocess"},
 		&InstanceAction{Base: base(SourceService, 9), Action: InstanceDestroyed, Reason: ReasonReset},
+		&InstanceAction{Base: base(SourceService, 1), Action: InstanceCreated, Kind: "server", Backend: "inprocess", Description: "leader election test"},
+		&InstanceAction{Base: base(SourceService, 4), Action: InstanceDestroyed, Description: "leader election test", Reason: ReasonDestroy},
 		&NodeAction{Base: base(SourceService, 2), Action: NodeStopped, Node: "n1", ServerName: "cluster-n1"},
 		&ShapingAction{Base: base(SourceAgent, 1), Action: ShapingApplied, Set: "slow"},
 		&ShapingAction{Base: base(SourceAgent, 6), Action: ShapingApplied, Set: "drop-n3", Server: "cluster-n3"},
@@ -155,6 +157,64 @@ func examples() []Event {
 			Toxicity:  1,
 			Links:     []string{"route:n1->n3", "route:n3->n1", "client:n3"},
 		},
+		&ChaosRun{Base: base(SourceChaos, 1), Action: ChaosRunStarted, RunID: "run1"},
+		&ChaosRun{Base: base(SourceChaos, 8), Action: ChaosRunStopped, RunID: "run1", Reason: "instance destroyed"},
+		&ChaosAction{
+			Base:     base(SourceChaos, 2),
+			Action:   ChaosActionApplied,
+			RunID:    "run1",
+			ActionID: "act1",
+			Worker:   "chaos",
+			Kind:     "mixed",
+			Targets: ChaosTargets{
+				Servers:   []string{"cluster-n1"},
+				Toxics:    []string{"unplug-n3"},
+				Streams:   []ChaosStreamRef{{Account: "USERS1", Name: "ORDERS"}},
+				Consumers: []ChaosConsumerRef{{Account: "USERS1", Stream: "ORDERS", Name: "C1"}},
+				Clients:   []ChaosClientRef{{ServerName: "cluster-n2", ID: 12}},
+			},
+		},
+		&ChaosAction{
+			Base:        base(SourceChaos, 3),
+			Action:      ChaosActionStep,
+			RunID:       "run1",
+			ActionID:    "act2",
+			Worker:      "roll",
+			Kind:        "rolling_restart",
+			Targets:     ChaosTargets{Servers: []string{"cluster-n1"}},
+			Description: "stopped cluster-n1",
+		},
+		// An apply that failed before acting on anything names no targets.
+		&ChaosAction{
+			Base:     base(SourceChaos, 4),
+			Action:   ChaosActionApplyFailed,
+			RunID:    "run1",
+			ActionID: "act3",
+			Worker:   "kicks",
+			Kind:     "client_disconnect",
+			Error:    "no clients matched",
+		},
+		&ChaosAction{
+			Base:     base(SourceChaos, 5),
+			Action:   ChaosActionReverted,
+			RunID:    "run1",
+			ActionID: "act4",
+			Worker:   "partition",
+			Kind:     "toxic",
+			Targets:  ChaosTargets{Toxics: []string{"chaos-cut-1"}},
+		},
+		&ChaosAction{
+			Base:     base(SourceChaos, 9),
+			Action:   ChaosActionRevertFailed,
+			RunID:    "run1",
+			ActionID: "act4",
+			Worker:   "partition",
+			Kind:     "toxic",
+			Targets:  ChaosTargets{Toxics: []string{"chaos-cut-1"}},
+			Error:    "tester request failed",
+		},
+		&ChaosWindow{Base: base(SourceChaos, 6), Action: ChaosWindowOpened, RunID: "run1", Overrun: 1500 * time.Millisecond},
+		&ChaosWindow{Base: base(SourceChaos, 7), Action: ChaosWindowClosed, RunID: "run1"},
 	}
 	for _, e := range all {
 		e.EventBase().Type = e.EventType()
@@ -242,6 +302,29 @@ func TestSchemasRefuseAndAllow(t *testing.T) {
 	err = Validate(zero, v)
 	if !errors.Is(err, ErrInvalidEvent) {
 		t.Errorf("source_seq 0: got %v, want ErrInvalidEvent", err)
+	}
+
+	stopped := &ChaosRun{Base: base(SourceChaos, 1), Action: ChaosRunStopped, RunID: "run1"}
+	stopped.Type = TypeChaosRun
+	err = Validate(stopped, v)
+	if !errors.Is(err, ErrInvalidEvent) {
+		t.Errorf("stopped without reason: got %v, want ErrInvalidEvent", err)
+	}
+
+	step := &ChaosAction{Base: base(SourceChaos, 1), Action: ChaosActionStep, RunID: "run1", ActionID: "act1", Worker: "roll", Kind: "rolling_restart"}
+	step.Type = TypeChaosAction
+	err = Validate(step, v)
+	if !errors.Is(err, ErrInvalidEvent) {
+		t.Errorf("step without description: got %v, want ErrInvalidEvent", err)
+	}
+
+	for _, action := range []ChaosEventAction{ChaosActionApplyFailed, ChaosActionRevertFailed} {
+		failed := &ChaosAction{Base: base(SourceChaos, 1), Action: action, RunID: "run1", ActionID: "act1", Worker: "kicks", Kind: "client_disconnect"}
+		failed.Type = TypeChaosAction
+		err = Validate(failed, v)
+		if !errors.Is(err, ErrInvalidEvent) {
+			t.Errorf("%s without error: got %v, want ErrInvalidEvent", action, err)
+		}
 	}
 
 	extra := map[string]any{

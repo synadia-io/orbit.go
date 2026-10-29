@@ -15,6 +15,7 @@ package ntf
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -215,6 +216,15 @@ type Service struct {
 
 	mu        sync.Mutex
 	instances map[string]*instance
+
+	// detachedRequests counts the requests perRequest runs in goroutines of
+	// their own, for the stop, start and reload of a server and for the toxic
+	// endpoints, so Close waits for them before it tears the instances down.
+	// Add is called only under detachedRequestsMu while
+	// detachedRequestsClosed is false, so no Add races the Wait in Close.
+	detachedRequests       sync.WaitGroup
+	detachedRequestsMu     sync.Mutex
+	detachedRequestsClosed bool
 }
 
 type instance struct {
@@ -314,7 +324,9 @@ type managedServer struct {
 	toxics bool
 
 	// cfgMu guards the server's config (its config path and its snippet
-	// files). Held by update, reload and start operations.
+	// files). Held by update, reload, start and stop operations. Requests for
+	// different servers run at once, so cfgMu is what keeps the stop, start
+	// and reload requests of one server apart.
 	cfgMu sync.Mutex
 }
 
@@ -616,7 +628,7 @@ func (s *Service) startServices(name, group string) error {
 	}
 
 	stop := srv.AddGroup("stop")
-	err = stop.AddEndpoint("server", micro.HandlerFunc(s.stopServer))
+	err = stop.AddEndpoint("server", s.perRequest(s.stopServer))
 	if err != nil {
 		return err
 	}
@@ -626,7 +638,7 @@ func (s *Service) startServices(name, group string) error {
 	}
 
 	start := srv.AddGroup("start")
-	err = start.AddEndpoint("server", micro.HandlerFunc(s.startServer))
+	err = start.AddEndpoint("server", s.perRequest(s.startServer))
 	if err != nil {
 		return err
 	}
@@ -642,7 +654,7 @@ func (s *Service) startServices(name, group string) error {
 	}
 
 	reload := srv.AddGroup("reload")
-	err = reload.AddEndpoint("server", micro.HandlerFunc(s.reloadServer))
+	err = reload.AddEndpoint("server", s.perRequest(s.reloadServer))
 	if err != nil {
 		return err
 	}
@@ -662,19 +674,19 @@ func (s *Service) startServices(name, group string) error {
 	}
 
 	toxic := srv.AddGroup("toxic")
-	err = toxic.AddEndpoint("add", micro.HandlerFunc(s.toxicAdd))
+	err = toxic.AddEndpoint("add", s.perRequest(s.toxicAdd))
 	if err != nil {
 		return err
 	}
-	err = toxic.AddEndpoint("remove", micro.HandlerFunc(s.toxicRemove))
+	err = toxic.AddEndpoint("remove", s.perRequest(s.toxicRemove))
 	if err != nil {
 		return err
 	}
-	err = toxic.AddEndpoint("clear", micro.HandlerFunc(s.toxicClear))
+	err = toxic.AddEndpoint("clear", s.perRequest(s.toxicClear))
 	if err != nil {
 		return err
 	}
-	err = toxic.AddEndpoint("report", micro.HandlerFunc(s.toxicReport))
+	err = toxic.AddEndpoint("report", s.perRequest(s.toxicReport))
 	if err != nil {
 		return err
 	}
@@ -705,6 +717,132 @@ func (s *Service) startServices(name, group string) error {
 	}
 
 	return nil
+}
+
+// perRequest returns the handler of an endpoint whose requests each act on one
+// node or one instance: stop.server, start.server, reload.server and the
+// toxic endpoints. A micro endpoint handles one request at a time, so a
+// request for one node or instance would otherwise wait behind a slow request
+// for another, and a stop or a toxic add queued that way could run after the
+// request undoing it had already answered. perRequest runs h for each request
+// in a goroutine of its own instead. The node's cfgMu keeps the requests for
+// one node apart. The toxic requests for one instance may reach its agent at
+// once and in any order, which agent.Toxics allows: its agents accept
+// concurrent calls.
+//
+// The goroutine answers through a detachedRequest, since the micro service
+// reads its own request once the handler returns. Once Close has begun, a
+// request still drained from the endpoint runs in the handler, as every other
+// endpoint's does.
+func (s *Service) perRequest(h micro.HandlerFunc) micro.HandlerFunc {
+	return func(req micro.Request) {
+		s.detachedRequestsMu.Lock()
+		closed := s.detachedRequestsClosed
+		if !closed {
+			s.detachedRequests.Add(1)
+		}
+		s.detachedRequestsMu.Unlock()
+
+		if closed {
+			h(req)
+			return
+		}
+
+		r := &detachedRequest{
+			nc:      s.nc,
+			subject: req.Subject(),
+			reply:   req.Reply(),
+			data:    req.Data(),
+			headers: req.Headers(),
+		}
+
+		go func() {
+			defer s.detachedRequests.Done()
+			h(r)
+		}()
+	}
+}
+
+// detachedRequest is a micro.Request a handler can answer after the micro
+// handler returned. It publishes its answer on the management connection
+// itself, with the headers micro sets, and returns the errors micro's own
+// request returns. It leaves the micro service's request alone, so the
+// service's stats do not count its errors, and report a processing time near
+// zero, since micro times only the start of the goroutine.
+type detachedRequest struct {
+	nc      *nats.Conn
+	subject string
+	reply   string
+	data    []byte
+	headers micro.Headers
+}
+
+var _ micro.Request = (*detachedRequest)(nil)
+
+func (r *detachedRequest) Respond(data []byte, opts ...micro.RespondOpt) error {
+	msg := &nats.Msg{Data: data}
+	for _, opt := range opts {
+		opt(msg)
+	}
+
+	// micro formats the cause with %s, so only ErrRespond matches errors.Is.
+	err := r.publish(msg)
+	if err != nil {
+		return fmt.Errorf("%w: %s", micro.ErrRespond, err)
+	}
+
+	return nil
+}
+
+func (r *detachedRequest) RespondJSON(v any, opts ...micro.RespondOpt) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return micro.ErrMarshalResponse
+	}
+
+	return r.Respond(data, opts...)
+}
+
+func (r *detachedRequest) Error(code, description string, data []byte, opts ...micro.RespondOpt) error {
+	if code == "" {
+		return fmt.Errorf("%w: error code", micro.ErrArgRequired)
+	}
+	if description == "" {
+		return fmt.Errorf("%w: description", micro.ErrArgRequired)
+	}
+
+	msg := &nats.Msg{
+		Header: nats.Header{
+			micro.ErrorHeader:     []string{description},
+			micro.ErrorCodeHeader: []string{code},
+		},
+	}
+	for _, opt := range opts {
+		opt(msg)
+	}
+	msg.Data = data
+
+	return r.publish(msg)
+}
+
+func (r *detachedRequest) Data() []byte { return r.data }
+
+func (r *detachedRequest) Headers() micro.Headers { return r.headers }
+
+func (r *detachedRequest) Subject() string { return r.subject }
+
+func (r *detachedRequest) Reply() string { return r.reply }
+
+// publish sends msg to the request's reply subject, returning the publish
+// error as it is: Respond wraps it and Error does not, as micro's request does.
+func (r *detachedRequest) publish(msg *nats.Msg) error {
+	if r.reply == "" {
+		return nats.ErrMsgNoReply
+	}
+
+	msg.Subject = r.reply
+
+	return r.nc.PublishMsg(msg)
 }
 
 // ManagementConn is the connection the service answers requests on. It belongs to
@@ -762,10 +900,11 @@ func (s *Service) resetWith(reason events.DestroyReason) error {
 }
 
 // Close stops serving and releases everything the service owns: it stops answering
-// requests, tears down every instance (flushing captures while the connection is
-// still up), closes the agent provider, and shuts down the embedded server. A connection
-// supplied through Options is left open, as is a directory supplied through
-// Options.Dir.
+// requests, waits for the server stop, start and reload requests and the toxic
+// requests still running, tears down every instance (flushing captures while
+// the connection is still up), closes the agent provider, and shuts down the
+// embedded server. A connection supplied through Options is left open, as is a
+// directory supplied through Options.Dir.
 func (s *Service) Close() error {
 	var errs []error
 
@@ -774,6 +913,13 @@ func (s *Service) Close() error {
 			errs = append(errs, fmt.Errorf("could not stop the micro service: %w", err))
 		}
 	}
+
+	// Wait for the requests still running in their own goroutines, so none
+	// acts on an instance while it is torn down below.
+	s.detachedRequestsMu.Lock()
+	s.detachedRequestsClosed = true
+	s.detachedRequestsMu.Unlock()
+	s.detachedRequests.Wait()
 
 	// The connection and JetStream are still up, so the destroyed events are
 	// stored.
@@ -873,7 +1019,7 @@ func (s *Service) tearDownInstance(inst *instance, reason events.DestroyReason) 
 		return
 	}
 
-	s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceDestroyed, Reason: reason})
+	s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceDestroyed, Description: inst.Description, Reason: reason})
 	inst.announced = false
 }
 

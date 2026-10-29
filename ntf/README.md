@@ -151,8 +151,13 @@ gateways is refused with `019`, on create and on update, since the gateway proxi
 TLS on client ports is allowed. A `tls` inside one entry of the `gateway` block's `gateways` list is refused the same
 way, naming the entry. In a super-cluster the `gateway` block's `name` must be the node's cluster name, the only
 gateway name its proxies admit, or the create, and an update, is refused with `007` naming the node and the name it
-found or that it found none. These checks parse each node's config with its includes as nats-server reads them, and a
-config that does not parse is refused with `007`, on create and on update, naming the node and the parse error.
+found or that it found none. `toxics` requires each node to set `server_name` to its node name, the name toxic
+selectors and the agent's gateway cut know it by and the name status reports for a running server. A config that sets
+another `server_name`, or sets none, is refused with `007`, on create and on update, naming the node, the name it must
+set and any other name it sets; a custom `template` without `toxics` may still name its servers as it likes. These
+checks run before a create starts anything or an update writes anything, and parse each node's config with its
+includes as nats-server reads them, and a config that does not parse is refused with `007`, on create and on update,
+naming the node and the parse error.
 
 A server's `port` reports its client proxy, and the create response and status list every proxy under `links`, each
 with its `name` (`route:<node>-><node>`, `gateway:<cluster>-><node>` or `client:<node>`), `kind`, `from`, `to`, the
@@ -247,6 +252,7 @@ into one result. The request and reply are the
 | `ntf.events.tester.<id>.shaping.*` | Published by the agent when a shaping set is `applied` or `cleared`, with its `server` when it has one, or a rule `fired`, with the `server_name` it fired on. |
 | `ntf.events.tester.<id>.capture.stored` | Published by the agent when a connection's capture is stored. |
 | `ntf.events.tester.<id>.toxic.*` | Published by the agent when a toxic is `added` or `removed`, and once per toxic when they are `cleared`. |
+| `ntf.events.tester.<id>.chaos.*` | Published by a chaos engine when a run is `started`, `paused`, `resumed`, `stopped` or `finished`, an action is `applied`, reports a `step`, is `reverted`, or fails as `apply_failed` or `revert_failed`, and a quiet window is `opened` or `closed`. |
 
 The subjects above assume the default `Group`. The Go types for these requests and responses live in the `api`
 package, and the events in the `events` package. The service keeps its group's events in the stream
@@ -266,3 +272,6 @@ account and scope subject permissions to its group. The service also needs `ntf.
 and `$JS.API.>` for their stream. `Group` namespaces the endpoints but not Micro's own `$SRV` discovery subjects, so
 two services on one connection still collide there. On an unauthenticated server any client can publish forged
 events or delete the events stream.
+
+`ntf-server serve` also hosts a chaos service beside it, which answers on `chaos.>`. A client that can publish
+there can stop, reload and fault any instance through it, so scope `chaos.>` as you scope the group.

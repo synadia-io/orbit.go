@@ -70,6 +70,11 @@ var errRouteTLS = errors.New("toxics needs plaintext routes and gateways")
 // name the gateway gate admits a connection by.
 var errGatewayName = errors.New("toxics needs each gateway named for its cluster")
 
+// errServerName is the cause of a create or update with toxics refused
+// because a node does not set server_name to its node name, the name toxic
+// selectors and the agent's gateway cut know the node by.
+var errServerName = errors.New("toxics requires each node to set server_name to its node name")
+
 // errConfigParse is the cause of a create or update with toxics refused
 // because a node's config does not parse, so the checks of its routes and
 // gateways cannot read it.

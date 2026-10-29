@@ -70,6 +70,10 @@ resolve a selector the same way:
     proxies its cluster shares, existing and new, telling them apart by the
     server_name the dialer's INFO gives, which is Spec.Nodes' Name, so a cut of
     a node alone unplugs it.
+  - Toxics requires each node to set server_name to its Spec.Nodes' Name: the
+    service refuses to create an instance with toxics, or to update one of its
+    servers, when a config sets any other server_name or sets none, so a
+    selector and a dialer's INFO name a node the same way.
 
 # Growing the agent
 

@@ -27,6 +27,9 @@ const (
 	TypeShapingFired   = "io.synadia.ntf.event.v1.shaping_fired"
 	TypeCaptureStored  = "io.synadia.ntf.event.v1.capture_stored"
 	TypeToxicAction    = "io.synadia.ntf.event.v1.toxic_action"
+	TypeChaosRun       = "io.synadia.ntf.event.v1.chaos_run"
+	TypeChaosAction    = "io.synadia.ntf.event.v1.chaos_action"
+	TypeChaosWindow    = "io.synadia.ntf.event.v1.chaos_window"
 )
 
 // Source names the component that published an event.
@@ -39,7 +42,7 @@ const (
 	SourceAgent Source = "agent"
 	// SourceBackend is reserved for a backend running an instance's servers.
 	SourceBackend Source = "backend"
-	// SourceChaos is reserved for a chaos engine.
+	// SourceChaos is a chaos engine.
 	SourceChaos Source = "chaos"
 )
 
@@ -53,6 +56,7 @@ const (
 	CategoryShaping  Category = "shaping"
 	CategoryCapture  Category = "capture"
 	CategoryToxic    Category = "toxic"
+	CategoryChaos    Category = "chaos"
 )
 
 // Base holds the fields every event carries. Every event struct embeds it.

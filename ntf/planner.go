@@ -827,3 +827,29 @@ func checkGatewayName(n *nodePlan, cfg map[string]any) error {
 
 	return nil
 }
+
+// checkServerName returns an error wrapping errServerName when cfg, node n's
+// parsed config, sets a server_name other than n's name, or sets none, so the
+// server would name itself by its generated id. Status reports a running
+// server by the name it gives itself, and the agent knows the node by n's
+// name, in toxic selectors and in its gateway cut alike. Keys match in any
+// case, as the server matches them.
+func checkServerName(n *nodePlan, cfg map[string]any) error {
+	named := false
+	for key, value := range cfg {
+		if !strings.EqualFold(key, "server_name") {
+			continue
+		}
+		named = true
+
+		name := fmt.Sprint(value)
+		if name != n.Name {
+			return fmt.Errorf("%w: node %s sets server_name %q, want %q", errServerName, n.Name, name, n.Name)
+		}
+	}
+	if !named {
+		return fmt.Errorf("%w: node %s sets no server_name, want %q", errServerName, n.Name, n.Name)
+	}
+
+	return nil
+}

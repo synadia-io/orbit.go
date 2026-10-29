@@ -349,9 +349,9 @@ func (s *Service) toxicsRefusal(kind, customTemplate string) (string, string) {
 // update of an instance created with toxics is refused with for node n's
 // rendered config, or two empty strings when it is not refused: 007 for a
 // config that does not parse, 019 for one that enables TLS on routes or
-// gateways, 007 for a gateway not named for its cluster, and failCode when the
-// config could not be checked. dir is where readNodeConfig makes its
-// temporary directory.
+// gateways, 007 for a gateway not named for its cluster, 007 for a
+// server_name other than the node's name, and failCode when the config could
+// not be checked. dir is where readNodeConfig makes its temporary directory.
 func toxicsConfigRefusal(dir string, n *nodePlan, failCode string) (string, string) {
 	cfg, err := readNodeConfig(dir, n)
 	if errors.Is(err, errConfigParse) {
@@ -367,6 +367,11 @@ func toxicsConfigRefusal(dir string, n *nodePlan, failCode string) (string, stri
 	}
 
 	err = checkGatewayName(n, cfg)
+	if err != nil {
+		return "007", err.Error()
+	}
+
+	err = checkServerName(n, cfg)
 	if err != nil {
 		return "007", err.Error()
 	}
@@ -704,8 +709,11 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	}
 
 	// The proxies of toxics read a plain CONNECT, so routes and gateways must
-	// not use TLS, and the gateway gate admits only a gateway named for its
-	// cluster. A config these checks cannot read is refused.
+	// not use TLS, the gateway gate admits only a gateway named for its
+	// cluster, and toxic selectors name each server by its node name, so its
+	// server_name must be that name. A config these checks cannot read is
+	// refused. The checks run before anything starts, so a refusal has only
+	// the instance to drop.
 	if spec.Toxics {
 		for _, n := range plan.nodes {
 			code, msg := toxicsConfigRefusal(s.dir, n, "002")
@@ -896,7 +904,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	s.mu.Unlock()
 
 	if alive {
-		s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceCreated, Kind: inst.Kind, Backend: s.backendName})
+		s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceCreated, Kind: inst.Kind, Backend: s.backendName, Description: inst.Description})
 		for _, e := range ready {
 			s.publishEvent(inst, e)
 		}
@@ -1673,8 +1681,9 @@ func (s *Service) updateServer(req micro.Request) {
 	}
 
 	// The proxies of toxics read a plain CONNECT, so the revision must not
-	// enable TLS on routes or gateways either, and must name its gateway for
-	// its cluster. A config these checks cannot read is refused.
+	// enable TLS on routes or gateways either, must name its gateway for its
+	// cluster, and must keep the node's name as its server_name. A config
+	// these checks cannot read is refused.
 	if ms.toxics {
 		code, msg := toxicsConfigRefusal(s.dir, next, "009")
 		if code != "" {
