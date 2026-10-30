@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/nats-io/nats.go v1.54.0
-	github.com/synadia-io/orbit.go/ntf v0.0.3-0.20261021095549-a812be9653f2
+	github.com/synadia-io/orbit.go/ntf v0.0.3-0.20261030153521-16d67fa064b8
 )
 
 require (
@@ -12,5 +12,5 @@ require (
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 )
