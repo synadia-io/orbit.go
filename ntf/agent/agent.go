@@ -267,6 +267,20 @@ type Toxics interface {
 	ToxicReport(ctx context.Context) ([]api.LinkToxics, []api.ActiveToxic, error)
 }
 
+// ShapingLister is the capability to return the shaping sets of an instance as
+// they were submitted, so a caller can read a set, change it and set it again.
+// It is optional and no capability declares it: an agent with shaping may
+// implement it, and the service forwards tester.shape.list to it, answering
+// that shaping is not supported when the agent does not. Its method takes and
+// returns plain values, so it can become a NATS request and reply.
+type ShapingLister interface {
+	// ListShaping returns the set id, or every set when id is empty in the
+	// order Agent.ShapingSets returns, each as Agent.Shape was last handed it.
+	// An id the agent does not hold is an error, which reaches the caller as
+	// is. An agent without shaping returns ErrUnsupported.
+	ListShaping(ctx context.Context, id string) ([]api.ShapingSet, error)
+}
+
 // Agent is a running network agent serving one instance. Every method takes
 // and returns plain values, so it can become a NATS request and reply.
 //

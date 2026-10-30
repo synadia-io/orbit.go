@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/clock_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.clock_response",
+      "description": "The type id of the response"
+    },
+    "participants": {
+      "items": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The kind of participant, service, agent or extra"
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "The instance an agent fronts"
+          },
+          "subject": {
+            "type": "string",
+            "description": "The clock subject of an extra participant"
+          },
+          "reference": {
+            "type": "boolean",
+            "description": "True for the service, whose host's clock every offset is measured against"
+          },
+          "shared_clock": {
+            "type": "boolean",
+            "description": "True for a participant that reads the service host's clock, reported with a zero offset without a probe"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "The participant's clock less the service host's in nanoseconds, positive when it is ahead"
+          },
+          "round_trip": {
+            "type": "integer",
+            "description": "The probe's time in flight in nanoseconds"
+          },
+          "bound": {
+            "type": "integer",
+            "description": "Half the round trip in nanoseconds, the true offset lies within it of offset"
+          },
+          "error": {
+            "type": "string",
+            "description": "Why an extra participant could not be measured, offset, round_trip and bound are zero when set"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "description": "Each participant's clock, the service first, then the agents, then the extra subjects"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.clock_response"
+}

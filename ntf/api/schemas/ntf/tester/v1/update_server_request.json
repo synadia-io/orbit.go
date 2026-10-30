@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/update_server_request.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.update_server_request",
+      "description": "The type id of the request"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The name of the server to update"
+    },
+    "snippets": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object",
+      "description": "Config snippets by the extension point of the main template they fill"
+    },
+    "template": {
+      "type": "string",
+      "description": "A custom main config template, the built-in one when empty"
+    },
+    "tls_timeout": {
+      "type": "number",
+      "description": "The TLS handshake timeout in seconds of a server created with generated TLS, unchanged when absent"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "name"
+  ],
+  "title": "io.synadia.ntf.tester.v1.update_server_request"
+}

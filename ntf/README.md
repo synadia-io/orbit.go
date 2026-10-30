@@ -201,11 +201,13 @@ toxiproxy rolls it for each stream of each connection, and again whenever the st
 removing another toxic. `lossy` rolls it once for each stream of each connection and keeps it across rebuilds. A cut
 cuts every connection and accepts no toxicity other than 1.
 
-The toxic calls are refused with `002` without an `instance_id`, `014` when no agent is selected, `018` when the agent
+The toxic calls are refused with `001` without an `instance_id`, `014` when no agent is selected, `018` when the agent
 does not declare `toxics`, `404` for an unknown instance, and `020` for an instance created without `toxics`. A toxic
-the agent refuses for what it asks, such as a name in use or unknown, a selector that matches no link or names an
-unknown node or cluster, a one-way cut, or an unknown attribute or one out of range, is refused with `021` naming the
-toxic and the field. Any other failure of the agent answers `022`.
+with an unknown attribute or one out of range is refused with `001`. Both `001` refusals carry an
+`Invalid request:` description naming what failed, such as `Invalid request: toxic.attributes.rate: minimum: got 0, want 1`.
+A toxic the agent refuses for what it asks, such as a name in use or unknown, a selector that matches no link or names
+an unknown node or cluster, or a one-way cut, is refused with `021` naming the toxic and the field. Any other failure
+of the agent answers `022`.
 
 ## Clocks
 

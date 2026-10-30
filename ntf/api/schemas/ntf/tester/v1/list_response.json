@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/list_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.list_response",
+      "description": "The type id of the response"
+    },
+    "instances": {
+      "items": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The instance id"
+          },
+          "description": {
+            "type": "string",
+            "description": "The description of the instance"
+          },
+          "kind": {
+            "type": "string",
+            "description": "The kind of instance, server, cluster or super-cluster"
+          },
+          "cluster": {
+            "type": "string",
+            "description": "The cluster name of a cluster instance"
+          },
+          "servers": {
+            "type": "integer",
+            "description": "The number of servers in the instance"
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the instance was created"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "description": "Every instance"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.list_response"
+}

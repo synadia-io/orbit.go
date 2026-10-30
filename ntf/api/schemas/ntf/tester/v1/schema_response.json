@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/schema_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.schema_response",
+      "description": "The type id of the response"
+    },
+    "endpoints": {
+      "items": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The endpoint's name below the service group, such as create.server"
+          },
+          "description": {
+            "type": "string",
+            "description": "What the endpoint does"
+          },
+          "request": {
+            "type": "object",
+            "description": "The JSON Schema of the endpoint's request"
+          },
+          "response": {
+            "type": "object",
+            "description": "The JSON Schema of the endpoint's response"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "description": "The schemas of every endpoint"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.schema_response"
+}

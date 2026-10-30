@@ -58,7 +58,7 @@ func (s *Service) clock(req micro.Request) {
 	s.mu.Unlock()
 	slices.Sort(agents)
 
-	resp := api.ClockResponse{Participants: []api.ClockParticipant{{Kind: api.ClockService, Reference: true}}}
+	resp := api.ClockResponse{Type: api.TypeClockResponse, Participants: []api.ClockParticipant{{Kind: api.ClockService, Reference: true}}}
 	for _, id := range agents {
 		resp.Participants = append(resp.Participants, api.ClockParticipant{Kind: api.ClockAgent, InstanceID: id, SharedClock: true})
 	}
