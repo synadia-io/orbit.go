@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/status_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.status_response",
+      "description": "The type id of the response"
+    },
+    "instances": {
+      "items": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The instance id"
+          },
+          "description": {
+            "type": "string",
+            "description": "The description of the instance"
+          },
+          "kind": {
+            "type": "string",
+            "description": "The kind of instance, server, cluster or super-cluster"
+          },
+          "servers": {
+            "items": {
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The server's name"
+                },
+                "cluster": {
+                  "type": "string",
+                  "description": "The cluster the server is in"
+                },
+                "port": {
+                  "type": "integer",
+                  "description": "The client port, or the port of the client proxy for an instance created with toxics"
+                },
+                "ports": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "type": "object",
+                  "description": "Further ports by listener name, such as cluster and trace"
+                },
+                "url": {
+                  "type": "string",
+                  "description": "The URL clients dial"
+                },
+                "advertise": {
+                  "type": "string",
+                  "description": "The configured client_advertise host, empty when the node advertises nothing"
+                },
+                "running": {
+                  "type": "boolean",
+                  "description": "Whether the server is running"
+                },
+                "trace_url": {
+                  "type": "string",
+                  "description": "The URL of the server's capture proxy, set client-side from the trace port"
+                },
+                "version": {
+                  "type": "string",
+                  "description": "The server version the node runs, set by status only"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "description": "The servers of the instance"
+          },
+          "shaping_sets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "description": "The ids of the shaping sets applied to the instance's capture proxies, in the order they were first applied"
+          },
+          "backend": {
+            "type": "string",
+            "description": "The name of the backend running the instance's servers"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "description": "The capabilities the backend declares, such as kill, pause and version-change"
+          },
+          "agent": {
+            "type": "string",
+            "description": "The name of the service's network agent, absent when it has none"
+          },
+          "agent_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "description": "The capabilities the agent declares, such as capture and shaping"
+          },
+          "links": {
+            "items": {
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The link's name, route:\u003cnode\u003e-\u003e\u003cnode\u003e, gateway:\u003ccluster\u003e-\u003e\u003cnode\u003e or client:\u003cnode\u003e"
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "The link's kind, route, gateway or client"
+                },
+                "from": {
+                  "type": "string",
+                  "description": "The node that dials through a route proxy, or the cluster whose nodes dial through a gateway proxy, empty for a client proxy"
+                },
+                "to": {
+                  "type": "string",
+                  "description": "The node the proxy forwards to"
+                },
+                "proxy": {
+                  "type": "string",
+                  "description": "The host:port the nodes or clients dial the proxy on"
+                },
+                "upstream": {
+                  "type": "string",
+                  "description": "The host:port the proxy forwards to"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "description": "The proxied links of an instance created with toxics"
+          },
+          "toxics": {
+            "items": {
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The toxic's name, unique on the instance"
+                },
+                "selector": {
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "description": "The kind of link, route, gateway or client, every kind when empty"
+                    },
+                    "from": {
+                      "type": "string",
+                      "description": "A node or a cluster at one end of the links, any when empty"
+                    },
+                    "to": {
+                      "type": "string",
+                      "description": "A node or a cluster at the other end of the links, or the server of a client link, any when empty"
+                    },
+                    "node": {
+                      "type": "string",
+                      "description": "Selects every link of one node both ways, not combined with from or to"
+                    },
+                    "direction": {
+                      "type": "string",
+                      "description": "The data the toxic acts on, to, from or both, both when empty"
+                    }
+                  },
+                  "type": "object",
+                  "description": "The links the toxic acts on"
+                },
+                "type": {
+                  "type": "string",
+                  "description": "The toxic's type"
+                },
+                "attributes": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "description": "The attributes of the toxic's type"
+                },
+                "toxicity": {
+                  "type": "number",
+                  "description": "The chance in [0, 1] that the toxic acts, 1 when absent"
+                },
+                "links": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "The names of the links the selector resolved to"
+                },
+                "since": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "When the toxic was added"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "description": "The toxics in place on the links of an instance created with toxics, in the order they were added"
+          },
+          "events_seq": {
+            "type": "integer",
+            "description": "The stream sequence of the latest service event of the instance, absent when there is none"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "description": "The status of each instance reported"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.status_response"
+}

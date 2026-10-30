@@ -81,9 +81,15 @@ Agent does not grow. Later capabilities arrive as separate interfaces an agent
 also implements, declared through a capability list. ClientEdge, which capture
 declares, is the first, and Toxics, which toxics declares, the second.
 
+An optional extension of a declared capability is an interface no capability
+declares, which the service finds by type assertion. ShapingLister is the
+first: an agent with shaping may implement it, and the service forwards
+tester.shape.list to an agent that does and answers it as unsupported for one
+that does not.
+
 Provider.Capabilities is that list: capture, shaping and toxics so far, each a
 Capability constant. The service decides what a provider supports from this
-list alone, not by probing its agents: it refuses a create that needs a
+list, not by probing its agents: it refuses a create that needs a
 capability the provider does not declare, and reports the list in status as
 agent_capabilities, beside the backend's capabilities. A provider declares only
 what its agents do: one that declares shaping answers the shaping methods, and

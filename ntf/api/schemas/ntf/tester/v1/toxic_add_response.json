@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/toxic_add_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.toxic_add_response",
+      "description": "The type id of the response"
+    },
+    "toxic": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The toxic's name, unique on the instance"
+        },
+        "selector": {
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "The kind of link, route, gateway or client, every kind when empty"
+            },
+            "from": {
+              "type": "string",
+              "description": "A node or a cluster at one end of the links, any when empty"
+            },
+            "to": {
+              "type": "string",
+              "description": "A node or a cluster at the other end of the links, or the server of a client link, any when empty"
+            },
+            "node": {
+              "type": "string",
+              "description": "Selects every link of one node both ways, not combined with from or to"
+            },
+            "direction": {
+              "type": "string",
+              "description": "The data the toxic acts on, to, from or both, both when empty"
+            }
+          },
+          "type": "object",
+          "description": "The links the toxic acts on"
+        },
+        "type": {
+          "type": "string",
+          "description": "The toxic's type"
+        },
+        "attributes": {
+          "additionalProperties": true,
+          "type": "object",
+          "description": "The attributes of the toxic's type"
+        },
+        "toxicity": {
+          "type": "number",
+          "description": "The chance in [0, 1] that the toxic acts, 1 when absent"
+        },
+        "links": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "The names of the links the selector resolved to"
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the toxic was added"
+        }
+      },
+      "type": "object",
+      "description": "The toxic as applied"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.toxic_add_response"
+}

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/shape_report_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.shape_report_response",
+      "description": "The type id of the response"
+    },
+    "sets": {
+      "items": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The set's id"
+          },
+          "firings": {
+            "items": {
+              "properties": {
+                "connection_uuid": {
+                  "type": "string",
+                  "description": "The id of the connection"
+                },
+                "client_name": {
+                  "type": "string",
+                  "description": "The CONNECT name of the client"
+                },
+                "frame_id": {
+                  "type": "string",
+                  "description": "The frame's id in the capture"
+                },
+                "rule": {
+                  "type": "string",
+                  "description": "The id of the rule that fired"
+                },
+                "action": {
+                  "type": "string",
+                  "description": "The kind of action applied"
+                },
+                "time": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "When the rule fired"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "description": "Every firing of a rule of the set, in the order of their time"
+          },
+          "servers": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "description": "The firings counted by the server whose capture proxy they fired on"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "description": "The firings of each set reported"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.shape_report_response"
+}

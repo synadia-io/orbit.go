@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/create_cluster_request.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.create_cluster_request",
+      "description": "The type id of the request"
+    },
+    "servers": {
+      "type": "integer",
+      "maximum": 20,
+      "minimum": 2,
+      "description": "The number of servers in the cluster"
+    },
+    "jetstream": {
+      "type": "boolean",
+      "description": "Enables JetStream on the servers"
+    },
+    "description": {
+      "type": "string",
+      "description": "A description of the instance"
+    },
+    "snippets": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object",
+      "description": "Config snippets by the extension point of the main template they fill"
+    },
+    "template": {
+      "type": "string",
+      "description": "A custom main config template, the built-in one when empty"
+    },
+    "tls": {
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "The TLS verification mode, server for one-way TLS or mutual to require a client cert, mutual when empty"
+        },
+        "sans": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Subject Alternative Names for the server cert, IPs become IP SANs and anything else a DNS name, localhost, 127.0.0.1 and ::1 when empty"
+        },
+        "handshake_first": {
+          "type": "boolean",
+          "description": "Performs the TLS handshake before the server sends INFO, clients must dial handshake first"
+        },
+        "timeout": {
+          "type": "number",
+          "description": "The TLS handshake timeout in seconds, fractions honored, 2 seconds when zero"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Generated TLS on the client ports, none when absent"
+    },
+    "trace": {
+      "type": "boolean",
+      "description": "Fronts every node with a capture proxy that stores every connection's trace, implies proxy"
+    },
+    "proxy": {
+      "type": "boolean",
+      "description": "Fronts every node with a capture proxy that stores no captures"
+    },
+    "toxics": {
+      "type": "boolean",
+      "description": "Routes every route and every node's clients through proxies of the agent so toxics can act on them"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "servers"
+  ],
+  "title": "io.synadia.ntf.tester.v1.create_cluster_request"
+}

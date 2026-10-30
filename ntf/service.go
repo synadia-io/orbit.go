@@ -603,6 +603,24 @@ func (s *Service) startEvents(ctx context.Context, opts Options) error {
 func (s *Service) startServices(name, group string) error {
 	var err error
 
+	requestSchemas, err := compileRequestSchemas()
+	if err != nil {
+		return err
+	}
+	schemas, err := endpointSchemas()
+	if err != nil {
+		return err
+	}
+
+	// check wraps the handler of the endpoint name, as api.Endpoints names it,
+	// so its request is validated before the handler runs, and notes the
+	// endpoint so every endpoint is known to be validated once all are added.
+	checked := map[string]bool{}
+	check := func(name string, h micro.HandlerFunc) micro.HandlerFunc {
+		checked[name] = true
+		return validated(requestSchemas[name], emptyBodyEndpoints[name], h)
+	}
+
 	s.micro, err = micro.AddService(s.nc, micro.Config{
 		Name:    name,
 		Version: serviceVersion,
@@ -614,106 +632,121 @@ func (s *Service) startServices(name, group string) error {
 	srv := s.micro.AddGroup(group)
 
 	create := srv.AddGroup("create")
-	err = create.AddEndpoint("server", micro.HandlerFunc(s.createServer))
+	err = create.AddEndpoint("server", check("create.server", s.createServer))
 	if err != nil {
 		return err
 	}
-	err = create.AddEndpoint("cluster", micro.HandlerFunc(s.createCluster))
+	err = create.AddEndpoint("cluster", check("create.cluster", s.createCluster))
 	if err != nil {
 		return err
 	}
-	err = create.AddEndpoint("super-cluster", micro.HandlerFunc(s.createSuperCluster))
+	err = create.AddEndpoint("super-cluster", check("create.super-cluster", s.createSuperCluster))
 	if err != nil {
 		return err
 	}
 
 	stop := srv.AddGroup("stop")
-	err = stop.AddEndpoint("server", s.perRequest(s.stopServer))
+	err = stop.AddEndpoint("server", check("stop.server", s.perRequest(s.stopServer)))
 	if err != nil {
 		return err
 	}
-	err = stop.AddEndpoint("instance", micro.HandlerFunc(s.stopInstance))
+	err = stop.AddEndpoint("instance", check("stop.instance", s.stopInstance))
 	if err != nil {
 		return err
 	}
 
 	start := srv.AddGroup("start")
-	err = start.AddEndpoint("server", s.perRequest(s.startServer))
+	err = start.AddEndpoint("server", check("start.server", s.perRequest(s.startServer)))
 	if err != nil {
 		return err
 	}
-	err = start.AddEndpoint("instance", micro.HandlerFunc(s.startInstance))
+	err = start.AddEndpoint("instance", check("start.instance", s.startInstance))
 	if err != nil {
 		return err
 	}
 
 	update := srv.AddGroup("update")
-	err = update.AddEndpoint("server", micro.HandlerFunc(s.updateServer))
+	err = update.AddEndpoint("server", check("update.server", s.updateServer))
 	if err != nil {
 		return err
 	}
 
 	reload := srv.AddGroup("reload")
-	err = reload.AddEndpoint("server", s.perRequest(s.reloadServer))
+	err = reload.AddEndpoint("server", check("reload.server", s.perRequest(s.reloadServer)))
 	if err != nil {
 		return err
 	}
 
 	shape := srv.AddGroup("shape")
-	err = shape.AddEndpoint("set", micro.HandlerFunc(s.shapeSet))
+	err = shape.AddEndpoint("set", check("shape.set", s.shapeSet))
 	if err != nil {
 		return err
 	}
-	err = shape.AddEndpoint("clear", micro.HandlerFunc(s.shapeClear))
+	err = shape.AddEndpoint("clear", check("shape.clear", s.shapeClear))
 	if err != nil {
 		return err
 	}
-	err = shape.AddEndpoint("report", micro.HandlerFunc(s.shapeReport))
+	err = shape.AddEndpoint("report", check("shape.report", s.shapeReport))
+	if err != nil {
+		return err
+	}
+	err = shape.AddEndpoint("list", check("shape.list", s.shapeList))
 	if err != nil {
 		return err
 	}
 
 	toxic := srv.AddGroup("toxic")
-	err = toxic.AddEndpoint("add", s.perRequest(s.toxicAdd))
+	err = toxic.AddEndpoint("add", check("toxic.add", s.perRequest(s.toxicAdd)))
 	if err != nil {
 		return err
 	}
-	err = toxic.AddEndpoint("remove", s.perRequest(s.toxicRemove))
+	err = toxic.AddEndpoint("remove", check("toxic.remove", s.perRequest(s.toxicRemove)))
 	if err != nil {
 		return err
 	}
-	err = toxic.AddEndpoint("clear", s.perRequest(s.toxicClear))
+	err = toxic.AddEndpoint("clear", check("toxic.clear", s.perRequest(s.toxicClear)))
 	if err != nil {
 		return err
 	}
-	err = toxic.AddEndpoint("report", s.perRequest(s.toxicReport))
-	if err != nil {
-		return err
-	}
-
-	err = srv.AddEndpoint("status", micro.HandlerFunc(s.status))
+	err = toxic.AddEndpoint("report", check("toxic.report", s.perRequest(s.toxicReport)))
 	if err != nil {
 		return err
 	}
 
-	err = srv.AddEndpoint("reset", micro.HandlerFunc(s.reset))
+	err = srv.AddEndpoint("status", check("status", s.status))
 	if err != nil {
 		return err
 	}
 
-	err = srv.AddEndpoint("destroy", micro.HandlerFunc(s.destroy))
+	err = srv.AddEndpoint("reset", check("reset", s.reset))
 	if err != nil {
 		return err
 	}
 
-	err = srv.AddEndpoint("list", micro.HandlerFunc(s.list))
+	err = srv.AddEndpoint("destroy", check("destroy", s.destroy))
 	if err != nil {
 		return err
 	}
 
-	err = srv.AddEndpoint("clock", micro.HandlerFunc(s.clock))
+	err = srv.AddEndpoint("list", check("list", s.list))
 	if err != nil {
 		return err
+	}
+
+	err = srv.AddEndpoint("clock", check("clock", s.clock))
+	if err != nil {
+		return err
+	}
+
+	err = srv.AddEndpoint("schema", check("schema", schemaHandler(schemas)))
+	if err != nil {
+		return err
+	}
+
+	for _, ep := range api.Endpoints {
+		if !checked[ep.Name] {
+			return fmt.Errorf("endpoint %s is not added with request validation", ep.Name)
+		}
 	}
 
 	return nil

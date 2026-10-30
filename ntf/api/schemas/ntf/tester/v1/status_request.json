@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/status_request.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.status_request",
+      "description": "The type id of the request"
+    },
+    "instance_id": {
+      "type": "string",
+      "description": "The instance to report on, every instance when empty"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.status_request"
+}

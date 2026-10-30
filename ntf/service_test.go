@@ -315,7 +315,8 @@ func (f *fakeProvider) startCount() int {
 // server's port in captures, the Spec.CaptureProxies Start was handed, and port
 // otherwise. The toxics methods record what they were handed in added and
 // removed and return toxicErr when it is set. AddToxic calls addGate, when
-// set, as it begins.
+// set, as it begins. ListShaping returns the sets Shape was handed, or those
+// with the id asked for, and an error for an id Shape was not handed.
 type fakeAgent struct {
 	mu        sync.Mutex
 	port      int
@@ -451,6 +452,32 @@ func (a *fakeAgent) ShapingSets(context.Context) ([]string, error) {
 	return a.setIDs, nil
 }
 
+func (a *fakeAgent) ListShaping(_ context.Context, id string) ([]api.ShapingSet, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.noShaping {
+		return nil, agent.ErrUnsupported
+	}
+	if a.err != nil {
+		return nil, a.err
+	}
+	if id == "" {
+		return a.sets, nil
+	}
+
+	var sets []api.ShapingSet
+	for _, s := range a.sets {
+		if s.ID == id {
+			sets = append(sets, s)
+		}
+	}
+	if sets == nil {
+		return nil, fmt.Errorf("unknown shaping set %q", id)
+	}
+	return sets, nil
+}
+
 func (a *fakeAgent) Stop(context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -464,6 +491,8 @@ var (
 	_ agent.Agent      = (*fakeAgent)(nil)
 	_ agent.ClientEdge = (*fakeAgent)(nil)
 )
+
+var _ agent.ShapingLister = (*fakeAgent)(nil)
 
 // withAgent registers p as the "fake" agent and selects it.
 func withAgent(p *fakeProvider) func(*Options) {
@@ -1221,6 +1250,10 @@ func TestShapeRefusals(t *testing.T) {
 			if got := errorCodeFor(t, tc.svc.nc, "tester.shape.report", api.ShapeReportRequest{InstanceID: tc.id}); got != tc.code {
 				t.Errorf("shape.report code = %q, want %s", got, tc.code)
 			}
+			got := errorCodeFor(t, tc.svc.nc, "tester.shape.list", api.ShapeListRequest{InstanceID: tc.id})
+			if got != tc.code {
+				t.Errorf("shape.list code = %q, want %s", got, tc.code)
+			}
 		})
 	}
 }
@@ -1248,5 +1281,121 @@ func TestShapeErrorReachesCaller(t *testing.T) {
 	}
 	if got := msg.Header.Get("Nats-Service-Error"); got != fake.err.Error() {
 		t.Errorf("error = %q, want %q", got, fake.err.Error())
+	}
+}
+
+// TestShapeListReturnsSets proves shape.list returns every set the agent holds,
+// or the one asked for, with a nil Rules answered empty and the agent's own set
+// left nil, and refuses a set the agent does not hold with 017 and the agent's
+// error text, as shape.report does.
+func TestShapeListReturnsSets(t *testing.T) {
+	slow := exampleShapingSet()
+	bare := api.ShapingSet{ID: "bare", ConnectionName: "^bare$"}
+	fake := &fakeAgent{sets: []api.ShapingSet{slow, bare}}
+	svc := startTestService(t, withAgent(&fakeProvider{agent: fake}))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
+
+	answered := bare
+	answered.Rules = []api.ShapingRule{}
+
+	var all api.ShapeListResponse
+	mustRequest(t, svc.nc, "tester.shape.list", api.ShapeListRequest{InstanceID: created.ID}, &all)
+	if all.Type != api.TypeShapeListResponse {
+		t.Errorf("type = %q, want %q", all.Type, api.TypeShapeListResponse)
+	}
+	if !reflect.DeepEqual(all.Sets, []api.ShapingSet{slow, answered}) {
+		t.Errorf("sets = %+v, want %+v", all.Sets, []api.ShapingSet{slow, answered})
+	}
+
+	var one api.ShapeListResponse
+	mustRequest(t, svc.nc, "tester.shape.list", api.ShapeListRequest{InstanceID: created.ID, Set: slow.ID}, &one)
+	if !reflect.DeepEqual(one.Sets, []api.ShapingSet{slow}) {
+		t.Errorf("sets = %+v, want %+v", one.Sets, []api.ShapingSet{slow})
+	}
+
+	fake.mu.Lock()
+	rules := fake.sets[1].Rules
+	fake.mu.Unlock()
+	if rules != nil {
+		t.Errorf("the agent's set has rules %v after a list, want them left nil", rules)
+	}
+
+	code, desc := serviceError(t, svc.nc, "tester.shape.list", api.ShapeListRequest{InstanceID: created.ID, Set: "nope"})
+	if code != "017" {
+		t.Errorf("unknown set code = %q (%s), want 017", code, desc)
+	}
+	if desc != `unknown shaping set "nope"` {
+		t.Errorf("unknown set error = %q, want the agent's error", desc)
+	}
+}
+
+// TestShapeListNoSets proves shape.list answers an instance without sets with an
+// empty sets array rather than null.
+func TestShapeListNoSets(t *testing.T) {
+	svc := startTestService(t, withAgent(&fakeProvider{agent: &fakeAgent{}}))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
+
+	payload, err := json.Marshal(api.ShapeListRequest{InstanceID: created.ID})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := svc.nc.Request("tester.shape.list", payload, 10*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if e := msg.Header.Get("Nats-Service-Error"); e != "" {
+		t.Fatalf("shape.list failed: %s", e)
+	}
+
+	var raw struct {
+		Sets json.RawMessage `json:"sets"`
+	}
+	err = json.Unmarshal(msg.Data, &raw)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if string(raw.Sets) != "[]" {
+		t.Errorf("sets = %s, want []", raw.Sets)
+	}
+}
+
+// TestShapeListWithoutLister proves shape.list refuses an instance whose agent
+// does not implement agent.ShapingLister with 016, worded as an agent without
+// shaping is.
+func TestShapeListWithoutLister(t *testing.T) {
+	svc := startTestService(t, withAgent(&fakeProvider{agent: &fakeAgent{}, hideToxics: true}))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
+
+	code, desc := serviceError(t, svc.nc, "tester.shape.list", api.ShapeListRequest{InstanceID: created.ID})
+	if code != "016" {
+		t.Errorf("code = %q (%s), want 016", code, desc)
+	}
+	if desc != "Shaping not supported by the trace capturer" {
+		t.Errorf("description = %q, want the wording of an agent without shaping", desc)
+	}
+}
+
+// TestShapeListRoundTrip proves a set given to shape.set comes back from
+// shape.list as it was submitted.
+func TestShapeListRoundTrip(t *testing.T) {
+	svc := startTestService(t, withAgent(&fakeProvider{agent: &fakeAgent{}}))
+
+	var created api.CreateResponse
+	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{Trace: true}, &created)
+
+	set := exampleShapingSet()
+	set.Server = created.Servers[0].Name
+	mustRequest(t, svc.nc, "tester.shape.set", api.ShapeSetRequest{InstanceID: created.ID, Set: set}, nil)
+
+	var listed api.ShapeListResponse
+	mustRequest(t, svc.nc, "tester.shape.list", api.ShapeListRequest{InstanceID: created.ID, Set: set.ID}, &listed)
+	if !reflect.DeepEqual(listed.Sets, []api.ShapingSet{set}) {
+		t.Errorf("listed %+v, want %+v", listed.Sets, []api.ShapingSet{set})
 	}
 }

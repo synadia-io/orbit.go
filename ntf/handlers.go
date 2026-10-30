@@ -762,6 +762,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	}
 
 	resp := api.CreateResponse{
+		Type:        api.TypeCreateResponse,
 		ID:          inst.ID,
 		Description: inst.Description,
 		Kind:        inst.Kind,
@@ -1295,7 +1296,7 @@ func (s *Service) reset(req micro.Request) {
 		return
 	}
 
-	req.RespondJSON(api.ResetResponse{Shutdown: true})
+	req.RespondJSON(api.ResetResponse{Type: api.TypeResetResponse, Shutdown: true})
 }
 
 func (s *Service) stopServer(req micro.Request) {
@@ -1348,7 +1349,7 @@ func (s *Service) stopServer(req micro.Request) {
 
 	s.recordNodeEvent(ms, events.NodeStopped, creq.Name)
 
-	req.RespondJSON(api.StopServerResponse{Shutdown: true})
+	req.RespondJSON(api.StopServerResponse{Type: api.TypeStopServerResponse, Shutdown: true})
 }
 
 func (s *Service) startServer(req micro.Request) {
@@ -1422,7 +1423,7 @@ func (s *Service) startServer(req micro.Request) {
 
 	s.recordNodeEvent(ms, events.NodeStarted, creq.Name)
 
-	req.RespondJSON(api.StartServerResponse{Started: true})
+	req.RespondJSON(api.StartServerResponse{Type: api.TypeStartServerResponse, Started: true})
 }
 
 // stopInstance shuts down every running server in an instance while leaving its
@@ -1490,7 +1491,7 @@ func (s *Service) stopInstance(req micro.Request) {
 		results = append(results, res)
 	}
 
-	req.RespondJSON(api.StopInstanceResponse{Servers: results})
+	req.RespondJSON(api.StopInstanceResponse{Type: api.TypeStopInstanceResponse, Servers: results})
 }
 
 // startInstance revives a stopped instance, restarting each non-running server
@@ -1598,7 +1599,7 @@ func (s *Service) startInstance(req micro.Request) {
 		results = append(results, res)
 	}
 
-	req.RespondJSON(api.StartInstanceResponse{Servers: results})
+	req.RespondJSON(api.StartInstanceResponse{Type: api.TypeStartInstanceResponse, Servers: results})
 }
 
 func (s *Service) updateServer(req micro.Request) {
@@ -1722,7 +1723,7 @@ func (s *Service) updateServer(req micro.Request) {
 
 	s.recordNodeEvent(ms, events.NodeUpdated, creq.Name)
 
-	req.RespondJSON(api.UpdateServerResponse{Updated: true})
+	req.RespondJSON(api.UpdateServerResponse{Type: api.TypeUpdateServerResponse, Updated: true})
 }
 
 func (s *Service) reloadServer(req micro.Request) {
@@ -1769,7 +1770,7 @@ func (s *Service) reloadServer(req micro.Request) {
 
 	s.recordNodeEvent(ms, events.NodeReloaded, creq.Name)
 
-	req.RespondJSON(api.ReloadServerResponse{Reloaded: true})
+	req.RespondJSON(api.ReloadServerResponse{Type: api.TypeReloadServerResponse, Reloaded: true})
 }
 
 func (s *Service) status(req micro.Request) {
@@ -1847,7 +1848,7 @@ func (s *Service) status(req micro.Request) {
 		}
 	}
 
-	resp := api.StatusResponse{Instances: make([]api.InstanceStatus, 0, len(snapshots))}
+	resp := api.StatusResponse{Type: api.TypeStatusResponse, Instances: make([]api.InstanceStatus, 0, len(snapshots))}
 	for _, snap := range snapshots {
 		ist := api.InstanceStatus{
 			ID:                snap.id,
@@ -1904,7 +1905,7 @@ func (s *Service) activeToxics(instanceID string, tx agent.Toxics) []api.ActiveT
 		return nil
 	}
 
-	return toxics
+	return withLinks(toxics)
 }
 
 // shapingSetIDs returns the ids of the shaping sets applied to a, in the order
@@ -1955,12 +1956,12 @@ func (s *Service) destroy(req micro.Request) {
 	}
 
 	s.tearDownInstance(inst, events.ReasonDestroy)
-	req.RespondJSON(api.DestroyResponse{Destroyed: true})
+	req.RespondJSON(api.DestroyResponse{Type: api.TypeDestroyResponse, Destroyed: true})
 }
 
 func (s *Service) list(req micro.Request) {
 	s.mu.Lock()
-	resp := api.ListResponse{Instances: make([]api.InstanceSummary, 0, len(s.instances))}
+	resp := api.ListResponse{Type: api.TypeListResponse, Instances: make([]api.InstanceSummary, 0, len(s.instances))}
 	for _, inst := range s.instances {
 		resp.Instances = append(resp.Instances, api.InstanceSummary{
 			ID:          inst.ID,
@@ -2039,7 +2040,7 @@ func (s *Service) shapeSet(req micro.Request) {
 		return
 	}
 
-	req.RespondJSON(api.ShapeSetResponse{Set: creq.Set.ID})
+	req.RespondJSON(api.ShapeSetResponse{Type: api.TypeShapeSetResponse, Set: creq.Set.ID})
 }
 
 func (s *Service) shapeClear(req micro.Request) {
@@ -2066,7 +2067,7 @@ func (s *Service) shapeClear(req micro.Request) {
 		cleared = []string{}
 	}
 
-	req.RespondJSON(api.ShapeClearResponse{Cleared: cleared})
+	req.RespondJSON(api.ShapeClearResponse{Type: api.TypeShapeClearResponse, Cleared: cleared})
 }
 
 func (s *Service) shapeReport(req micro.Request) {
@@ -2092,8 +2093,56 @@ func (s *Service) shapeReport(req micro.Request) {
 	if sets == nil {
 		sets = []api.ShapingReport{}
 	}
+	// The agent's slice is copied before a nil Firings is made empty.
+	sets = slices.Clone(sets)
+	for i := range sets {
+		if sets[i].Firings == nil {
+			sets[i].Firings = []api.ShapingFiring{}
+		}
+	}
 
-	req.RespondJSON(api.ShapeReportResponse{Sets: sets})
+	req.RespondJSON(api.ShapeReportResponse{Type: api.TypeShapeReportResponse, Sets: sets})
+}
+
+func (s *Service) shapeList(req micro.Request) {
+	s.log.Info("Handling shape list request")
+
+	creq := api.ShapeListRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	a := s.agentFor(req, creq.InstanceID)
+	if a == nil {
+		return
+	}
+
+	// An agent that cannot list its sets is answered as one without shaping.
+	lister, ok := a.(agent.ShapingLister)
+	if !ok {
+		answerShapeError(req, agent.ErrUnsupported)
+		return
+	}
+
+	sets, err := lister.ListShaping(context.Background(), creq.Set)
+	if err != nil {
+		answerShapeError(req, err)
+		return
+	}
+	if sets == nil {
+		sets = []api.ShapingSet{}
+	}
+	// The agent's slice is copied before a nil Rules is made empty.
+	sets = slices.Clone(sets)
+	for i := range sets {
+		if sets[i].Rules == nil {
+			sets[i].Rules = []api.ShapingRule{}
+		}
+	}
+
+	req.RespondJSON(api.ShapeListResponse{Type: api.TypeShapeListResponse, Sets: sets})
 }
 
 // toxicsFor finds the toxics of the agent of an instance created with toxics.
@@ -2147,6 +2196,19 @@ func (s *Service) toxicsFor(req micro.Request, instanceID string) agent.Toxics {
 	return tx
 }
 
+// withLinks returns a copy of toxics in which a nil Links is empty, so every
+// toxic answers its links as an array. The agent's slice is left as it is.
+func withLinks(toxics []api.ActiveToxic) []api.ActiveToxic {
+	toxics = slices.Clone(toxics)
+	for i := range toxics {
+		if toxics[i].Links == nil {
+			toxics[i].Links = []string{}
+		}
+	}
+
+	return toxics
+}
+
 // answerToxicError answers req with the error an agent's toxics call
 // returned: 021 with the error's text when the call was refused for what it
 // asked, and 022 with the error's text otherwise.
@@ -2179,8 +2241,11 @@ func (s *Service) toxicAdd(req micro.Request) {
 		answerToxicError(req, err)
 		return
 	}
+	if added.Links == nil {
+		added.Links = []string{}
+	}
 
-	req.RespondJSON(api.ToxicAddResponse{Toxic: added})
+	req.RespondJSON(api.ToxicAddResponse{Type: api.TypeToxicAddResponse, Toxic: added})
 }
 
 func (s *Service) toxicRemove(req micro.Request) {
@@ -2204,7 +2269,7 @@ func (s *Service) toxicRemove(req micro.Request) {
 		return
 	}
 
-	req.RespondJSON(api.ToxicRemoveResponse{Removed: creq.Name})
+	req.RespondJSON(api.ToxicRemoveResponse{Type: api.TypeToxicRemoveResponse, Removed: creq.Name})
 }
 
 func (s *Service) toxicClear(req micro.Request) {
@@ -2231,7 +2296,7 @@ func (s *Service) toxicClear(req micro.Request) {
 		cleared = []string{}
 	}
 
-	req.RespondJSON(api.ToxicClearResponse{Cleared: cleared})
+	req.RespondJSON(api.ToxicClearResponse{Type: api.TypeToxicClearResponse, Cleared: cleared})
 }
 
 func (s *Service) toxicReport(req micro.Request) {
@@ -2260,8 +2325,9 @@ func (s *Service) toxicReport(req micro.Request) {
 	if toxics == nil {
 		toxics = []api.ActiveToxic{}
 	}
+	toxics = withLinks(toxics)
 
-	req.RespondJSON(api.ToxicReportResponse{Links: links, Toxics: toxics})
+	req.RespondJSON(api.ToxicReportResponse{Type: api.TypeToxicReportResponse, Links: links, Toxics: toxics})
 }
 
 // instanceSnapshot is a lock-released view of an instance's metadata and the

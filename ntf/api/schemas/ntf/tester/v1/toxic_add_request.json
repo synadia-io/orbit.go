@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/toxic_add_request.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.toxic_add_request",
+      "description": "The type id of the request"
+    },
+    "instance_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The instance to add the toxic to"
+    },
+    "toxic": {
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "bandwidth"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attributes": {
+                "properties": {
+                  "rate": {
+                    "type": "integer",
+                    "maximum": 1000000000,
+                    "minimum": 1,
+                    "description": "The most data passed each second. Measured in kilobytes per second."
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "rate"
+                ]
+              }
+            },
+            "required": [
+              "attributes"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "cut"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attributes": {
+                "properties": {},
+                "additionalProperties": false,
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "latency"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attributes": {
+                "properties": {
+                  "latency": {
+                    "type": "integer",
+                    "maximum": 86400000,
+                    "minimum": 0,
+                    "description": "How long data is delayed. Measured in milliseconds.",
+                    "default": 0
+                  },
+                  "jitter": {
+                    "type": "integer",
+                    "maximum": 86400000,
+                    "minimum": 0,
+                    "description": "How much the delay varies either way. Measured in milliseconds.",
+                    "default": 0
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "limit_data"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attributes": {
+                "properties": {
+                  "bytes": {
+                    "type": "integer",
+                    "maximum": 1125899906842624,
+                    "minimum": 0,
+                    "description": "How many bytes pass before the connection is closed. Measured in bytes.",
+                    "default": 0
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "lossy"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attributes": {
+                "properties": {
+                  "loss": {
+                    "type": "number",
+                    "exclusiveMaximum": 1,
+                    "exclusiveMinimum": 0,
+                    "description": "The chance that a segment is lost."
+                  },
+                  "rto": {
+                    "type": "integer",
+                    "maximum": 86400000,
+                    "minimum": 1,
+                    "description": "How long a lost segment stalls the stream. Measured in milliseconds.",
+                    "default": 200
+                  },
+                  "max_rto": {
+                    "type": "integer",
+                    "maximum": 86400000,
+                    "minimum": 1,
+                    "description": "The longest stall of one retransmission, which doubles each time it is lost again. Measured in milliseconds.",
+                    "default": 3200
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "loss"
+                ]
+              }
+            },
+            "required": [
+              "attributes"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "reset_peer"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attributes": {
+                "properties": {
+                  "timeout": {
+                    "type": "integer",
+                    "maximum": 86400000,
+                    "minimum": 0,
+                    "description": "How long after data arrives the connection is reset. Measured in milliseconds.",
+                    "default": 0
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "slicer"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attributes": {
+                "properties": {
+                  "average_size": {
+                    "type": "integer",
+                    "maximum": 1048576,
+                    "minimum": 1,
+                    "description": "The average size of a piece the data is cut into. Measured in bytes."
+                  },
+                  "size_variation": {
+                    "type": "integer",
+                    "maximum": 1048576,
+                    "minimum": 0,
+                    "description": "How much the size of a piece varies either way. Measured in bytes.",
+                    "default": 0
+                  },
+                  "delay": {
+                    "type": "integer",
+                    "maximum": 60000000,
+                    "minimum": 0,
+                    "description": "How long apart the pieces are sent. Measured in microseconds.",
+                    "default": 0
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "average_size"
+                ]
+              }
+            },
+            "required": [
+              "attributes"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "slow_close"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attributes": {
+                "properties": {
+                  "delay": {
+                    "type": "integer",
+                    "maximum": 86400000,
+                    "minimum": 0,
+                    "description": "How long the close of a connection is delayed. Measured in milliseconds.",
+                    "default": 0
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "timeout"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "attributes": {
+                "properties": {
+                  "timeout": {
+                    "type": "integer",
+                    "maximum": 86400000,
+                    "minimum": 0,
+                    "description": "How long data is dropped before the connection is closed, never closed when 0. Measured in milliseconds.",
+                    "default": 0
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The toxic's name, unique on the instance"
+        },
+        "selector": {
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "The kind of link, route, gateway or client, every kind when empty"
+            },
+            "from": {
+              "type": "string",
+              "description": "A node or a cluster at one end of the links, any when empty"
+            },
+            "to": {
+              "type": "string",
+              "description": "A node or a cluster at the other end of the links, or the server of a client link, any when empty"
+            },
+            "node": {
+              "type": "string",
+              "description": "Selects every link of one node both ways, not combined with from or to"
+            },
+            "direction": {
+              "type": "string",
+              "description": "The data the toxic acts on, to, from or both, both when empty"
+            }
+          },
+          "additionalProperties": false,
+          "type": "object",
+          "description": "The links the toxic acts on"
+        },
+        "type": {
+          "type": "string",
+          "description": "The toxic's type"
+        },
+        "attributes": {
+          "additionalProperties": true,
+          "type": "object",
+          "description": "The attributes of the toxic's type"
+        },
+        "toxicity": {
+          "type": "number",
+          "description": "The chance in [0, 1] that the toxic acts, 1 when absent"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "The toxic to add"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "instance_id"
+  ],
+  "title": "io.synadia.ntf.tester.v1.toxic_add_request"
+}

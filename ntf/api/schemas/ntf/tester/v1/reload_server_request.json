@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/reload_server_request.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.reload_server_request",
+      "description": "The type id of the request"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The name of the server to reload"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "name"
+  ],
+  "title": "io.synadia.ntf.tester.v1.reload_server_request"
+}

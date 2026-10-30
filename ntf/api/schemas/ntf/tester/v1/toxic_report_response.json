@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/toxic_report_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.toxic_report_response",
+      "description": "The type id of the response"
+    },
+    "links": {
+      "items": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The link's name, route:\u003cnode\u003e-\u003e\u003cnode\u003e, gateway:\u003ccluster\u003e-\u003e\u003cnode\u003e or client:\u003cnode\u003e"
+          },
+          "kind": {
+            "type": "string",
+            "description": "The link's kind, route, gateway or client"
+          },
+          "from": {
+            "type": "string",
+            "description": "The node that dials through a route proxy, or the cluster whose nodes dial through a gateway proxy, empty for a client proxy"
+          },
+          "to": {
+            "type": "string",
+            "description": "The node the proxy forwards to"
+          },
+          "proxy": {
+            "type": "string",
+            "description": "The host:port the nodes or clients dial the proxy on"
+          },
+          "upstream": {
+            "type": "string",
+            "description": "The host:port the proxy forwards to"
+          },
+          "toxics": {
+            "items": {
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The toxic's name"
+                },
+                "type": {
+                  "type": "string",
+                  "description": "The toxic's type"
+                },
+                "direction": {
+                  "type": "string",
+                  "description": "The data the toxic acts on relative to the link, to, from or both"
+                },
+                "node": {
+                  "type": "string",
+                  "description": "The source node a cut on a gateway link is limited to"
+                },
+                "attributes": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "description": "The attributes of the toxic's type"
+                },
+                "toxicity": {
+                  "type": "number",
+                  "description": "The chance in [0, 1] that the toxic acts"
+                },
+                "since": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "When the toxic was added"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "description": "The toxics on the link, in the order they were added"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "description": "Every proxied link with the toxics on it"
+    },
+    "toxics": {
+      "items": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The toxic's name, unique on the instance"
+          },
+          "selector": {
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "The kind of link, route, gateway or client, every kind when empty"
+              },
+              "from": {
+                "type": "string",
+                "description": "A node or a cluster at one end of the links, any when empty"
+              },
+              "to": {
+                "type": "string",
+                "description": "A node or a cluster at the other end of the links, or the server of a client link, any when empty"
+              },
+              "node": {
+                "type": "string",
+                "description": "Selects every link of one node both ways, not combined with from or to"
+              },
+              "direction": {
+                "type": "string",
+                "description": "The data the toxic acts on, to, from or both, both when empty"
+              }
+            },
+            "type": "object",
+            "description": "The links the toxic acts on"
+          },
+          "type": {
+            "type": "string",
+            "description": "The toxic's type"
+          },
+          "attributes": {
+            "additionalProperties": true,
+            "type": "object",
+            "description": "The attributes of the toxic's type"
+          },
+          "toxicity": {
+            "type": "number",
+            "description": "The chance in [0, 1] that the toxic acts, 1 when absent"
+          },
+          "links": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "description": "The names of the links the selector resolved to"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the toxic was added"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "description": "Every toxic in place, in the order they were added"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.toxic_report_response"
+}

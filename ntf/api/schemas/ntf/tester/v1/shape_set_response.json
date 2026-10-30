@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/shape_set_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.shape_set_response",
+      "description": "The type id of the response"
+    },
+    "set": {
+      "type": "string",
+      "description": "The id of the set added"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.shape_set_response"
+}

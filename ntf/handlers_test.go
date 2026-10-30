@@ -510,35 +510,43 @@ func TestCreateRejectsOversizedRequests(t *testing.T) {
 	ms := startTestService(t)
 
 	tests := []struct {
-		name    string
-		subject string
-		req     any
-		want    string
+		name     string
+		subject  string
+		req      any
+		want     string
+		wantDesc string
 	}{
 		{
 			"cluster over the server cap",
 			"tester.create.cluster",
 			api.CreateClusterRequest{Servers: maxServersPerCluster + 1},
-			"002",
+			"001",
+			fmt.Sprintf("Invalid request: servers: maximum: got %d, want %d", maxServersPerCluster+1, maxServersPerCluster),
 		},
 		{
 			"super-cluster over the server cap",
 			"tester.create.super-cluster",
 			api.CreateSuperClusterRequest{Servers: maxServersPerCluster + 1, Clusters: 2},
-			"002",
+			"001",
+			fmt.Sprintf("Invalid request: servers: maximum: got %d, want %d", maxServersPerCluster+1, maxServersPerCluster),
 		},
 		{
 			"super-cluster over the cluster cap",
 			"tester.create.super-cluster",
 			api.CreateSuperClusterRequest{Servers: 2, Clusters: maxClusters + 1},
-			"004",
+			"001",
+			fmt.Sprintf("Invalid request: clusters: maximum: got %d, want %d", maxClusters+1, maxClusters),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := errorCodeFor(t, ms.nc, tt.subject, tt.req); got != tt.want {
-				t.Errorf("error code = %q, want %q", got, tt.want)
+			code, desc := serviceError(t, ms.nc, tt.subject, tt.req)
+			if code != tt.want {
+				t.Errorf("error code = %q, want %q", code, tt.want)
+			}
+			if desc != tt.wantDesc {
+				t.Errorf("error description = %q, want %q", desc, tt.wantDesc)
 			}
 		})
 	}

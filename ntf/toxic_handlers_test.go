@@ -311,8 +311,8 @@ func TestStatusListsToxics(t *testing.T) {
 }
 
 // TestToxicCallsRefusals proves every refusal of the tester.toxic endpoints
-// and its code: 001 for a request that does not decode, 002 without an
-// instance id, 014 without an agent, 018 when the agent does not declare
+// and its code: 001 for a request that does not decode and without an
+// instance id, which the request schema refuses, 014 without an agent, 018 when the agent does not declare
 // toxics, 404 for an unknown instance, 020 for an instance created without
 // toxics, 021 for a call the agent refused for what it asked, and 022 for any
 // other agent failure and for an agent that does not implement agent.Toxics.
@@ -345,7 +345,7 @@ func TestToxicCallsRefusals(t *testing.T) {
 		code     string
 		contains string
 	}{
-		{"no instance id", toxicsSvc, "", "002", "instance_id is required"},
+		{"no instance id", toxicsSvc, "", "001", "Invalid request: instance_id: minLength: got 0, want 1"},
 		{"no agent", noAgent, "any", "014", "toxics is not configured"},
 		{"agent without toxics", noToxics, "any", "018", `"toxics"`},
 		{"unknown instance", toxicsSvc, "nope", "404", "Instance not found"},
