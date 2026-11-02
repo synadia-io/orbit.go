@@ -48,6 +48,23 @@ func TestToxicAttributesCoverTypes(t *testing.T) {
 	}
 }
 
+// TestToxicDescriptionsCoverTypes proves every type in ToxicAttributes has a
+// description and every description is of a type in it.
+func TestToxicDescriptionsCoverTypes(t *testing.T) {
+	for typ := range ToxicAttributes {
+		if ToxicDescriptions[typ] == "" {
+			t.Errorf("toxic type %q has no description", typ)
+		}
+	}
+
+	for typ := range ToxicDescriptions {
+		_, ok := ToxicAttributes[typ]
+		if !ok {
+			t.Errorf("description of %q is of no toxic type", typ)
+		}
+	}
+}
+
 // TestToxicAttributesOmitAgentAttributes proves no entry lists an attribute
 // the agent sets itself.
 func TestToxicAttributesOmitAgentAttributes(t *testing.T) {

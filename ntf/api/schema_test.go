@@ -92,11 +92,29 @@ func (ShapingAction) JSONSchema() *invopop.Schema {
 	}
 }
 
-// JSONSchemaExtend opens the attributes object and adds the rules of the
-// attributes each toxic type accepts.
+// JSONSchemaExtend opens the attributes object, lists the toxic types with
+// what each does, and adds the rules of the attributes each type accepts.
 func (Toxic) JSONSchemaExtend(s *invopop.Schema) {
 	openObject(s, "attributes")
+	describeToxicTypes(s)
 	s.AllOf = toxicAttributeRules(false)
+}
+
+// describeToxicTypes gives the type property of s a oneOf of one const for
+// each toxic type in ToxicAttributes, in the order of their names, with its
+// description from ToxicDescriptions. An enum of the same types sits beside
+// it, so an unknown type is refused naming every type rather than only the
+// first const the oneOf tried.
+func describeToxicTypes(s *invopop.Schema) {
+	p, ok := s.Properties.Get("type")
+	if !ok {
+		return
+	}
+
+	for _, typ := range slices.Sorted(maps.Keys(ToxicAttributes)) {
+		p.Enum = append(p.Enum, typ)
+		p.OneOf = append(p.OneOf, &invopop.Schema{Const: typ, Description: ToxicDescriptions[typ]})
+	}
 }
 
 // JSONSchemaExtend opens the attributes object. It keeps the rules of Toxic's,
@@ -758,6 +776,88 @@ func TestPayloadJSONSchema(t *testing.T) {
 			}
 			if !tc.valid && err == nil {
 				t.Errorf("payload json %v accepted", tc.value)
+			}
+		})
+	}
+}
+
+// TestToxicTypeOneOf proves the type of a toxic in the published toxic.add
+// request has one oneOf entry for each type in ToxicAttributes, with its
+// description, and none for a type not in it.
+func TestToxicTypeOneOf(t *testing.T) {
+	schema, err := Schema(TypeToxicAddRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var doc struct {
+		Properties struct {
+			Toxic struct {
+				Properties struct {
+					Type struct {
+						OneOf []struct {
+							Const       string `json:"const"`
+							Description string `json:"description"`
+						} `json:"oneOf"`
+					} `json:"type"`
+				} `json:"properties"`
+			} `json:"toxic"`
+		} `json:"properties"`
+	}
+	err = json.Unmarshal(schema, &doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]string{}
+	for _, entry := range doc.Properties.Toxic.Properties.Type.OneOf {
+		_, ok := ToxicAttributes[entry.Const]
+		if !ok {
+			t.Errorf("oneOf entry %q is not a type in ToxicAttributes", entry.Const)
+		}
+		got[entry.Const] = entry.Description
+	}
+
+	for typ := range ToxicAttributes {
+		desc, ok := got[typ]
+		if !ok {
+			t.Errorf("toxic type %q has no oneOf entry", typ)
+			continue
+		}
+		if desc == "" || desc != ToxicDescriptions[typ] {
+			t.Errorf("oneOf entry %q has description %q, want %q", typ, desc, ToxicDescriptions[typ])
+		}
+	}
+}
+
+// TestToxicTypeSchema proves the schema of a toxic.add request accepts a known
+// toxic type and refuses an unknown or empty one.
+func TestToxicTypeSchema(t *testing.T) {
+	v := newSchemaValidator(t)
+
+	cases := []struct {
+		typ   string
+		valid bool
+	}{
+		{ToxicLatency, true},
+		{ToxicCut, true},
+		{"packet_loss", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.typ, func(t *testing.T) {
+			req := ToxicAddRequest{
+				Type:       TypeToxicAddRequest,
+				InstanceID: "abc",
+				Toxic:      Toxic{Name: "x", Type: tc.typ},
+			}
+
+			err := v.validate(req, TypeToxicAddRequest)
+			if tc.valid && err != nil {
+				t.Errorf("type %q refused: %v", tc.typ, err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("type %q accepted", tc.typ)
 			}
 		})
 	}
