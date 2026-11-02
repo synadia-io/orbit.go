@@ -53,6 +53,21 @@ type InstanceAction struct {
 	// none.
 	Description string `json:"description,omitempty"`
 
+	// JetStream reports the instance was created with JetStream. Set on
+	// created.
+	JetStream bool `json:"jetstream,omitempty"`
+
+	// Trace reports the instance was created with trace, which implies a
+	// proxy. Set on created.
+	Trace bool `json:"trace,omitempty"`
+
+	// Proxy reports the instance was created with a proxy and no trace, so at
+	// most one of Trace and Proxy is set. Set on created.
+	Proxy bool `json:"proxy,omitempty"`
+
+	// Toxics reports the instance was created with toxics. Set on created.
+	Toxics bool `json:"toxics,omitempty"`
+
 	// Reason is the request that destroyed the instance. Set on destroyed.
 	Reason DestroyReason `json:"reason,omitempty"`
 }

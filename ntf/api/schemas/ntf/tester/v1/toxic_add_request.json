@@ -351,7 +351,56 @@
           "description": "The links the toxic acts on"
         },
         "type": {
+          "oneOf": [
+            {
+              "const": "bandwidth",
+              "description": "Limits data to rate kilobytes per second."
+            },
+            {
+              "const": "cut",
+              "description": "Blackholes the link both ways: its proxy still accepts connections but drops all data, so they go silent until the servers' ping timers close them; removing it closes the connections that dropped data."
+            },
+            {
+              "const": "latency",
+              "description": "Delays data by latency ms, varied at random by up to jitter ms either way."
+            },
+            {
+              "const": "limit_data",
+              "description": "Passes bytes more bytes of data, counted from when it is added or the connection opens, then closes the connection."
+            },
+            {
+              "const": "lossy",
+              "description": "Emulates TCP packet loss as stalls: data goes in 1460-byte segments, each lost with chance loss, and a lost segment holds itself and later data for rto ms, doubling for each retransmission lost again, each wait at most max_rto ms."
+            },
+            {
+              "const": "reset_peer",
+              "description": "Drops the next data to arrive and closes the connection timeout ms later, with a TCP RST on connections opened after it was added."
+            },
+            {
+              "const": "slicer",
+              "description": "Cuts data into pieces of at most average_size plus size_variation bytes, sent delay microseconds apart."
+            },
+            {
+              "const": "slow_close",
+              "description": "Passes data unchanged but delays the close of a connection by delay ms."
+            },
+            {
+              "const": "timeout",
+              "description": "Drops all data and closes the connection once none has arrived for timeout ms, or never when timeout is 0; removing it closes the connection."
+            }
+          ],
           "type": "string",
+          "enum": [
+            "bandwidth",
+            "cut",
+            "latency",
+            "limit_data",
+            "lossy",
+            "reset_peer",
+            "slicer",
+            "slow_close",
+            "timeout"
+          ],
           "description": "The toxic's type"
         },
         "attributes": {

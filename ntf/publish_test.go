@@ -364,6 +364,82 @@ func TestEventsRecordDescription(t *testing.T) {
 	}
 }
 
+// TestCreateOptionsReported proves the list response and the created event
+// report the jetstream, trace, proxy and toxics an instance was created with,
+// trace alone for a create with both trace and proxy, and leave every option
+// the instance was not created with out of the JSON.
+func TestCreateOptionsReported(t *testing.T) {
+	keys := []string{"jetstream", "trace", "proxy", "toxics"}
+
+	tests := []struct {
+		name string
+		req  api.CreateServerRequest
+		// want lists the options reported, by their JSON key.
+		want map[string]bool
+	}{
+		{"none", api.CreateServerRequest{}, nil},
+		{"jetstream", api.CreateServerRequest{JetStream: true}, map[string]bool{"jetstream": true}},
+		{"trace", api.CreateServerRequest{Trace: true}, map[string]bool{"trace": true}},
+		{"proxy", api.CreateServerRequest{Proxy: true}, map[string]bool{"proxy": true}},
+		{"trace and proxy", api.CreateServerRequest{Trace: true, Proxy: true}, map[string]bool{"trace": true}},
+		{"toxics", api.CreateServerRequest{Toxics: true}, map[string]bool{"toxics": true}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := startTestService(t, withAgent(&fakeProvider{toxics: true}))
+
+			var created api.CreateResponse
+			mustRequest(t, svc.nc, "tester.create.server", tt.req, &created)
+
+			var listData json.RawMessage
+			mustRequest(t, svc.nc, "tester.list", nil, &listData)
+			var list api.ListResponse
+			err := json.Unmarshal(listData, &list)
+			if err != nil {
+				t.Fatalf("unmarshal list response: %v", err)
+			}
+			if len(list.Instances) != 1 || list.Instances[0].ID != created.ID {
+				t.Fatalf("list = %+v, want only %s", list.Instances, created.ID)
+			}
+			summary := list.Instances[0]
+			listed := map[string]bool{"jetstream": summary.JetStream, "trace": summary.Trace, "proxy": summary.Proxy, "toxics": summary.Toxics}
+
+			stored := storedEvents(t, svc.nc, DefaultGroup, created.ID)
+			if len(stored) == 0 {
+				t.Fatalf("no events stored for %s", created.ID)
+			}
+			inst, ok := stored[0].event.(*events.InstanceAction)
+			if !ok || inst.Action != events.InstanceCreated {
+				t.Fatalf("first event is %+v, want instance created", stored[0].event)
+			}
+			recorded := map[string]bool{"jetstream": inst.JetStream, "trace": inst.Trace, "proxy": inst.Proxy, "toxics": inst.Toxics}
+
+			msg, err := eventsStream(t, svc.nc, DefaultGroup).GetMsg(t.Context(), stored[0].seq)
+			if err != nil {
+				t.Fatalf("get message %d: %v", stored[0].seq, err)
+			}
+
+			for _, key := range keys {
+				if listed[key] != tt.want[key] {
+					t.Errorf("list %s = %t, want %t", key, listed[key], tt.want[key])
+				}
+				if recorded[key] != tt.want[key] {
+					t.Errorf("created %s = %t, want %t", key, recorded[key], tt.want[key])
+				}
+
+				field := `"` + key + `":`
+				if strings.Contains(string(listData), field) != tt.want[key] {
+					t.Errorf("list response %s, want %s present %t", listData, key, tt.want[key])
+				}
+				if strings.Contains(string(msg.Data), field) != tt.want[key] {
+					t.Errorf("created stored %s, want %s present %t", msg.Data, key, tt.want[key])
+				}
+			}
+		})
+	}
+}
+
 // TestStatusReportsEventsSeq proves status reports, per instance, the stream
 // sequence of the latest service event of that instance.
 func TestStatusReportsEventsSeq(t *testing.T) {

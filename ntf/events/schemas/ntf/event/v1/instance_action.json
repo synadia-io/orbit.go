@@ -67,6 +67,22 @@
       "type": "string",
       "description": "The instance's description, as given when it was created, set on created and destroyed when the instance has one"
     },
+    "jetstream": {
+      "type": "boolean",
+      "description": "Whether the instance was created with JetStream, set on created"
+    },
+    "trace": {
+      "type": "boolean",
+      "description": "Whether the instance was created with trace, which implies a proxy, set on created"
+    },
+    "proxy": {
+      "type": "boolean",
+      "description": "Whether the instance was created with a proxy and no trace, set on created"
+    },
+    "toxics": {
+      "type": "boolean",
+      "description": "Whether the instance was created with toxics, set on created"
+    },
     "reason": {
       "type": "string",
       "description": "The request that destroyed the instance, set on destroyed",

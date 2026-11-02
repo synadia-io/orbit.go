@@ -34,6 +34,22 @@
             "type": "string",
             "format": "date-time",
             "description": "When the instance was created"
+          },
+          "jetstream": {
+            "type": "boolean",
+            "description": "Whether the instance was created with JetStream"
+          },
+          "trace": {
+            "type": "boolean",
+            "description": "Whether the instance was created with trace, which implies a proxy"
+          },
+          "proxy": {
+            "type": "boolean",
+            "description": "Whether the instance was created with a proxy and no trace"
+          },
+          "toxics": {
+            "type": "boolean",
+            "description": "Whether the instance was created with toxics"
           }
         },
         "type": "object"

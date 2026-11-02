@@ -257,10 +257,12 @@ type instance struct {
 	// flush. Nil for any other instance. Guarded by Service.mu.
 	agent agent.Agent
 
-	// captured reports whether agent fronts every server's client port with a
-	// capture proxy, for trace or proxy, so the shaping calls act on it. Set
-	// with agent and never changed after. Guarded by Service.mu.
-	captured bool
+	// options are the options the instance was created with, as the list
+	// response and the created event report them. With trace or proxy, agent
+	// fronts every server's client port with a capture proxy, so the shaping
+	// calls act on it. Set with agent and never changed after. Guarded by
+	// Service.mu.
+	options createOptions
 
 	// events is the instance's event lock. A create holds it from making its
 	// servers visible until created and ready are published, and a teardown
@@ -282,6 +284,27 @@ type instance struct {
 	// eventsSeq is the highest stream sequence acked for the service's events
 	// of the instance, 0 for none. Guarded by Service.mu.
 	eventsSeq uint64
+}
+
+// createOptions are the jetstream, trace, proxy and toxics options of the
+// create request an instance was created from. Since trace implies the proxy,
+// proxy is set only for an instance created with a proxy and no trace, so at
+// most one of trace and proxy is set.
+type createOptions struct {
+	jetstream bool
+	trace     bool
+	proxy     bool
+	toxics    bool
+}
+
+// specOptions returns the create options of spec.
+func specOptions(spec instanceSpec) createOptions {
+	return createOptions{
+		jetstream: spec.JetStream,
+		trace:     spec.Proxy && spec.StoreCaptures,
+		proxy:     spec.Proxy && !spec.StoreCaptures,
+		toxics:    spec.Toxics,
+	}
 }
 
 type managedServer struct {

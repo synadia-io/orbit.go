@@ -69,7 +69,53 @@
                         "description": "A traceassert subject grammar"
                       },
                       "where": {
-                        "additionalProperties": true,
+                        "additionalProperties": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "properties": {
+                                "gte": {
+                                  "type": "number",
+                                  "description": "The least the int capture may be"
+                                },
+                                "lte": {
+                                  "type": "number",
+                                  "description": "The most the int capture may be"
+                                },
+                                "in": {
+                                  "items": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "number"
+                                      },
+                                      {
+                                        "type": "boolean"
+                                      }
+                                    ]
+                                  },
+                                  "type": "array",
+                                  "minItems": 1,
+                                  "description": "Values the capture must equal one of"
+                                }
+                              },
+                              "additionalProperties": false,
+                              "type": "object",
+                              "minProperties": 1,
+                              "description": "Operators the capture must satisfy, all of them"
+                            }
+                          ]
+                        },
                         "type": "object",
                         "description": "Constraints on the captures of the grammar, by name"
                       }
@@ -93,7 +139,53 @@
                         "description": "A traceassert subject grammar"
                       },
                       "where": {
-                        "additionalProperties": true,
+                        "additionalProperties": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "properties": {
+                                "gte": {
+                                  "type": "number",
+                                  "description": "The least the int capture may be"
+                                },
+                                "lte": {
+                                  "type": "number",
+                                  "description": "The most the int capture may be"
+                                },
+                                "in": {
+                                  "items": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "number"
+                                      },
+                                      {
+                                        "type": "boolean"
+                                      }
+                                    ]
+                                  },
+                                  "type": "array",
+                                  "minItems": 1,
+                                  "description": "Values the capture must equal one of"
+                                }
+                              },
+                              "additionalProperties": false,
+                              "type": "object",
+                              "minProperties": 1,
+                              "description": "Operators the capture must satisfy, all of them"
+                            }
+                          ]
+                        },
                         "type": "object",
                         "description": "Constraints on the captures of the grammar, by name"
                       }
@@ -120,7 +212,22 @@
                   "payload": {
                     "properties": {
                       "json": {
-                        "additionalProperties": true,
+                        "additionalProperties": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
                         "type": "object",
                         "description": "gjson paths and the values they must hold"
                       },

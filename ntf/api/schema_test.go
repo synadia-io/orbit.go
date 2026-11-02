@@ -92,11 +92,29 @@ func (ShapingAction) JSONSchema() *invopop.Schema {
 	}
 }
 
-// JSONSchemaExtend opens the attributes object and adds the rules of the
-// attributes each toxic type accepts.
+// JSONSchemaExtend opens the attributes object, lists the toxic types with
+// what each does, and adds the rules of the attributes each type accepts.
 func (Toxic) JSONSchemaExtend(s *invopop.Schema) {
 	openObject(s, "attributes")
+	describeToxicTypes(s)
 	s.AllOf = toxicAttributeRules(false)
+}
+
+// describeToxicTypes gives the type property of s a oneOf of one const for
+// each toxic type in ToxicAttributes, in the order of their names, with its
+// description from ToxicDescriptions. An enum of the same types sits beside
+// it, so an unknown type is refused naming every type rather than only the
+// first const the oneOf tried.
+func describeToxicTypes(s *invopop.Schema) {
+	p, ok := s.Properties.Get("type")
+	if !ok {
+		return
+	}
+
+	for _, typ := range slices.Sorted(maps.Keys(ToxicAttributes)) {
+		p.Enum = append(p.Enum, typ)
+		p.OneOf = append(p.OneOf, &invopop.Schema{Const: typ, Description: ToxicDescriptions[typ]})
+	}
 }
 
 // JSONSchemaExtend opens the attributes object. It keeps the rules of Toxic's,
@@ -127,14 +145,53 @@ func (ShapingSet) JSONSchemaExtend(s *invopop.Schema) {
 	})
 }
 
-// JSONSchemaExtend opens the where object.
+// JSONSchemaExtend describes the constraint of each capture in the where
+// object: a scalar the capture must equal, or an object of at least one
+// operator. Whether the capture exists and is an int, as gte and lte need, is
+// left to the grammar.
 func (SubjectMatch) JSONSchemaExtend(s *invopop.Schema) {
-	openObject(s, "where")
+	operators := &invopop.Schema{
+		Type:                 "object",
+		Description:          "Operators the capture must satisfy, all of them",
+		Properties:           invopop.NewProperties(),
+		MinProperties:        new(uint64(1)),
+		AdditionalProperties: invopop.FalseSchema,
+	}
+	operators.Properties.Set("gte", &invopop.Schema{Type: "number", Description: "The least the int capture may be"})
+	operators.Properties.Set("lte", &invopop.Schema{Type: "number", Description: "The most the int capture may be"})
+	operators.Properties.Set("in", &invopop.Schema{
+		Type:        "array",
+		Description: "Values the capture must equal one of",
+		MinItems:    new(uint64(1)),
+		Items:       &invopop.Schema{OneOf: scalarSchemas()},
+	})
+
+	objectOf(s, "where", &invopop.Schema{OneOf: append(scalarSchemas(), operators)})
 }
 
-// JSONSchemaExtend opens the json object.
+// JSONSchemaExtend lets each gjson path of the json object hold a scalar or
+// null, the values the payload at that path is compared with.
 func (PayloadMatch) JSONSchemaExtend(s *invopop.Schema) {
-	openObject(s, "json")
+	objectOf(s, "json", &invopop.Schema{OneOf: append(scalarSchemas(), &invopop.Schema{Type: "null"})})
+}
+
+// scalarSchemas returns the schemas of a string, a number and a boolean, the
+// scalars a where constraint compares a capture with and a payload json path
+// its value with.
+func scalarSchemas() []*invopop.Schema {
+	return []*invopop.Schema{{Type: "string"}, {Type: "number"}, {Type: "boolean"}}
+}
+
+// objectOf makes property name of s, a map[string]any, an object whose
+// properties match values.
+func objectOf(s *invopop.Schema, name string, values *invopop.Schema) {
+	p, ok := s.Properties.Get(name)
+	if !ok {
+		return
+	}
+
+	p.Type = "object"
+	p.AdditionalProperties = values
 }
 
 // openObject makes property name of s, a map[string]any, an object that
@@ -540,7 +597,7 @@ func examples() map[string]any {
 		TypeListRequest:     ListRequest{Type: TypeListRequest},
 		TypeListResponse: ListResponse{
 			Type:      TypeListResponse,
-			Instances: []InstanceSummary{{ID: "abc", Kind: "cluster", Cluster: "C_abc", Servers: 3, Created: created}},
+			Instances: []InstanceSummary{{ID: "abc", Kind: "cluster", Cluster: "C_abc", Servers: 3, Created: created, JetStream: true, Trace: true, Toxics: true}},
 		},
 		TypeClockRequest: ClockRequest{Type: TypeClockRequest, Extra: []string{"workload.clock"}},
 		TypeClockResponse: ClockResponse{
@@ -634,6 +691,175 @@ func TestExamplesValidate(t *testing.T) {
 	wantID := schemaBaseURL + toxicAttributesPath
 	if head.ID != wantID {
 		t.Errorf("toxic attributes $id is %q, want %q", head.ID, wantID)
+	}
+}
+
+// TestWhereSchema proves the schema of a where constraint accepts a scalar
+// and an object of operators, and refuses an empty object and one with an
+// unknown operator.
+func TestWhereSchema(t *testing.T) {
+	v := newSchemaValidator(t)
+
+	cases := []struct {
+		name  string
+		where any
+		valid bool
+	}{
+		{"string", "1", true},
+		{"number", 30.0, true},
+		{"boolean", true, true},
+		{"operators", map[string]any{"gte": 1.0, "lte": 10.0, "in": []any{"1", 2.0, true}}, true},
+		{"empty object", map[string]any{}, false},
+		{"unknown operator", map[string]any{"gt": 1.0}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := ShapeSetRequest{
+				Type:       TypeShapeSetRequest,
+				InstanceID: "abc",
+				Set: ShapingSet{
+					ID:             "s",
+					ConnectionName: "c",
+					Rules: []ShapingRule{{
+						ID:     "r",
+						Match:  ShapingMatch{Subject: &SubjectMatch{Grammar: "orders.{id}", Where: map[string]any{"id": tc.where}}},
+						Action: ShapingAction{Kind: ShapingDrop},
+					}},
+				},
+			}
+
+			err := v.validate(req, TypeShapeSetRequest)
+			if tc.valid && err != nil {
+				t.Errorf("where %v refused: %v", tc.where, err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("where %v accepted", tc.where)
+			}
+		})
+	}
+}
+
+func TestPayloadJSONSchema(t *testing.T) {
+	v := newSchemaValidator(t)
+
+	cases := []struct {
+		name  string
+		value any
+		valid bool
+	}{
+		{"string", "1", true},
+		{"number", 30.0, true},
+		{"boolean", false, true},
+		{"null", nil, true},
+		{"array", []any{1.0}, false},
+		{"object", map[string]any{"a": 1.0}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := ShapeSetRequest{
+				Type:       TypeShapeSetRequest,
+				InstanceID: "abc",
+				Set: ShapingSet{
+					ID:             "s",
+					ConnectionName: "c",
+					Rules: []ShapingRule{{
+						ID:     "r",
+						Match:  ShapingMatch{Payload: &PayloadMatch{JSON: map[string]any{"order.id": tc.value}}},
+						Action: ShapingAction{Kind: ShapingDrop},
+					}},
+				},
+			}
+
+			err := v.validate(req, TypeShapeSetRequest)
+			if tc.valid && err != nil {
+				t.Errorf("payload json %v refused: %v", tc.value, err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("payload json %v accepted", tc.value)
+			}
+		})
+	}
+}
+
+// TestToxicTypeOneOf proves the type of a toxic in the published toxic.add
+// request has one oneOf entry for each type in ToxicAttributes, with its
+// description, and none for a type not in it.
+func TestToxicTypeOneOf(t *testing.T) {
+	schema, err := Schema(TypeToxicAddRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var doc struct {
+		Properties struct {
+			Toxic struct {
+				Properties struct {
+					Type struct {
+						OneOf []struct {
+							Const       string `json:"const"`
+							Description string `json:"description"`
+						} `json:"oneOf"`
+					} `json:"type"`
+				} `json:"properties"`
+			} `json:"toxic"`
+		} `json:"properties"`
+	}
+	err = json.Unmarshal(schema, &doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]string{}
+	for _, entry := range doc.Properties.Toxic.Properties.Type.OneOf {
+		_, ok := ToxicAttributes[entry.Const]
+		if !ok {
+			t.Errorf("oneOf entry %q is not a type in ToxicAttributes", entry.Const)
+		}
+		got[entry.Const] = entry.Description
+	}
+
+	for typ := range ToxicAttributes {
+		desc, ok := got[typ]
+		if !ok {
+			t.Errorf("toxic type %q has no oneOf entry", typ)
+			continue
+		}
+		if desc == "" || desc != ToxicDescriptions[typ] {
+			t.Errorf("oneOf entry %q has description %q, want %q", typ, desc, ToxicDescriptions[typ])
+		}
+	}
+}
+
+// TestToxicTypeSchema proves the schema of a toxic.add request accepts a known
+// toxic type and refuses an unknown or empty one.
+func TestToxicTypeSchema(t *testing.T) {
+	v := newSchemaValidator(t)
+
+	cases := []struct {
+		typ   string
+		valid bool
+	}{
+		{ToxicLatency, true},
+		{ToxicCut, true},
+		{"packet_loss", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.typ, func(t *testing.T) {
+			req := ToxicAddRequest{
+				Type:       TypeToxicAddRequest,
+				InstanceID: "abc",
+				Toxic:      Toxic{Name: "x", Type: tc.typ},
+			}
+
+			err := v.validate(req, TypeToxicAddRequest)
+			if tc.valid && err != nil {
+				t.Errorf("type %q refused: %v", tc.typ, err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("type %q accepted", tc.typ)
+			}
+		})
 	}
 }
 

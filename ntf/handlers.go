@@ -893,6 +893,8 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 	// The event lock is held across publishing the nodes and recording them,
 	// so a node handler or a teardown that finds them records its event after
 	// created and ready.
+	opts := specOptions(spec)
+
 	inst.events.Lock()
 	s.mu.Lock()
 	_, alive := s.instances[inst.ID]
@@ -900,12 +902,21 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		inst.Servers = servers
 		inst.links = resp.Links
 		inst.agent = netAgent
-		inst.captured = spec.Proxy
+		inst.options = opts
 	}
 	s.mu.Unlock()
 
 	if alive {
-		s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceCreated, Kind: inst.Kind, Backend: s.backendName, Description: inst.Description})
+		s.publishEvent(inst, &events.InstanceAction{
+			Action:      events.InstanceCreated,
+			Kind:        inst.Kind,
+			Backend:     s.backendName,
+			Description: inst.Description,
+			JetStream:   opts.jetstream,
+			Trace:       opts.trace,
+			Proxy:       opts.proxy,
+			Toxics:      opts.toxics,
+		})
 		for _, e := range ready {
 			s.publishEvent(inst, e)
 		}
@@ -1970,6 +1981,10 @@ func (s *Service) list(req micro.Request) {
 			Cluster:     inst.Cluster,
 			Servers:     len(inst.Servers),
 			Created:     inst.Created,
+			JetStream:   inst.options.jetstream,
+			Trace:       inst.options.trace,
+			Proxy:       inst.options.proxy,
+			Toxics:      inst.options.toxics,
 		})
 	}
 	s.mu.Unlock()
@@ -2416,10 +2431,10 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 // capturingAgentOf returns the agent of inst when it captures the instance's
 // servers for trace or proxy, which the shaping calls act on, or nil
 // otherwise. The agent of an instance created with toxics alone does not
-// count. The caller must hold s.mu; agent and captured never change once set,
+// count. The caller must hold s.mu; agent and options never change once set,
 // so the result may be used after the lock is released.
 func capturingAgentOf(inst *instance) agent.Agent {
-	if !inst.captured {
+	if !inst.options.trace && !inst.options.proxy {
 		return nil
 	}
 
