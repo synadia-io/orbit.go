@@ -201,6 +201,10 @@ type InstanceSummary struct {
 	Cluster     string    `json:"cluster,omitempty" jsonschema_description:"The cluster name of a cluster instance"`
 	Servers     int       `json:"servers" jsonschema_description:"The number of servers in the instance"`
 	Created     time.Time `json:"created" jsonschema_description:"When the instance was created"`
+	JetStream   bool      `json:"jetstream,omitempty" jsonschema_description:"Whether the instance was created with JetStream"`
+	Trace       bool      `json:"trace,omitempty" jsonschema_description:"Whether the instance was created with trace, which implies a proxy"`
+	Proxy       bool      `json:"proxy,omitempty" jsonschema_description:"Whether the instance was created with a proxy and no trace"`
+	Toxics      bool      `json:"toxics,omitempty" jsonschema_description:"Whether the instance was created with toxics"`
 }
 
 // ListRequest is the request of the list endpoint, which reads nothing from

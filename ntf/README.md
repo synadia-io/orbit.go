@@ -245,7 +245,7 @@ into one result. The request and reply are the
 | `tester.toxic.clear`          | Removes every toxic of an instance.                                         |
 | `tester.toxic.report`         | Lists every link with its toxics, and every toxic with its links.          |
 | `tester.status`               | Status of every instance, its `shaping_sets`, `links` and `toxics`; optional `instance_id`. |
-| `tester.list`                 | Lightweight summary of every instance (id, kind, servers count).            |
+| `tester.list`                 | Lightweight summary of every instance: id, description, kind, cluster, server count, created time, and the `jetstream`, `trace`, `proxy` and `toxics` it was created with. |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                              |
 | `tester.reset`                | Tears down **every** instance — CI-style global wipe.                       |
 | `tester.clock`                | Reports each participant's clock against the service host's. Optional `extra` clock subjects. |

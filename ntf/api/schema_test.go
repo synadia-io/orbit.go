@@ -540,7 +540,7 @@ func examples() map[string]any {
 		TypeListRequest:     ListRequest{Type: TypeListRequest},
 		TypeListResponse: ListResponse{
 			Type:      TypeListResponse,
-			Instances: []InstanceSummary{{ID: "abc", Kind: "cluster", Cluster: "C_abc", Servers: 3, Created: created}},
+			Instances: []InstanceSummary{{ID: "abc", Kind: "cluster", Cluster: "C_abc", Servers: 3, Created: created, JetStream: true, Trace: true, Toxics: true}},
 		},
 		TypeClockRequest: ClockRequest{Type: TypeClockRequest, Extra: []string{"workload.clock"}},
 		TypeClockResponse: ClockResponse{

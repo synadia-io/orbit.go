@@ -105,6 +105,7 @@ func examples() []Event {
 		&InstanceAction{Base: base(SourceService, 9), Action: InstanceDestroyed, Reason: ReasonReset},
 		&InstanceAction{Base: base(SourceService, 1), Action: InstanceCreated, Kind: "server", Backend: "inprocess", Description: "leader election test"},
 		&InstanceAction{Base: base(SourceService, 4), Action: InstanceDestroyed, Description: "leader election test", Reason: ReasonDestroy},
+		&InstanceAction{Base: base(SourceService, 1), Action: InstanceCreated, Kind: "cluster", Backend: "inprocess", JetStream: true, Proxy: true, Toxics: true},
 		&NodeAction{Base: base(SourceService, 2), Action: NodeStopped, Node: "n1", ServerName: "cluster-n1"},
 		&ShapingAction{Base: base(SourceAgent, 1), Action: ShapingApplied, Set: "slow"},
 		&ShapingAction{Base: base(SourceAgent, 6), Action: ShapingApplied, Set: "drop-n3", Server: "cluster-n3"},
@@ -295,6 +296,25 @@ func TestSchemasRefuseAndAllow(t *testing.T) {
 	err = Validate(created, v)
 	if !errors.Is(err, ErrInvalidEvent) {
 		t.Errorf("created without kind and backend: got %v, want ErrInvalidEvent", err)
+	}
+
+	for _, flag := range []string{"jetstream", "trace", "proxy", "toxics"} {
+		notBool := map[string]any{
+			"type":        TypeInstanceAction,
+			"id":          nuid.Next(),
+			"timestamp":   "2026-10-15T12:30:45.123456789Z",
+			"instance_id": nuid.Next(),
+			"source":      "service",
+			"source_seq":  1,
+			"action":      "created",
+			"kind":        "server",
+			"backend":     "inprocess",
+			flag:          "yes",
+		}
+		ok, _ := v.ValidateStruct(notBool, TypeInstanceAction)
+		if ok {
+			t.Errorf("created with %s not a boolean was allowed", flag)
+		}
 	}
 
 	zero := &ShapingAction{Base: base(SourceAgent, 0), Action: ShapingCleared, Set: "s"}
