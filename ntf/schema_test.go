@@ -169,6 +169,7 @@ func TestRequestValidationRefusals(t *testing.T) {
 		{"too few servers", "tester.create.cluster", `{"servers":1}`, "Invalid request: servers: minimum: got 1, want 2"},
 		{"empty server name", "tester.stop.server", `{"name":""}`, "Invalid request: name: minLength: got 0, want 1"},
 		{"array element", "tester.shape.set", `{"instance_id":"x","set":{"id":"s","connection_name":"c","rules":[{"id":"r","match":{},"action":"drop","nth":"1"}]}}`, "Invalid request: set.rules.0.nth: got string, want integer"},
+		{"where operator", "tester.shape.set", `{"instance_id":"x","set":{"id":"s","connection_name":"c","rules":[{"id":"r","match":{"subject":{"grammar":"orders.{id}","where":{"id":{"gt":1}}}},"action":"drop"}]}}`, "Invalid request: set.rules.0.match.subject.where.id: additional properties 'gt' not allowed"},
 		{"not an object", "tester.status", `[]`, "Invalid request: got array, want object"},
 	}
 	for _, tc := range cases {

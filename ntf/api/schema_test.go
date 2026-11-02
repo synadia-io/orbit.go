@@ -127,14 +127,53 @@ func (ShapingSet) JSONSchemaExtend(s *invopop.Schema) {
 	})
 }
 
-// JSONSchemaExtend opens the where object.
+// JSONSchemaExtend describes the constraint of each capture in the where
+// object: a scalar the capture must equal, or an object of at least one
+// operator. Whether the capture exists and is an int, as gte and lte need, is
+// left to the grammar.
 func (SubjectMatch) JSONSchemaExtend(s *invopop.Schema) {
-	openObject(s, "where")
+	operators := &invopop.Schema{
+		Type:                 "object",
+		Description:          "Operators the capture must satisfy, all of them",
+		Properties:           invopop.NewProperties(),
+		MinProperties:        new(uint64(1)),
+		AdditionalProperties: invopop.FalseSchema,
+	}
+	operators.Properties.Set("gte", &invopop.Schema{Type: "number", Description: "The least the int capture may be"})
+	operators.Properties.Set("lte", &invopop.Schema{Type: "number", Description: "The most the int capture may be"})
+	operators.Properties.Set("in", &invopop.Schema{
+		Type:        "array",
+		Description: "Values the capture must equal one of",
+		MinItems:    new(uint64(1)),
+		Items:       &invopop.Schema{OneOf: scalarSchemas()},
+	})
+
+	objectOf(s, "where", &invopop.Schema{OneOf: append(scalarSchemas(), operators)})
 }
 
-// JSONSchemaExtend opens the json object.
+// JSONSchemaExtend lets each gjson path of the json object hold a scalar or
+// null, the values the payload at that path is compared with.
 func (PayloadMatch) JSONSchemaExtend(s *invopop.Schema) {
-	openObject(s, "json")
+	objectOf(s, "json", &invopop.Schema{OneOf: append(scalarSchemas(), &invopop.Schema{Type: "null"})})
+}
+
+// scalarSchemas returns the schemas of a string, a number and a boolean, the
+// scalars a where constraint compares a capture with and a payload json path
+// its value with.
+func scalarSchemas() []*invopop.Schema {
+	return []*invopop.Schema{{Type: "string"}, {Type: "number"}, {Type: "boolean"}}
+}
+
+// objectOf makes property name of s, a map[string]any, an object whose
+// properties match values.
+func objectOf(s *invopop.Schema, name string, values *invopop.Schema) {
+	p, ok := s.Properties.Get(name)
+	if !ok {
+		return
+	}
+
+	p.Type = "object"
+	p.AdditionalProperties = values
 }
 
 // openObject makes property name of s, a map[string]any, an object that
@@ -634,6 +673,93 @@ func TestExamplesValidate(t *testing.T) {
 	wantID := schemaBaseURL + toxicAttributesPath
 	if head.ID != wantID {
 		t.Errorf("toxic attributes $id is %q, want %q", head.ID, wantID)
+	}
+}
+
+// TestWhereSchema proves the schema of a where constraint accepts a scalar
+// and an object of operators, and refuses an empty object and one with an
+// unknown operator.
+func TestWhereSchema(t *testing.T) {
+	v := newSchemaValidator(t)
+
+	cases := []struct {
+		name  string
+		where any
+		valid bool
+	}{
+		{"string", "1", true},
+		{"number", 30.0, true},
+		{"boolean", true, true},
+		{"operators", map[string]any{"gte": 1.0, "lte": 10.0, "in": []any{"1", 2.0, true}}, true},
+		{"empty object", map[string]any{}, false},
+		{"unknown operator", map[string]any{"gt": 1.0}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := ShapeSetRequest{
+				Type:       TypeShapeSetRequest,
+				InstanceID: "abc",
+				Set: ShapingSet{
+					ID:             "s",
+					ConnectionName: "c",
+					Rules: []ShapingRule{{
+						ID:     "r",
+						Match:  ShapingMatch{Subject: &SubjectMatch{Grammar: "orders.{id}", Where: map[string]any{"id": tc.where}}},
+						Action: ShapingAction{Kind: ShapingDrop},
+					}},
+				},
+			}
+
+			err := v.validate(req, TypeShapeSetRequest)
+			if tc.valid && err != nil {
+				t.Errorf("where %v refused: %v", tc.where, err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("where %v accepted", tc.where)
+			}
+		})
+	}
+}
+
+func TestPayloadJSONSchema(t *testing.T) {
+	v := newSchemaValidator(t)
+
+	cases := []struct {
+		name  string
+		value any
+		valid bool
+	}{
+		{"string", "1", true},
+		{"number", 30.0, true},
+		{"boolean", false, true},
+		{"null", nil, true},
+		{"array", []any{1.0}, false},
+		{"object", map[string]any{"a": 1.0}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := ShapeSetRequest{
+				Type:       TypeShapeSetRequest,
+				InstanceID: "abc",
+				Set: ShapingSet{
+					ID:             "s",
+					ConnectionName: "c",
+					Rules: []ShapingRule{{
+						ID:     "r",
+						Match:  ShapingMatch{Payload: &PayloadMatch{JSON: map[string]any{"order.id": tc.value}}},
+						Action: ShapingAction{Kind: ShapingDrop},
+					}},
+				},
+			}
+
+			err := v.validate(req, TypeShapeSetRequest)
+			if tc.valid && err != nil {
+				t.Errorf("payload json %v refused: %v", tc.value, err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("payload json %v accepted", tc.value)
+			}
+		})
 	}
 }
 
