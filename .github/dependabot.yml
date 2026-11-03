@@ -1,20 +1,22 @@
 version: 2
 updates:
   - package-ecosystem: "gomod"
+    # Dependabot never updates go.work: bump its go directive by hand when a
+    # module's goes past it.
     directories:
       - "/*/"
     schedule:
       interval: "weekly"
-
-    # We accept the new default cooldown of 3 days; can change with:
-    #cooldown:
-    #  default-days: 3
-
-    # We would be happy with one PR for all dependencies, but this is the
-    # closest we can get: one PR for each dependency, updating multiple
-    # modules at once:
+    open-pull-requests-limit: 20
+    cooldown:
+      default-days: 3
+      exclude:
+        - "github.com/synadia-io/orbit.go/*"
+    # Without group-by, groups apply per module.
     groups:
-      orbit-dependencies:
-        group-by: dependency-name
-
-
+      orbit:
+        patterns:
+          - "github.com/synadia-io/orbit.go/*"
+      dependencies:
+        patterns:
+          - "*"
