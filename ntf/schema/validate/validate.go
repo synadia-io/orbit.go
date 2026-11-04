@@ -211,6 +211,11 @@ func validationFailures(verr *jsonschema.ValidationError, inst any, failures []v
 
 // keyHolder returns the location of the first object depth levels into v that
 // holds key, walking keys in sorted order so the answer does not vary.
+//
+// Depth and key are all a refused key leaves to go on, so the match can be the
+// wrong object: one at the same depth that holds the same key, sorts first and
+// has no rule refusing it is named in place of the object that was refused. The
+// request is still refused, and for the right key.
 func keyHolder(v any, key string, depth int) ([]string, bool) {
 	switch v := v.(type) {
 	case map[string]any:
