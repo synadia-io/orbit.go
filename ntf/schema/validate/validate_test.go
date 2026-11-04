@@ -42,12 +42,25 @@ const (
 			"when": {"type": "string", "format": "date-time"},
 			"inner": {
 				"type": "object",
-				"properties": {"size": {"type": "integer", "minimum": 1}}
+				"properties": {
+					"size": {"type": "integer", "minimum": 1},
+					"labels": {"$ref": "#/$defs/keyed"}
+				}
 			},
 			"items": {
 				"type": "array",
-				"items": {"type": "object", "properties": {"id": {"type": "string"}}}
-			}
+				"items": {
+					"type": "object",
+					"properties": {
+						"id": {"type": "string"},
+						"labels": {"$ref": "#/$defs/keyed"}
+					}
+				}
+			},
+			"labels": {"type": "object", "propertyNames": {"minLength": 1}}
+		},
+		"$defs": {
+			"keyed": {"type": "object", "propertyNames": {"minLength": 1}}
 		}
 	}`
 
@@ -346,10 +359,14 @@ func TestDescription(t *testing.T) {
 		{"array element", `{"name":"x","items":[{"id":"a"},{"id":1}]}`, "Invalid request: items.1.id: got number, want string"},
 		{"first by path", `{"name":"","inner":{"size":0}}`, "Invalid request: inner.size: minimum: got 0, want 1"},
 		{"root before fields", `{"name":"","bogus":1}`, "Invalid request: additional properties 'bogus' not allowed"},
+		{"refused key", `{"name":"x","when":"2026-01-02T03:04:05Z","inner":{"size":1},"items":[{"id":"a"}],"labels":{"":1}}`, "Invalid request: labels: invalid propertyName ''"},
+		{"refused key through a ref", `{"name":"x","labels":{"a":1},"items":[{"id":"a"}],"inner":{"size":1,"labels":{"":1}}}`, "Invalid request: inner.labels: invalid propertyName ''"},
+		{"refused key in an array", `{"name":"x","labels":{"a":1},"inner":{"size":1},"items":[{"id":"a"},{"id":"b","labels":{"":1}}]}`, "Invalid request: items.1.labels: invalid propertyName ''"},
+		{"refused key hides nothing", `{"name":"x","inner":{"size":0},"labels":{"":1}}`, "Invalid request: inner.size: minimum: got 0, want 1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			for range 20 {
+			for range 200 {
 				got := Description(sch, []byte(tc.body))
 				if got != tc.want {
 					t.Fatalf("description = %q, want %q", got, tc.want)

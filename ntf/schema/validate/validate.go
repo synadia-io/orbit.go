@@ -32,10 +32,12 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/nats-io/nats.go/micro"
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 )
 
 // MaxDescriptionLen caps the description of a refusal. The description travels
@@ -161,7 +163,7 @@ func Description(sch *jsonschema.Schema, data []byte) string {
 		return CapDescription("Invalid request: " + err.Error())
 	}
 
-	failures := validationFailures(verr, nil)
+	failures := validationFailures(verr, inst, nil)
 	slices.SortFunc(failures, func(a, b validationFailure) int {
 		return cmp.Or(cmp.Compare(a.path, b.path), cmp.Compare(a.message, b.message))
 	})
@@ -175,8 +177,24 @@ func Description(sch *jsonschema.Schema, data []byte) string {
 }
 
 // validationFailures appends the leaf failures of verr, those with no cause
-// below them, to failures.
-func validationFailures(verr *jsonschema.ValidationError, failures []validationFailure) []validationFailure {
+// below them, to failures. A refused key of an object counts as a leaf: its
+// cause is the check of the key on its own, which has no location in inst and
+// says nothing of which key it was.
+func validationFailures(verr *jsonschema.ValidationError, inst any, failures []validationFailure) []validationFailure {
+	if refused, ok := verr.ErrorKind.(*kind.PropertyNames); ok {
+		// santhosh gives this failure a location that shares memory with the
+		// walk, so the walk overwrites it. Only its depth can be trusted.
+		location, _ := keyHolder(inst, refused.Property, len(verr.InstanceLocation))
+
+		leaf := *verr
+		leaf.Causes = nil
+
+		return append(failures, validationFailure{
+			path:    strings.Join(location, "."),
+			message: leaf.BasicOutput().Error.String(),
+		})
+	}
+
 	if len(verr.Causes) == 0 {
 		return append(failures, validationFailure{
 			path:    strings.Join(verr.InstanceLocation, "."),
@@ -185,10 +203,43 @@ func validationFailures(verr *jsonschema.ValidationError, failures []validationF
 	}
 
 	for _, cause := range verr.Causes {
-		failures = validationFailures(cause, failures)
+		failures = validationFailures(cause, inst, failures)
 	}
 
 	return failures
+}
+
+// keyHolder returns the location of the first object depth levels into v that
+// holds key, walking keys in sorted order so the answer does not vary.
+func keyHolder(v any, key string, depth int) ([]string, bool) {
+	switch v := v.(type) {
+	case map[string]any:
+		if depth == 0 {
+			_, ok := v[key]
+			return nil, ok
+		}
+
+		for _, name := range slices.Sorted(maps.Keys(v)) {
+			location, ok := keyHolder(v[name], key, depth-1)
+			if ok {
+				return append([]string{name}, location...), true
+			}
+		}
+
+	case []any:
+		if depth == 0 {
+			return nil, false
+		}
+
+		for i, item := range v {
+			location, ok := keyHolder(item, key, depth-1)
+			if ok {
+				return append([]string{strconv.Itoa(i)}, location...), true
+			}
+		}
+	}
+
+	return nil, false
 }
 
 // CapDescription cuts desc to MaxDescriptionLen bytes, ending a cut one with
