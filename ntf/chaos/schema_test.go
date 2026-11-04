@@ -16,11 +16,27 @@ package chaos
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/synadia-io/orbit.go/ntf/schema/validate"
 )
+
+// schemaDraft is the $schema of every schema under schemas.
+const schemaDraft = "https://json-schema.org/draft/2020-12/schema"
+
+// retiredKeywords are the keywords of older drafts that 2020-12 replaced.
+var retiredKeywords = []string{"definitions", "dependencies", "additionalItems", "$recursiveAnchor", "$recursiveRef"}
+
+// namingKeywords hold subschemas keyed by a name of the schema's own, which
+// may be spelled like a keyword.
+var namingKeywords = []string{"$defs", "dependentSchemas", "patternProperties", "properties"}
 
 func compileDefinitionSchema(t *testing.T) *jsonschema.Schema {
 	t.Helper()
@@ -51,6 +67,160 @@ func validateAgainst(sch *jsonschema.Schema, data []byte) error {
 	}
 
 	return sch.Validate(inst)
+}
+
+// TestDefinitionSchemaRefusedKey proves a key the schema refuses is reported at
+// the map that holds it, in a definition with siblings around that map.
+func TestDefinitionSchemaRefusedKey(t *testing.T) {
+	sch := compileDefinitionSchema(t)
+
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"driver", `{"duration":"1m","workers":[{"name":"a","driver":{"":{}},"action":{"x":{}}}]}`, "Invalid request: workers.0.driver: invalid propertyName ''"},
+		{"action", `{"duration":"1m","workers":[{"name":"a","driver":{"x":{}},"action":{"":{}}}]}`, "Invalid request: workers.0.action: invalid propertyName ''"},
+		{"credentials", `{"duration":"1m","credentials":{"":{}},"workers":[{"name":"a","driver":{"x":{}},"action":{"x":{}}}]}`, "Invalid request: credentials: invalid propertyName ''"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for range 200 {
+				got := validate.Description(sch, []byte(tc.body))
+				if got != tc.want {
+					t.Fatalf("description = %q, want %q", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// draftProblems lists what keeps a schema off 2020-12: a $schema naming anything
+// else, a keyword of an older draft or a $ref that resolves to nothing.
+// Compiling alone misses these, since the compiler still resolves a $ref into
+// definitions under 2020-12 and follows only the $refs the root reaches.
+func draftProblems(t *testing.T, data []byte) []string {
+	t.Helper()
+
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("schema is not JSON: %v", err)
+	}
+	root, ok := doc.(map[string]any)
+	if !ok {
+		t.Fatalf("schema is a %T, want an object", doc)
+	}
+
+	c := jsonschema.NewCompiler()
+	err = c.AddResource("schema.json", doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var problems []string
+	if root["$schema"] != schemaDraft {
+		problems = append(problems, fmt.Sprintf("$schema is %v, want %s", root["$schema"], schemaDraft))
+	}
+	_, err = c.Compile("schema.json")
+	if err != nil {
+		problems = append(problems, fmt.Sprintf("does not compile: %v", err))
+	}
+
+	var walk func(node any, at string)
+	walk = func(node any, at string) {
+		switch n := node.(type) {
+		case []any:
+			for i, v := range n {
+				walk(v, fmt.Sprintf("%s/%d", at, i))
+			}
+		case map[string]any:
+			for key, v := range n {
+				if slices.Contains(retiredKeywords, key) {
+					problems = append(problems, fmt.Sprintf("%s holds %s", at, key))
+				}
+				if ref, ok := v.(string); ok && key == "$ref" {
+					_, err := c.Compile("schema.json" + ref)
+					if err != nil {
+						problems = append(problems, fmt.Sprintf("%s: $ref %s does not resolve: %v", at, ref, err))
+					}
+				}
+
+				subs, ok := v.(map[string]any)
+				if ok && slices.Contains(namingKeywords, key) {
+					for name, sub := range subs {
+						walk(sub, at+"/"+key+"/"+name)
+					}
+					continue
+				}
+				walk(v, at+"/"+key)
+			}
+		}
+	}
+	walk(doc, "#")
+
+	return problems
+}
+
+func TestSchemasDraft(t *testing.T) {
+	var found int
+	err := fs.WalkDir(os.DirFS("schemas"), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || filepath.Ext(path) != ".json" {
+			return nil
+		}
+		found++
+
+		data, err := os.ReadFile(filepath.Join("schemas", path))
+		if err != nil {
+			return err
+		}
+		for _, problem := range draftProblems(t, data) {
+			t.Errorf("%s: %s", path, problem)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found == 0 {
+		t.Fatal("found no schemas")
+	}
+
+	// Each of these has to be caught for the walk above to mean anything.
+	const draft = `"$schema":"` + schemaDraft + `"`
+	cases := []struct {
+		name   string
+		schema string
+		valid  bool
+	}{
+		{"current", `{` + draft + `,"$defs":{"a":{}},"properties":{"b":{"$ref":"#/$defs/a"}}}`, true},
+		{"properties named as keywords", `{` + draft + `,"properties":{"definitions":{},"dependencies":{}}}`, true},
+
+		{"draft-07", `{"$schema":"http://json-schema.org/draft-07/schema#"}`, false},
+		{"no $schema", `{}`, false},
+		{"definitions", `{` + draft + `,"definitions":{"a":{}}}`, false},
+		{"nested definitions", `{` + draft + `,"properties":{"a":{"definitions":{}}}}`, false},
+		{"$ref left on definitions", `{` + draft + `,"$defs":{"a":{}},"properties":{"b":{"$ref":"#/definitions/a"}}}`, false},
+		{"$ref nothing reaches", `{` + draft + `,"$defs":{"a":{"$ref":"#/$defs/b"}}}`, false},
+		{"dependencies", `{` + draft + `,"dependencies":{"a":["b"]}}`, false},
+		{"tuple items", `{` + draft + `,"items":[{}]}`, false},
+		{"additionalItems", `{` + draft + `,"additionalItems":false}`, false},
+		{"$recursiveRef", `{` + draft + `,"$recursiveRef":"#"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			problems := draftProblems(t, []byte(tc.schema))
+			if tc.valid && len(problems) > 0 {
+				t.Errorf("refused %s: %v", tc.schema, problems)
+			}
+			if !tc.valid && len(problems) == 0 {
+				t.Errorf("accepted %s", tc.schema)
+			}
+		})
+	}
 }
 
 func TestDefinitionSchema(t *testing.T) {

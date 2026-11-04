@@ -23,10 +23,11 @@ import (
 //go:embed schemas/ntf/chaos/v1/definition.json
 var definitionSchema []byte
 
-// DefinitionSchema returns the JSON Schema of a run definition. It covers the
-// definition's own structure and leaves each driver's and action's params
-// open; those are checked against the schemas the drivers and kinds publish,
-// KindInfo.Schema and DriverInfo.Schema, in a second stage when a run starts.
+// DefinitionSchema returns the JSON Schema of a run definition, on draft
+// 2020-12. It covers the definition's own structure and leaves each driver's
+// and action's params open; those are checked against the schemas the drivers
+// and kinds publish, KindInfo.Schema and DriverInfo.Schema, in a second stage
+// when a run starts.
 func DefinitionSchema() []byte {
 	return bytes.Clone(definitionSchema)
 }

@@ -1,5 +1,5 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/chaos/schemas/ntf/chaos/v1/definition.json",
   "description": "The definition of a chaos run: its duration, its quiet windows, the credentials it authenticates with and its workers. The params of each driver and action are left open here and checked against the schema the named driver or kind publishes",
   "title": "io.synadia.ntf.chaos.v1.definition",
@@ -11,7 +11,7 @@
   "additionalProperties": false,
   "properties": {
     "duration": {
-      "$ref": "#/definitions/duration",
+      "$ref": "#/$defs/duration",
       "description": "How long the run lasts"
     },
     "quiet": {
@@ -23,11 +23,11 @@
       "additionalProperties": false,
       "properties": {
         "min": {
-          "$ref": "#/definitions/duration",
+          "$ref": "#/$defs/duration",
           "description": "The shortest quiet window, 30s when absent"
         },
         "max_fault": {
-          "$ref": "#/definitions/duration",
+          "$ref": "#/$defs/duration",
           "description": "The longest stretch before a quiet window is due, 2m when absent"
         }
       }
@@ -42,7 +42,7 @@
         "minLength": 1
       },
       "additionalProperties": {
-        "$ref": "#/definitions/credential"
+        "$ref": "#/$defs/credential"
       }
     },
     "workers": {
@@ -50,11 +50,11 @@
       "description": "The workers, which act concurrently through the run",
       "minItems": 1,
       "items": {
-        "$ref": "#/definitions/worker"
+        "$ref": "#/$defs/worker"
       }
     }
   },
-  "definitions": {
+  "$defs": {
     "duration": {
       "type": "string",
       "description": "A Go duration string such as 30s or 1m30s, as time.ParseDuration reads it. Whether its value is in range is checked when the definition is validated",
@@ -121,11 +121,11 @@
           "pattern": "^[A-Za-z0-9_-]{1,32}$"
         },
         "driver": {
-          "$ref": "#/definitions/keyed",
+          "$ref": "#/$defs/keyed",
           "description": "The driver and its params"
         },
         "action": {
-          "$ref": "#/definitions/keyed",
+          "$ref": "#/$defs/keyed",
           "description": "The kind and its params"
         }
       }
