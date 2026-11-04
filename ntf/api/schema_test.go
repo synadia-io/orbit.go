@@ -32,6 +32,8 @@ import (
 
 	invopop "github.com/invopop/jsonschema"
 	"github.com/santhosh-tekuri/jsonschema/v6"
+
+	"github.com/synadia-io/orbit.go/ntf/schema/gen"
 )
 
 // updateSchemas rewrites the committed schemas under schemas/ntf/tester/v1
@@ -273,57 +275,13 @@ func toxicAttributeSchema(a ToxicAttribute) *invopop.Schema {
 	return s
 }
 
-// encodeSchema returns s as indented JSON, as the committed files hold it.
-func encodeSchema(s *invopop.Schema) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	err := enc.Encode(s)
-	if err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes(), nil
-}
-
-// reflectSchema returns the schema of type t, whose type id is typ, inlined
-// with nothing in $defs. A request refuses properties it does not declare and
-// a response allows them. Only the root gets the $id, the title and the const
-// of its type property, since a Toxic has a type of its own.
-func reflectSchema(t reflect.Type, typ string, request bool) ([]byte, error) {
-	r := &invopop.Reflector{
-		Anonymous:                  true,
-		AllowAdditionalProperties:  !request,
-		RequiredFromJSONSchemaTags: true,
-		DoNotReference:             true,
-		ExpandedStruct:             true,
-	}
-	s := r.ReflectFromType(t)
-
-	p, err := schemaPath(typ)
-	if err != nil {
-		return nil, err
-	}
-	s.ID = invopop.ID(schemaBaseURL + p)
-	s.Title = typ
-
-	prop, ok := s.Properties.Get("type")
-	if !ok {
-		return nil, fmt.Errorf("%s has no type property", t)
-	}
-	prop.Const = typ
-
-	return encodeSchema(s)
-}
-
 // generatedSchemas returns every schema file the types of Endpoints and the
 // toxic attributes produce, by their path below this package's directory.
 func generatedSchemas(t *testing.T) map[string][]byte {
 	t.Helper()
 
 	files := map[string][]byte{}
-	add := func(rt reflect.Type, typ string, request bool) {
+	add := func(rt reflect.Type, typ string, reflectType func(reflect.Type, string, string, gen.Mapper) ([]byte, error)) {
 		p, err := schemaPath(typ)
 		if err != nil {
 			t.Fatal(err)
@@ -332,7 +290,7 @@ func generatedSchemas(t *testing.T) map[string][]byte {
 			return
 		}
 
-		data, err := reflectSchema(rt, typ, request)
+		data, err := reflectType(rt, typ, schemaBaseURL+p, nil)
 		if err != nil {
 			t.Fatalf("could not reflect %s: %v", typ, err)
 		}
@@ -340,8 +298,8 @@ func generatedSchemas(t *testing.T) map[string][]byte {
 	}
 
 	for _, ep := range Endpoints {
-		add(ep.Request, ep.RequestType, true)
-		add(ep.Response, ep.ResponseType, false)
+		add(ep.Request, ep.RequestType, gen.Request)
+		add(ep.Response, ep.ResponseType, gen.Response)
 	}
 
 	fragment := &invopop.Schema{
@@ -350,7 +308,7 @@ func generatedSchemas(t *testing.T) map[string][]byte {
 		Description: "The attributes each toxic type accepts, as one rule on the type and attributes of a toxic for each type",
 		AllOf:       toxicAttributeRules(true),
 	}
-	data, err := encodeSchema(fragment)
+	data, err := gen.Encode(fragment)
 	if err != nil {
 		t.Fatalf("could not encode the toxic attributes: %v", err)
 	}
