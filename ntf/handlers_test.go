@@ -1381,7 +1381,7 @@ func TestCreateFailsWhenPortStaysTaken(t *testing.T) {
 	if reserved != 0 {
 		t.Errorf("%d ports still reserved after the failed create", reserved)
 	}
-	if !strings.Contains(logs.String(), "level=ERROR msg=\"Managed server reported a fatal error\" server=") {
+	if !strings.Contains(logs.String(), "level=ERROR msg=\"Server reported a fatal error\" server=") {
 		t.Errorf("service log does not report the fatal error:\n%s", logs.String())
 	}
 

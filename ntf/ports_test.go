@@ -190,6 +190,115 @@ func TestPortAllocatorSkipsLoopbackHeldPorts(t *testing.T) {
 	}
 }
 
+// TestChooseOSPortPassesOverLoopbackHeldPort proves a port another listener holds
+// on one loopback address only is passed over for the next one the OS offers. On
+// macOS the wildcard bind succeeds on such a port, so the OS can offer it.
+func TestChooseOSPortPassesOverLoopbackHeldPort(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		network string
+		ip      net.IP
+	}{
+		{name: "ipv4", network: "tcp4", ip: net.IPv4(127, 0, 0, 1)},
+		{name: "ipv4 wildcard", network: "tcp4", ip: net.IPv4zero},
+		{name: "ipv6", network: "tcp6", ip: net.IPv6loopback},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			a := newPortAllocator(freeRange(t, 2))
+			if tt.ip.To4() == nil && !a.ipv6Loopback {
+				t.Skip("host has no IPv6 loopback address")
+			}
+
+			held, err := net.ListenTCP(tt.network, &net.TCPAddr{IP: tt.ip})
+			if err != nil {
+				t.Fatalf("hold a port on %s: %v", tt.ip, err)
+			}
+			defer held.Close()
+			heldPort := held.Addr().(*net.TCPAddr).Port
+
+			draws := 0
+			got, err := a.chooseOSPort(func() (int, error) {
+				draws++
+				if draws == 1 {
+					return heldPort, nil
+				}
+				return drawOSPort()
+			})
+			if err != nil {
+				t.Fatalf("chooseOSPort: %v", err)
+			}
+			if got == heldPort {
+				t.Fatalf("got port %d, held on %s", got, tt.ip)
+			}
+			if draws < 2 {
+				t.Fatalf("drew %d ports, want the held port passed over", draws)
+			}
+		})
+	}
+}
+
+// TestChooseOSPortGivesUp proves the draws are bounded and that running out of
+// them is ErrEmbeddedPortExhausted.
+func TestChooseOSPortGivesUp(t *testing.T) {
+	a := newPortAllocator(freeRange(t, 2))
+
+	held, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("hold a port on 127.0.0.1: %v", err)
+	}
+	defer held.Close()
+	heldPort := held.Addr().(*net.TCPAddr).Port
+
+	draws := 0
+	_, err = a.chooseOSPort(func() (int, error) {
+		draws++
+		return heldPort, nil
+	})
+	if !errors.Is(err, ErrEmbeddedPortExhausted) {
+		t.Fatalf("got %v, want ErrEmbeddedPortExhausted", err)
+	}
+	if draws != osPortTries {
+		t.Fatalf("drew %d ports, want %d", draws, osPortTries)
+	}
+}
+
+// TestChooseOSPortReturnsDrawError proves a failed draw ends the search, since it
+// is the bind that failed rather than the port that was not clear.
+func TestChooseOSPortReturnsDrawError(t *testing.T) {
+	a := newPortAllocator(freeRange(t, 2))
+	errDraw := errors.New("draw failed")
+
+	draws := 0
+	_, err := a.chooseOSPort(func() (int, error) {
+		draws++
+		return 0, errDraw
+	})
+	if !errors.Is(err, errDraw) {
+		t.Fatalf("got %v, want the draw's error", err)
+	}
+	if draws != 1 {
+		t.Fatalf("drew %d ports, want 1", draws)
+	}
+}
+
+// TestDrawOSPortReleasesPort proves the draw hands back a real port with nothing
+// left holding it, so the server can bind it.
+func TestDrawOSPortReleasesPort(t *testing.T) {
+	port, err := drawOSPort()
+	if err != nil {
+		t.Fatalf("drawOSPort: %v", err)
+	}
+	if port == 0 {
+		t.Fatal("drew port 0")
+	}
+
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4zero, Port: port})
+	if err != nil {
+		t.Fatalf("bind drawn port %d: %v", port, err)
+	}
+	ln.Close()
+}
+
 func TestResolvePortRange(t *testing.T) {
 	ephemeralAt := func(low, high int) func() (int, int, error) {
 		return func() (int, int, error) { return low, high, nil }

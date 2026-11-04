@@ -26,5 +26,5 @@ var (
 	// usually because another program took it after placement handed it out.
 	// Backend.Provision returns an error wrapping it for such a failure, and
 	// the service then plans the instance again with a fresh placement.
-	ErrListen = errors.New("managed server could not listen")
+	ErrListen = errors.New("server could not listen")
 )

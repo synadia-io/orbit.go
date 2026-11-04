@@ -19,14 +19,18 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"os"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats-server/v2/server"
 
 	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/api"
@@ -70,6 +74,156 @@ func TestNewDefaults(t *testing.T) {
 	}
 	if svc.ManagementConn() == nil {
 		t.Fatal("expected a management connection")
+	}
+}
+
+// TestNewEmbeddedPortChosen proves zero and -1 both get a port chosen for the
+// server rather than the 4222 nats-server reads zero as.
+func TestNewEmbeddedPortChosen(t *testing.T) {
+	for _, port := range []int{0, server.RANDOM_PORT} {
+		t.Run(fmt.Sprint(port), func(t *testing.T) {
+			svc := startTestService(t, func(o *Options) { o.Embedded.Port = port })
+
+			got := svc.Port()
+			if got <= 0 || got == server.DEFAULT_PORT {
+				t.Fatalf("Port = %d, want a chosen port", got)
+			}
+			if !strings.HasSuffix(svc.ClientURL(), fmt.Sprintf(":%d", got)) {
+				t.Errorf("ClientURL = %q, want port %d", svc.ClientURL(), got)
+			}
+		})
+	}
+}
+
+// TestNewEmbeddedPortPassesOverLoopbackListeners proves New itself avoids a port
+// held on 127.0.0.1. It needs macOS, where the OS offers such a port and offers
+// ports in order, so holding the next few puts them in the server's way. Elsewhere
+// the wildcard bind refuses a held port and there is nothing to pass over.
+func TestNewEmbeddedPortPassesOverLoopbackListeners(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("only macOS offers a port held on a loopback address")
+	}
+
+	next, err := drawOSPort()
+	if err != nil {
+		t.Fatalf("drawOSPort: %v", err)
+	}
+
+	held := map[int]bool{}
+	for port := next + 1; port <= next+10; port++ {
+		ln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+		if err != nil {
+			continue
+		}
+		defer ln.Close()
+		held[port] = true
+	}
+
+	svc := startTestService(t)
+
+	if held[svc.Port()] {
+		t.Fatalf("Port = %d, held on 127.0.0.1", svc.Port())
+	}
+}
+
+// holdWildcardPort binds port the way nats-server does, so the server cannot, and
+// holds it until the test ends.
+func holdWildcardPort(t *testing.T, port int) {
+	t.Helper()
+
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4zero, Port: port})
+	if err != nil {
+		t.Fatalf("hold port %d: %v", port, err)
+	}
+	t.Cleanup(func() { ln.Close() })
+}
+
+// TestNewEmbeddedRedrawsLostPort proves a chosen port taken before the server binds
+// it costs another draw rather than the start, and with Log set does not exit the
+// process.
+func TestNewEmbeddedRedrawsLostPort(t *testing.T) {
+	for _, log := range []bool{false, true} {
+		t.Run(fmt.Sprintf("log %t", log), func(t *testing.T) {
+			lost := 0
+			beforeEmbeddedStart = func(port int) {
+				if lost == 0 {
+					holdWildcardPort(t, port)
+					lost = port
+				}
+			}
+			t.Cleanup(func() { beforeEmbeddedStart = nil })
+
+			start := time.Now()
+			svc := startTestService(t, func(o *Options) { o.Embedded.Log = log })
+
+			if svc.Port() == lost {
+				t.Fatalf("Port = %d, the port that was lost", svc.Port())
+			}
+			if took := time.Since(start); took > readyTimeout/2 {
+				t.Errorf("New took %v, want well under the %v ready timeout", took, readyTimeout)
+			}
+		})
+	}
+}
+
+// TestNewEmbeddedGivesUpOnLostPorts proves the redraws are bounded and that running
+// out of them is ErrServerListen.
+func TestNewEmbeddedGivesUpOnLostPorts(t *testing.T) {
+	attempts := 0
+	beforeEmbeddedStart = func(port int) {
+		attempts++
+		holdWildcardPort(t, port)
+	}
+	t.Cleanup(func() { beforeEmbeddedStart = nil })
+
+	_, err := New(t.Context(), Options{Dir: t.TempDir()})
+	if !errors.Is(err, ErrServerListen) {
+		t.Fatalf("got %v, want ErrServerListen", err)
+	}
+	if attempts != embeddedStartAttempts {
+		t.Fatalf("made %d attempts, want %d", attempts, embeddedStartAttempts)
+	}
+}
+
+// TestNewEmbeddedFixedPortHeld proves a fixed port that cannot be bound fails New at
+// once with ErrServerListen, is not swapped for another, and with Log set does not
+// exit the process.
+func TestNewEmbeddedFixedPortHeld(t *testing.T) {
+	for _, log := range []bool{false, true} {
+		t.Run(fmt.Sprintf("log %t", log), func(t *testing.T) {
+			port := freeRange(t, 1).Low
+			holdWildcardPort(t, port)
+
+			attempts := 0
+			beforeEmbeddedStart = func(int) { attempts++ }
+			t.Cleanup(func() { beforeEmbeddedStart = nil })
+
+			start := time.Now()
+			_, err := New(t.Context(), Options{Dir: t.TempDir(), Embedded: EmbeddedOptions{Port: port, Log: log}})
+			if !errors.Is(err, ErrServerListen) {
+				t.Fatalf("got %v, want ErrServerListen", err)
+			}
+			if attempts != 1 {
+				t.Fatalf("made %d attempts, want 1", attempts)
+			}
+			if took := time.Since(start); took > readyTimeout/2 {
+				t.Errorf("New took %v to fail, want well under the %v ready timeout", took, readyTimeout)
+			}
+		})
+	}
+}
+
+// TestNewEmbeddedPortFixed proves a fixed port reaches the server as given.
+func TestNewEmbeddedPortFixed(t *testing.T) {
+	port := freeRange(t, 1).Low
+
+	svc := startTestService(t, func(o *Options) { o.Embedded.Port = port })
+
+	if svc.Port() != port {
+		t.Fatalf("Port = %d, want %d", svc.Port(), port)
+	}
+	if !strings.HasSuffix(svc.ClientURL(), fmt.Sprintf(":%d", port)) {
+		t.Errorf("ClientURL = %q, want port %d", svc.ClientURL(), port)
 	}
 }
 
