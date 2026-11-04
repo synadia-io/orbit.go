@@ -38,6 +38,7 @@ import (
 	"github.com/synadia-io/orbit.go/ntf/api"
 	"github.com/synadia-io/orbit.go/ntf/backend"
 	"github.com/synadia-io/orbit.go/ntf/events"
+	"github.com/synadia-io/orbit.go/ntf/schema/validate"
 )
 
 const (
@@ -668,7 +669,11 @@ func (s *Service) startEvents(ctx context.Context, opts Options) error {
 func (s *Service) startServices(name, group string) error {
 	var err error
 
-	requestSchemas, err := compileRequestSchemas()
+	requestTypes := make(map[string]string, len(api.Endpoints))
+	for _, ep := range api.Endpoints {
+		requestTypes[ep.Name] = ep.RequestType
+	}
+	requestSchemas, err := validate.Compile(requestTypes, api.Schema)
 	if err != nil {
 		return err
 	}
@@ -683,7 +688,7 @@ func (s *Service) startServices(name, group string) error {
 	checked := map[string]bool{}
 	check := func(name string, h micro.HandlerFunc) micro.HandlerFunc {
 		checked[name] = true
-		return validated(requestSchemas[name], emptyBodyEndpoints[name], h)
+		return validate.Handler(requestSchemas[name], h)
 	}
 
 	s.micro, err = micro.AddService(s.nc, micro.Config{

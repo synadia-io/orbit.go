@@ -26,6 +26,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/synadia-io/orbit.go/ntf/api"
+	"github.com/synadia-io/orbit.go/ntf/schema/validate"
 )
 
 // rawServiceError sends data as is to subject and returns the service error
@@ -208,20 +209,21 @@ func TestRequestValidationRefusals(t *testing.T) {
 	})
 
 	t.Run("description capped", func(t *testing.T) {
-		body := []byte(`{"` + strings.Repeat("x", 4*maxInvalidRequestLen) + `":1}`)
+		body := []byte(`{"` + strings.Repeat("x", 4*validate.MaxDescriptionLen) + `":1}`)
 		code, desc := rawServiceError(t, svc.nc, "tester.status", body)
 		if code != "001" {
 			t.Errorf("code = %q, want 001", code)
 		}
-		if len(desc) != maxInvalidRequestLen || !strings.HasSuffix(desc, "...") {
-			t.Errorf("description of %d bytes ending %q, want %d ending ...", len(desc), desc[max(0, len(desc)-10):], maxInvalidRequestLen)
+		if len(desc) != validate.MaxDescriptionLen || !strings.HasSuffix(desc, "...") {
+			t.Errorf("description of %d bytes ending %q, want %d ending ...", len(desc), desc[max(0, len(desc)-10):], validate.MaxDescriptionLen)
 		}
 	})
 }
 
-// TestRequestEmptyBody proves reset, list and schema, as status and clock,
-// treat an empty body as {} and refuse a body their schema does not accept,
-// while any other endpoint refuses an empty body.
+// TestRequestEmptyBody proves an empty or whitespace body reads as {} on every
+// endpoint: one with no required field runs its handler, and still refuses a
+// body its schema does not accept, and one with a required field refuses it by
+// name.
 func TestRequestEmptyBody(t *testing.T) {
 	svc := startTestService(t)
 
@@ -254,9 +256,56 @@ func TestRequestEmptyBody(t *testing.T) {
 		}
 	}
 
+	for _, body := range []string{"", " \t\r\n"} {
+		for _, ep := range api.Endpoints {
+			if validRequests[ep.Name] == `{}` {
+				continue
+			}
+
+			code, desc := rawServiceError(t, svc.nc, "tester."+ep.Name, []byte(body))
+			if code != "001" || !strings.HasPrefix(desc, "Invalid request: missing propert") {
+				t.Errorf("%s with body %q = %q %q, want 001 and the missing property", ep.Name, body, code, desc)
+			}
+		}
+	}
+
 	code, desc := rawServiceError(t, svc.nc, "tester.destroy", nil)
-	if code != "001" || !strings.HasPrefix(desc, "Invalid request: ") {
-		t.Errorf("destroy with an empty body = %q %q, want 001", code, desc)
+	if code != "001" || desc != "Invalid request: missing property 'instance_id'" {
+		t.Errorf("destroy with an empty body = %q %q, want 001 and the missing property", code, desc)
+	}
+}
+
+// TestRequestEmptyBodyReachesHandler proves the handlers that unmarshal the
+// body read an empty or whitespace one as {}: tester.create.server, which has
+// no required field, creates a server as it does for {}, and status and clock
+// answer.
+func TestRequestEmptyBodyReachesHandler(t *testing.T) {
+	svc := startTestService(t)
+
+	for _, body := range []string{"", " \t\r\n"} {
+		msg, err := svc.nc.Request("tester.create.server", []byte(body), 30*time.Second)
+		if err != nil {
+			t.Fatalf("create.server with body %q: %v", body, err)
+		}
+		e := msg.Header.Get("Nats-Service-Error")
+		if e != "" {
+			t.Fatalf("create.server with body %q refused: %s", body, e)
+		}
+		var created api.CreateResponse
+		err = json.Unmarshal(msg.Data, &created)
+		if err != nil {
+			t.Fatalf("unmarshal create.server response: %v", err)
+		}
+		if len(created.Servers) != 1 {
+			t.Errorf("create.server with body %q = %+v, want one server", body, created)
+		}
+
+		for _, subject := range []string{"tester.status", "tester.clock"} {
+			code, desc := rawServiceError(t, svc.nc, subject, []byte(body))
+			if code != "" {
+				t.Errorf("%s with body %q = %q %q, want an answer", subject, body, code, desc)
+			}
+		}
 	}
 }
 
