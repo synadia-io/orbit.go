@@ -41,10 +41,10 @@ Set `Conn` to host the service on a connection you already have. `Close` leaves 
 | `Agents`        | _(nil)_           | Network agent factories to register by name, for [trace capture](#trace-capture).    |
 | `Agent`         | _(empty)_         | The registered agent to use. Without one, `trace` or `proxy` requests are refused.   |
 
-`EmbeddedOptions` carries `Port` (zero and `-1` both bind an OS-chosen port), `ServerName`, `StoreDir`, the
-JetStream store directory, which defaults to `management` under `Dir`, and `Log`, which writes the embedded server's
-own log to stdout. Managed servers are unaffected by `Log`: they always log to a file under their instance
-directory.
+`EmbeddedOptions` carries `Port` (zero and `-1` both bind an OS-chosen port that is clear on the loopback addresses),
+`ServerName`, `StoreDir`, the JetStream store directory, which defaults to `management` under `Dir`, and `Log`, which
+writes the embedded server's own log to stderr. Managed servers are unaffected by `Log`: they always log to a file
+under their instance directory.
 
 | Method           | Description                                                      |
 |------------------|------------------------------------------------------------------|

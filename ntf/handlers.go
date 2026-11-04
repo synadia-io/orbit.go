@@ -2512,6 +2512,10 @@ func clientPortOf(srv *server.Server) (int, error) {
 // stall a start. Nil outside tests.
 var beforeServerStart func(opts *server.Options)
 
+// beforeEmbeddedStart, when set, runs in runEmbedded after the embedded server's
+// port is settled and before the server binds it. Tests use it to lose the port.
+var beforeEmbeddedStart func(port int)
+
 // runServerWithConfig writes the rendered NATS config to a file under rootDir,
 // closes the held port-reservation listeners, and starts the server. The
 // listeners must remain open through config write and server construction so
@@ -2560,7 +2564,7 @@ func runServerWithConfig(log *slog.Logger, config []byte, rootDir string, listen
 	log.Info("Starting server", "server", srv.Name(), "dir", rootDir)
 	srv.Start()
 
-	err = waitForStart(srv, guard)
+	err = waitForStart(srv, guard, serverStartTimeout)
 	if err != nil {
 		srv.Shutdown()
 		srv.WaitForShutdown()
@@ -2598,7 +2602,7 @@ func startFromConfig(log *slog.Logger, configPath string) (*server.Server, error
 	log.Info("Restarting server", "server", srv.Name())
 	srv.Start()
 
-	err = waitForStart(srv, guard)
+	err = waitForStart(srv, guard, serverStartTimeout)
 	if err != nil {
 		srv.Shutdown()
 		srv.WaitForShutdown()

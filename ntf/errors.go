@@ -34,11 +34,17 @@ var (
 	// managed server or held by another program.
 	ErrPortRangeExhausted = errors.New("no free port in the port range")
 
-	// ErrServerFatal means a managed server reported a fatal error.
+	// ErrEmbeddedPortExhausted means no port the OS offered the embedded server was
+	// clear on the loopback addresses.
+	ErrEmbeddedPortExhausted = errors.New("no free port for the embedded server")
+
+	// ErrServerFatal means a managed server or the embedded server reported a
+	// fatal error.
 	ErrServerFatal = errors.New("managed server reported a fatal error")
 
 	// ErrServerListen means a managed server could not bind one of its ports,
-	// usually because another program took it after the service reserved it.
+	// usually because another program took it after the service reserved it, or
+	// the embedded server could not bind its port.
 	ErrServerListen = backend.ErrListen
 
 	// ErrBackendName means a backend in Options.Backends cannot be registered

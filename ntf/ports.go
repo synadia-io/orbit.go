@@ -20,6 +20,13 @@ import (
 	"sync"
 )
 
+// osPortTries bounds how many ports chooseOSPort draws from the OS. A draw lands
+// on a port held on a loopback address about 0.13% of the time on a host with
+// such listeners, so a second draw nearly always clears it. Draws are not
+// independent: macOS hands out ports in order, so a run of held ports costs a try
+// each, and only a run this long directly ahead of its next port uses them all.
+const osPortTries = 32
+
 // resolvePortRange validates the configured managed server port range and fits it
 // to the host. The zero value means the default range. A range that does not
 // intersect the OS ephemeral port range is used as is. When the ephemeral range
@@ -135,17 +142,24 @@ func (a *portAllocator) reserve() (int, *net.TCPListener, error) {
 	return 0, nil, fmt.Errorf("%w: %d-%d", ErrPortRangeExhausted, a.low, a.high)
 }
 
-// loopbackFree reports whether port can be bound on the IPv4 loopback address
-// and, where the host has one, the IPv6 loopback address. Each probe is closed at
-// once.
+// loopbackFree reports whether port can be bound on the IPv4 loopback address, the
+// IPv4 wildcard address and, where the host has one, the IPv6 loopback address.
+// The wildcard probe is there for macOS, where a listener on the IPv4 wildcard
+// answers 127.0.0.1 yet does not stop a bind to 127.0.0.1 or a dual-stack bind.
+// Each probe is closed at once.
 func (a *portAllocator) loopbackFree(port int) bool {
-	addrs := []*net.TCPAddr{{IP: net.IPv4(127, 0, 0, 1), Port: port}}
-	if a.ipv6Loopback {
-		addrs = append(addrs, &net.TCPAddr{IP: net.IPv6loopback, Port: port})
+	type probe struct {
+		network string
+		ip      net.IP
 	}
 
-	for _, addr := range addrs {
-		ln, err := net.ListenTCP("tcp", addr)
+	probes := []probe{{"tcp4", net.IPv4(127, 0, 0, 1)}, {"tcp4", net.IPv4zero}}
+	if a.ipv6Loopback {
+		probes = append(probes, probe{"tcp6", net.IPv6loopback})
+	}
+
+	for _, p := range probes {
+		ln, err := net.ListenTCP(p.network, &net.TCPAddr{IP: p.ip, Port: port})
 		if err != nil {
 			return false
 		}
@@ -153,6 +167,40 @@ func (a *portAllocator) loopbackFree(port int) bool {
 	}
 
 	return true
+}
+
+// chooseOSPort returns a port from draw that is clear on the loopback addresses,
+// for the embedded server, whose port comes from the OS rather than the range. A
+// wildcard bind alone does not avoid a port another process holds on a loopback
+// address, as reserve explains, so a port that is not clear is passed over and
+// another drawn, up to osPortTries times. The port is not tracked and nothing
+// holds it once chooseOSPort returns.
+func (a *portAllocator) chooseOSPort(draw func() (int, error)) (int, error) {
+	for range osPortTries {
+		port, err := draw()
+		if err != nil {
+			return 0, fmt.Errorf("could not draw a port from the OS: %w", err)
+		}
+
+		if a.loopbackFree(port) {
+			return port, nil
+		}
+	}
+
+	return 0, fmt.Errorf("%w: tried %d ports", ErrEmbeddedPortExhausted, osPortTries)
+}
+
+// drawOSPort has the OS pick a port by binding the wildcard address on port 0,
+// and closes the listener. Go's tcp network makes this the dual-stack bind
+// nats-server makes for its client port.
+func drawOSPort() (int, error) {
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4zero})
+	if err != nil {
+		return 0, err
+	}
+	defer ln.Close()
+
+	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
 // release returns ports to the range.

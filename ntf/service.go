@@ -57,6 +57,10 @@ const (
 	// connections when the context carries no earlier deadline.
 	readyTimeout = 10 * time.Second
 
+	// embeddedStartAttempts is how many ports the embedded server tries when the
+	// port chosen for it is taken before it binds it.
+	embeddedStartAttempts = 3
+
 	// defaultPortLow and defaultPortHigh bound the managed server port range when
 	// Options.PortRange is not set.
 	defaultPortLow  = 20000
@@ -148,8 +152,9 @@ type Options struct {
 
 // EmbeddedOptions configures the management server started when Options.Conn is nil.
 type EmbeddedOptions struct {
-	// Port to listen on. Zero and -1 both bind an OS-chosen port, which is what
-	// a test suite wants; read the result back with ClientURL or Port.
+	// Port to listen on. Zero and -1 both bind an OS-chosen port that is clear on
+	// the loopback addresses, which is what a test suite wants; read the result
+	// back with ClientURL or Port.
 	Port int
 
 	// ServerName names the embedded server. Empty uses DefaultServerName.
@@ -160,7 +165,7 @@ type EmbeddedOptions struct {
 	// Options.Dir.
 	StoreDir string
 
-	// Log writes the embedded server's own log to stdout. Managed servers are
+	// Log writes the embedded server's own log to stderr. Managed servers are
 	// unaffected: they always log to a file under their instance directory.
 	Log bool
 }
@@ -521,17 +526,47 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 
 // startEmbedded starts the management server and waits for it to accept connections.
 func (s *Service) startEmbedded(ctx context.Context, opts EmbeddedOptions) (*server.Server, error) {
-	name := opts.ServerName
-	if name == "" {
-		name = DefaultServerName
-	}
-
 	// nats-server spells an OS-chosen port -1 and reads 0 as "use 4222". A test
 	// suite wants a free port far more often than it wants 4222, so both mean
 	// OS-chosen here and a fixed port has to be asked for.
-	port := opts.Port
-	if port == 0 {
-		port = server.RANDOM_PORT
+	if opts.Port != 0 && opts.Port != server.RANDOM_PORT {
+		return s.runEmbedded(ctx, opts, opts.Port)
+	}
+
+	// The port is chosen here and given to the server as a fixed one, since the OS
+	// can pick a port another process holds on a loopback address, where a client
+	// of ClientURL would reach that process. Another process can still take the
+	// port before the server binds it. A wildcard listener fails the bind and
+	// another port is drawn. On macOS a listener on 127.0.0.1 does not, and a client
+	// reaches it as before.
+	var err error
+	for range embeddedStartAttempts {
+		var port int
+		port, err = s.ports.chooseOSPort(drawOSPort)
+		if err != nil {
+			return nil, err
+		}
+
+		var srv *server.Server
+		srv, err = s.runEmbedded(ctx, opts, port)
+		if !errors.Is(err, ErrServerListen) {
+			return srv, err
+		}
+
+		s.log.Warn("Management server could not listen on its chosen port", "port", port, "err", err)
+	}
+
+	return nil, err
+}
+
+// runEmbedded starts the management server on port and waits for it to accept
+// connections. Its logger is guarded as a managed server's is, so a port it cannot
+// bind fails with ErrServerListen at once rather than exiting the process or going
+// unnoticed until the wait runs out.
+func (s *Service) runEmbedded(ctx context.Context, opts EmbeddedOptions, port int) (*server.Server, error) {
+	name := opts.ServerName
+	if name == "" {
+		name = DefaultServerName
 	}
 
 	storeDir := opts.StoreDir
@@ -539,20 +574,25 @@ func (s *Service) startEmbedded(ctx context.Context, opts EmbeddedOptions) (*ser
 		storeDir = filepath.Join(s.dir, "management")
 	}
 
-	srv, err := server.NewServer(&server.Options{
+	serverOpts := &server.Options{
 		ServerName: name,
 		Port:       port,
 		StoreDir:   storeDir,
 		NoSigs:     true,
 		NoLog:      !opts.Log,
-	})
+	}
+
+	srv, err := server.NewServer(serverOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	if opts.Log {
-		srv.ConfigureLogger()
+	guard := guardServerLogger(srv, serverOpts, s.log)
+
+	if beforeEmbeddedStart != nil {
+		beforeEmbeddedStart(port)
 	}
+
 	srv.Start()
 
 	wait := readyTimeout
@@ -560,15 +600,17 @@ func (s *Service) startEmbedded(ctx context.Context, opts EmbeddedOptions) (*ser
 	if ok {
 		wait = time.Until(deadline)
 	}
-	if !srv.ReadyForConnections(wait) {
+
+	err = waitForStart(srv, guard, wait)
+	if err != nil {
 		srv.Shutdown()
 		srv.WaitForShutdown()
-		return nil, fmt.Errorf("management server not ready for connections after %v", wait)
+		return nil, fmt.Errorf("management server failed to start: %w", err)
 	}
 
 	// JetStream is enabled once the server is up rather than in Start, which on
-	// failure stops the server, or exits the process when it logs. Its store
-	// is the jetstream directory under storeDir.
+	// failure stops the server. Its store is the jetstream directory under
+	// storeDir.
 	err = srv.EnableJetStream(&server.JetStreamConfig{StoreDir: storeDir})
 	if err != nil {
 		srv.Shutdown()
