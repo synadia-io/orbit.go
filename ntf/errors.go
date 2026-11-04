@@ -40,7 +40,7 @@ var (
 
 	// ErrServerFatal means a managed server or the embedded server reported a
 	// fatal error.
-	ErrServerFatal = errors.New("managed server reported a fatal error")
+	ErrServerFatal = errors.New("server reported a fatal error")
 
 	// ErrServerListen means a managed server could not bind one of its ports,
 	// usually because another program took it after the service reserved it, or
