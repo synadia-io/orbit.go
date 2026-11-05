@@ -46,14 +46,14 @@
               "type": "object"
             },
             "type": "array",
-            "description": "Every firing of a rule of the set, in the order of their time"
+            "description": "Every firing of a rule of the set, in time order"
           },
           "servers": {
             "additionalProperties": {
               "type": "integer"
             },
             "type": "object",
-            "description": "The firings counted by the server whose capture proxy they fired on"
+            "description": "The number of firings on each server's capture proxy"
           }
         },
         "type": "object"

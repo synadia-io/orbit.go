@@ -62,7 +62,7 @@
     },
     "server": {
       "type": "string",
-      "description": "The one server the set applies on, absent when it applies on every captured server"
+      "description": "The server the set applies to, absent when it applies to every captured server"
     }
   }
 }

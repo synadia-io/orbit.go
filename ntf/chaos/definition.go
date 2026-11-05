@@ -207,7 +207,7 @@ func ParseDefinitionYAML(data []byte) (*Definition, error) {
 		return nil, yamlError(err)
 	}
 	if len(file.Docs) > 1 {
-		return nil, fmt.Errorf("%w: holds %d YAML documents, want one", ErrInvalidDefinition, len(file.Docs))
+		return nil, fmt.Errorf("%w: file has %d YAML documents, want one", ErrInvalidDefinition, len(file.Docs))
 	}
 
 	j, err := yaml.YAMLToJSON(data)
@@ -275,7 +275,7 @@ func (d *Definition) Validate() error {
 			return fmt.Errorf("%w: worker name %q is longer than %d characters", ErrInvalidDefinition, w.Name, MaxWorkerNameLength)
 		}
 		if !workerName.MatchString(w.Name) {
-			return fmt.Errorf("%w: worker name %q may hold only letters, digits, '_' and '-'", ErrInvalidDefinition, w.Name)
+			return fmt.Errorf("%w: worker name %q may only contain letters, digits, '_' and '-'", ErrInvalidDefinition, w.Name)
 		}
 		if seen[w.Name] {
 			return fmt.Errorf("%w: worker name %q is used twice", ErrInvalidDefinition, w.Name)

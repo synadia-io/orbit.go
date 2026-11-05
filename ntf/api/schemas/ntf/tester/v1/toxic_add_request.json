@@ -339,11 +339,11 @@
             },
             "node": {
               "type": "string",
-              "description": "Selects every link of one node both ways, not combined with from or to"
+              "description": "Selects every link of one node both ways, cannot be used with from or to"
             },
             "direction": {
               "type": "string",
-              "description": "The data the toxic acts on, to, from or both, both when empty"
+              "description": "The direction of the data the toxic acts on, to, from or both, both when empty"
             }
           },
           "additionalProperties": false,
@@ -358,7 +358,7 @@
             },
             {
               "const": "cut",
-              "description": "Blackholes the link both ways: its proxy still accepts connections but drops all data, so they go silent until the servers' ping timers close them; removing it closes the connections that dropped data."
+              "description": "Drops all data both ways. Connections stay open and new ones are accepted, but nothing passes until the servers' ping timers close them. Removing it closes the connections that dropped data."
             },
             {
               "const": "latency",
@@ -366,11 +366,11 @@
             },
             {
               "const": "limit_data",
-              "description": "Passes bytes more bytes of data, counted from when it is added or the connection opens, then closes the connection."
+              "description": "Closes the connection after `bytes` bytes of data, counted from when the toxic is added or the connection opens."
             },
             {
               "const": "lossy",
-              "description": "Emulates TCP packet loss as stalls: data goes in 1460-byte segments, each lost with chance loss, and a lost segment holds itself and later data for rto ms, doubling for each retransmission lost again, each wait at most max_rto ms."
+              "description": "Emulates TCP packet loss as stalls: data goes in 1460-byte segments, each lost with chance loss, and a lost segment delays itself and later data by rto ms, doubling for each retransmission lost again, each wait at most max_rto ms."
             },
             {
               "const": "reset_peer",

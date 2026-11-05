@@ -242,7 +242,7 @@ func TestParseDefinitionInvalid(t *testing.T) {
 		{"no workers", "duration: 1m", "at least one worker"},
 		{"no worker name", "duration: 1m\nworkers: [{driver: {once: {}}, action: {x: {}}}]", "has no name"},
 		{"long worker name", "duration: 1m\nworkers: [{name: " + strings.Repeat("w", MaxWorkerNameLength+1) + ", driver: {once: {}}, action: {x: {}}}]", "longer than 32"},
-		{"worker name with a dot", "duration: 1m\nworkers: [{name: a.b, driver: {once: {}}, action: {x: {}}}]", "only letters"},
+		{"worker name with a dot", "duration: 1m\nworkers: [{name: a.b, driver: {once: {}}, action: {x: {}}}]", "only contain letters"},
 		{"duplicate worker", "duration: 1m\nworkers: [{name: a, driver: {once: {}}, action: {x: {}}}, {name: a, driver: {once: {}}, action: {x: {}}}]", "used twice"},
 		{"no driver", "duration: 1m\nworkers: [{name: a, action: {x: {}}}]", "has no driver"},
 		{"no action", "duration: 1m\nworkers: [{name: a, driver: {once: {}}}]", "has no action"},

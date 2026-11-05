@@ -62,7 +62,7 @@
     },
     "credential": {
       "type": "object",
-      "description": "A credential in the keyed form: one key naming its type, whose value holds it",
+      "description": "A credential in the keyed form: the single key is its type and the value is the credential",
       "minProperties": 1,
       "maxProperties": 1,
       "additionalProperties": false,
@@ -92,7 +92,7 @@
     },
     "keyed": {
       "type": "object",
-      "description": "A driver or kind in the keyed form: one key naming it, whose value holds its params",
+      "description": "A driver or kind in the keyed form: the single key is its name and the value is its params",
       "minProperties": 1,
       "maxProperties": 1,
       "propertyNames": {

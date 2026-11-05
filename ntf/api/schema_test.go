@@ -159,11 +159,11 @@ func (SubjectMatch) JSONSchemaExtend(s *invopop.Schema) {
 		MinProperties:        new(uint64(1)),
 		AdditionalProperties: invopop.FalseSchema,
 	}
-	operators.Properties.Set("gte", &invopop.Schema{Type: "number", Description: "The least the int capture may be"})
-	operators.Properties.Set("lte", &invopop.Schema{Type: "number", Description: "The most the int capture may be"})
+	operators.Properties.Set("gte", &invopop.Schema{Type: "number", Description: "The minimum value of the int capture"})
+	operators.Properties.Set("lte", &invopop.Schema{Type: "number", Description: "The maximum value of the int capture"})
 	operators.Properties.Set("in", &invopop.Schema{
 		Type:        "array",
-		Description: "Values the capture must equal one of",
+		Description: "The allowed values of the capture",
 		MinItems:    new(uint64(1)),
 		Items:       &invopop.Schema{OneOf: scalarSchemas()},
 	})
@@ -305,7 +305,7 @@ func generatedSchemas(t *testing.T) map[string][]byte {
 	fragment := &invopop.Schema{
 		Version:     invopop.Version,
 		ID:          invopop.ID(schemaBaseURL + toxicAttributesPath),
-		Description: "The attributes each toxic type accepts, as one rule on the type and attributes of a toxic for each type",
+		Description: "The attributes each toxic type accepts, as one rule for each toxic type",
 		AllOf:       toxicAttributeRules(true),
 	}
 	data, err := gen.Encode(fragment)

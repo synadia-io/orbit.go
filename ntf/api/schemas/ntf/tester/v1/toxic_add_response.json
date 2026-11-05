@@ -29,11 +29,11 @@
             },
             "node": {
               "type": "string",
-              "description": "Selects every link of one node both ways, not combined with from or to"
+              "description": "Selects every link of one node both ways, cannot be used with from or to"
             },
             "direction": {
               "type": "string",
-              "description": "The data the toxic acts on, to, from or both, both when empty"
+              "description": "The direction of the data the toxic acts on, to, from or both, both when empty"
             }
           },
           "type": "object",

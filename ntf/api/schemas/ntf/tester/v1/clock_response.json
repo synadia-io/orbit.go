@@ -32,15 +32,15 @@
           },
           "offset": {
             "type": "integer",
-            "description": "The participant's clock less the service host's in nanoseconds, positive when it is ahead"
+            "description": "The participant's clock minus the service host's clock in nanoseconds, positive when the participant is ahead"
           },
           "round_trip": {
             "type": "integer",
-            "description": "The probe's time in flight in nanoseconds"
+            "description": "The probe's round trip time in nanoseconds"
           },
           "bound": {
             "type": "integer",
-            "description": "Half the round trip in nanoseconds, the true offset lies within it of offset"
+            "description": "Half the round trip in nanoseconds, the most the true offset can differ from offset"
           },
           "error": {
             "type": "string",

@@ -407,13 +407,13 @@ func TestToxicsConfigRefusal(t *testing.T) {
 			name: "other gateway name",
 			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: gatewayOtherNameTemplate(t), Toxics: true},
 			code: "007",
-			want: fmt.Sprintf(`%s: node %s-c1_s1 names its gateway "elsewhere", want "SC_%s_1"`, errGatewayName, short, short),
+			want: fmt.Sprintf(`%s: node %s-c1_s1 has gateway name "elsewhere", want "SC_%s_1"`, errGatewayName, short, short),
 		},
 		{
 			name: "no gateway name",
 			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: gatewayNoNameTemplate(t), Toxics: true},
 			code: "007",
-			want: fmt.Sprintf(`%s: node %s-c1_s1 does not name its gateway, want "SC_%s_1"`, errGatewayName, short, short),
+			want: fmt.Sprintf(`%s: node %s-c1_s1 has no gateway name, want "SC_%s_1"`, errGatewayName, short, short),
 		},
 		{
 			name: "renamed server",
@@ -1077,8 +1077,8 @@ func TestToxicsGatewayRefusals(t *testing.T) {
 		want     []string
 	}{
 		{"gateway entry tls", gatewayEntryTLSTemplate(t), "019", []string{errRouteTLS.Error(), "enables TLS in its gateway entry SC_"}},
-		{"other gateway name", gatewayOtherNameTemplate(t), "007", []string{errGatewayName.Error(), `names its gateway "elsewhere", want "SC_`}},
-		{"no gateway name", gatewayNoNameTemplate(t), "007", []string{errGatewayName.Error(), `does not name its gateway, want "SC_`}},
+		{"other gateway name", gatewayOtherNameTemplate(t), "007", []string{errGatewayName.Error(), `has gateway name "elsewhere", want "SC_`}},
+		{"no gateway name", gatewayNoNameTemplate(t), "007", []string{errGatewayName.Error(), `has no gateway name, want "SC_`}},
 	}
 
 	for _, tt := range tests {
@@ -1178,8 +1178,8 @@ func TestToxicsUpdateGatewayRefusals(t *testing.T) {
 		want     string
 	}{
 		{"gateway entry tls", gatewayEntryTLSTemplate(t), "019", fmt.Sprintf("%s: node %s enables TLS in its gateway entry %s", errRouteTLS, srv.Name, other)},
-		{"other gateway name", gatewayOtherNameTemplate(t), "007", fmt.Sprintf(`%s: node %s names its gateway "elsewhere", want %q`, errGatewayName, srv.Name, srv.Cluster)},
-		{"no gateway name", gatewayNoNameTemplate(t), "007", fmt.Sprintf(`%s: node %s does not name its gateway, want %q`, errGatewayName, srv.Name, srv.Cluster)},
+		{"other gateway name", gatewayOtherNameTemplate(t), "007", fmt.Sprintf(`%s: node %s has gateway name "elsewhere", want %q`, errGatewayName, srv.Name, srv.Cluster)},
+		{"no gateway name", gatewayNoNameTemplate(t), "007", fmt.Sprintf(`%s: node %s has no gateway name, want %q`, errGatewayName, srv.Name, srv.Cluster)},
 	}
 
 	for _, tt := range tests {

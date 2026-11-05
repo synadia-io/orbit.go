@@ -348,5 +348,5 @@
       }
     }
   ],
-  "description": "The attributes each toxic type accepts, as one rule on the type and attributes of a toxic for each type"
+  "description": "The attributes each toxic type accepts, as one rule for each toxic type"
 }

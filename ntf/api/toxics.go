@@ -123,13 +123,13 @@ var ToxicAttributes = map[string][]ToxicAttribute{
 // ToxicDescriptions says what each toxic type in ToxicAttributes does to a
 // link, in a sentence, keyed by the Toxic* constants.
 var ToxicDescriptions = map[string]string{
-	ToxicCut:       "Blackholes the link both ways: its proxy still accepts connections but drops all data, so they go silent until the servers' ping timers close them; removing it closes the connections that dropped data.",
+	ToxicCut:       "Drops all data both ways. Connections stay open and new ones are accepted, but nothing passes until the servers' ping timers close them. Removing it closes the connections that dropped data.",
 	ToxicLatency:   "Delays data by latency ms, varied at random by up to jitter ms either way.",
 	ToxicBandwidth: "Limits data to rate kilobytes per second.",
 	ToxicSlowClose: "Passes data unchanged but delays the close of a connection by delay ms.",
 	ToxicTimeout:   "Drops all data and closes the connection once none has arrived for timeout ms, or never when timeout is 0; removing it closes the connection.",
 	ToxicResetPeer: "Drops the next data to arrive and closes the connection timeout ms later, with a TCP RST on connections opened after it was added.",
 	ToxicSlicer:    "Cuts data into pieces of at most average_size plus size_variation bytes, sent delay microseconds apart.",
-	ToxicLimitData: "Passes bytes more bytes of data, counted from when it is added or the connection opens, then closes the connection.",
-	ToxicLossy:     "Emulates TCP packet loss as stalls: data goes in 1460-byte segments, each lost with chance loss, and a lost segment holds itself and later data for rto ms, doubling for each retransmission lost again, each wait at most max_rto ms.",
+	ToxicLimitData: "Closes the connection after `bytes` bytes of data, counted from when the toxic is added or the connection opens.",
+	ToxicLossy:     "Emulates TCP packet loss as stalls: data goes in 1460-byte segments, each lost with chance loss, and a lost segment delays itself and later data by rto ms, doubling for each retransmission lost again, each wait at most max_rto ms.",
 }

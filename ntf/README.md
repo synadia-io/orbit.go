@@ -115,14 +115,14 @@ The `Agent` answers the `tester.shape.*` endpoints and is stopped once by the se
 fails. A `Start` or `Front` that could not bind returns an error wrapping `agent.ErrListen`, and the create runs
 again with fresh ports. The agent owns any scratch space it needs.
 
-A shaping set applies on every node's capture proxy, or, with `server` set to a server's name, on that node's alone;
+A shaping set applies to every node's capture proxy, or, with `server` set to a server's name, to that node's alone;
 a server that is not captured is refused with `017`. A set's id is unique across the instance, and setting it again
 moves it to the nodes the new set names. `tester.shape.report` returns one report per set with the firings of every
-node merged in time order and `servers`, the number of firings on each node the set applies on.
+node merged in time order and `servers`, the number of firings on each node the set applies to.
 
 ## Link proxies
 
-`Create*` requests accept `toxics` to put a proxy of the agent on every route, every gateway between clusters and
+`Create*` requests accept `toxics` to put an agent proxy on every route, every gateway between clusters and
 every node's client listener, so links can be faulted. The agent must declare the `toxics` capability: with no agent
 selected the request is refused with `014`, and with `018` when the agent does not declare it. `Spec.Links` hands
 the agent its route and gateway proxies, each with the endpoint it listens on and the peer listener it forwards to,

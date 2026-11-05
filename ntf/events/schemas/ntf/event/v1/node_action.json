@@ -69,7 +69,7 @@
     },
     "server_name": {
       "type": "string",
-      "description": "The name status shows and stop.server takes"
+      "description": "The server name shown by status and accepted by stop.server"
     }
   }
 }
