@@ -80,7 +80,7 @@
     },
     "targets": {
       "type": "object",
-      "description": "What the action acted on, or on step what the step acted on; when it acted on nothing, absent or an empty object",
+      "description": "What the action or step acted on, absent or an empty object when it acted on nothing",
       "additionalProperties": true,
       "properties": {
         "servers": {

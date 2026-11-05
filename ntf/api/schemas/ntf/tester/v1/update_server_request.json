@@ -17,7 +17,7 @@
         "type": "string"
       },
       "type": "object",
-      "description": "Config snippets by the extension point of the main template they fill"
+      "description": "Config snippets keyed by the main template extension point they fill"
     },
     "template": {
       "type": "string",

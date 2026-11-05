@@ -55,7 +55,7 @@ type NodeSelector struct {
 // Fraction are in range and not both set.
 func (s NodeSelector) Validate() error {
 	if len(s.Names) > 0 && s.Cluster != "" {
-		return fmt.Errorf("%w: nodes by names cannot also name a cluster", ErrInvalidSelector)
+		return fmt.Errorf("%w: nodes by name cannot also set a cluster", ErrInvalidSelector)
 	}
 
 	return validateAmount(s.Count, s.Fraction)
@@ -275,23 +275,23 @@ func (s LinkSelector) Validate() error {
 	}
 
 	if s.Kind == api.ToxicKindClient && s.From != "" {
-		return fmt.Errorf("%w: a client link has no from, name its server with to or nodes", ErrInvalidSelector)
+		return fmt.Errorf("%w: a client link has no from, set its server with to or nodes", ErrInvalidSelector)
 	}
 
 	oneWay := s.Direction != "" && s.Direction != api.ToxicDirectionBoth
 
 	if s.Nodes == nil {
 		if oneWay && s.From == "" && s.To == "" {
-			return fmt.Errorf("%w: direction %q needs from or to to say which way the data flows", ErrInvalidSelector, s.Direction)
+			return fmt.Errorf("%w: direction %q requires from or to", ErrInvalidSelector, s.Direction)
 		}
 
 		return nil
 	}
 	if s.From != "" || s.To != "" {
-		return fmt.Errorf("%w: links by nodes cannot also name from or to", ErrInvalidSelector)
+		return fmt.Errorf("%w: links by nodes cannot also set from or to", ErrInvalidSelector)
 	}
 	if oneWay {
-		return fmt.Errorf("%w: links by nodes act both ways, not %q", ErrInvalidSelector, s.Direction)
+		return fmt.Errorf("%w: links by nodes cannot use direction %q", ErrInvalidSelector, s.Direction)
 	}
 
 	return s.Nodes.Validate()
@@ -382,7 +382,7 @@ func validateAmount(count int, fraction float64) error {
 		return fmt.Errorf("%w: count %d is negative", ErrInvalidSelector, count)
 	}
 	if math.IsNaN(fraction) || fraction < 0 || fraction > 1 {
-		return fmt.Errorf("%w: fraction %v is not above 0 and at most 1", ErrInvalidSelector, fraction)
+		return fmt.Errorf("%w: fraction %v must be above 0 and at most 1", ErrInvalidSelector, fraction)
 	}
 	if count > 0 && fraction > 0 {
 		return fmt.Errorf("%w: count and fraction cannot both be set", ErrInvalidSelector)

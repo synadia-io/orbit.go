@@ -102,7 +102,7 @@ type NodeAction struct {
 	// Node is the node's name in the create response.
 	Node string `json:"node"`
 
-	// ServerName is the name status shows and stop.server takes.
+	// ServerName is the server name shown by status and accepted by stop.server.
 	ServerName string `json:"server_name"`
 }
 
@@ -120,7 +120,7 @@ const (
 
 // ShapingAction is published when a shaping set is applied to or cleared from
 // an instance's capture proxies, one event per set whatever the number of
-// servers it applies on. Clearing every set publishes one cleared event per set
+// servers it applies to. Clearing every set publishes one cleared event per set
 // removed.
 //
 // NTF Schema Type io.synadia.ntf.event.v1.shaping_action
@@ -132,8 +132,8 @@ type ShapingAction struct {
 	// Set is the shaping set's id.
 	Set string `json:"set"`
 
-	// Server is the one server the set applies on, its server field, and
-	// empty, and omitted, when it applies on every captured server.
+	// Server is the server the set applies to, its server field, and
+	// empty, and omitted, when it applies to every captured server.
 	Server string `json:"server,omitempty"`
 }
 
@@ -150,7 +150,7 @@ const ShapingFiredAction = "fired"
 type ShapingFired struct {
 	Base
 
-	// Set is the id of the shaping set holding the rule.
+	// Set is the id of the shaping set the rule belongs to.
 	Set string `json:"set"`
 
 	// Rule is the id of the rule that fired.

@@ -26,7 +26,7 @@
         "type": "string"
       },
       "type": "object",
-      "description": "Config snippets by the extension point of the main template they fill"
+      "description": "Config snippets keyed by the main template extension point they fill"
     },
     "template": {
       "type": "string",
@@ -43,7 +43,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Subject Alternative Names for the server cert, IPs become IP SANs and anything else a DNS name, localhost, 127.0.0.1 and ::1 when empty"
+          "description": "Subject Alternative Names for the server cert, IPs as IP SANs and other values as DNS names, localhost, 127.0.0.1 and ::1 when empty"
         },
         "handshake_first": {
           "type": "boolean",
@@ -68,7 +68,7 @@
     },
     "toxics": {
       "type": "boolean",
-      "description": "Routes every route and every node's clients through proxies of the agent so toxics can act on them"
+      "description": "Sends every route and every node's clients through agent proxies so toxics can act on them"
     }
   },
   "additionalProperties": false,

@@ -55,7 +55,7 @@
     },
     "set": {
       "type": "string",
-      "description": "The id of the shaping set holding the rule"
+      "description": "The id of the shaping set the rule belongs to"
     },
     "rule": {
       "type": "string",

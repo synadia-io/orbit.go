@@ -84,7 +84,7 @@ type instanceSpec struct {
 	// Proxy is set.
 	StoreCaptures bool
 
-	// Toxics puts a proxy of the agent on every route, every gateway between
+	// Toxics puts an agent proxy on every route, every gateway between
 	// clusters and every node's client listener, and advertises a dead
 	// address for routes and gateways.
 	Toxics bool

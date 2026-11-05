@@ -817,11 +817,11 @@ func checkGatewayName(n *nodePlan, cfg map[string]any) error {
 
 			name := fmt.Sprint(fieldValue)
 			if name != n.Cluster {
-				return fmt.Errorf("%w: node %s names its gateway %q, want %q", errGatewayName, n.Name, name, n.Cluster)
+				return fmt.Errorf("%w: node %s has gateway name %q, want %q", errGatewayName, n.Name, name, n.Cluster)
 			}
 		}
 		if !named {
-			return fmt.Errorf("%w: node %s does not name its gateway, want %q", errGatewayName, n.Name, n.Cluster)
+			return fmt.Errorf("%w: node %s has no gateway name, want %q", errGatewayName, n.Name, n.Cluster)
 		}
 	}
 

@@ -289,7 +289,7 @@ type ShapingLister interface {
 //
 // The shaping methods act on the connections through the servers the agent
 // fronts with Front.Capture set, the captured servers. A set is known by its
-// id across the instance: one with an empty Server applies on every captured
+// id across the instance: one with an empty Server applies to every captured
 // server, and one naming a server exists on that server alone. An agent
 // without shaping refuses Shape, ClearShaping, ShapingReport and ShapingSets
 // with ErrUnsupported.
@@ -308,12 +308,12 @@ type Agent interface {
 	Shape(ctx context.Context, set api.ShapingSet) error
 
 	// ClearShaping removes the set id, or every set when id is empty, from
-	// every server it applies on, and returns the ids removed.
+	// every server it applies to, and returns the ids removed.
 	ClearShaping(ctx context.Context, id string) ([]string, error)
 
 	// ShapingReport returns the firings of the set id, or of every set when
 	// id is empty, one report per set, in the order ShapingSets returns.
-	// Each report merges the firings on every server the set applies on, in
+	// Each report merges the firings on every server the set applies to, in
 	// the order of their time, and counts them per server in
 	// api.ShapingReport.Servers.
 	ShapingReport(ctx context.Context, id string) ([]api.ShapingReport, error)

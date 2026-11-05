@@ -55,7 +55,7 @@ func TestShapingActionJSON(t *testing.T) {
 }
 
 // TestShapingActionRejectsUnknownObject proves an object action must be keyed by
-// stall or throttle and hold exactly one key.
+// stall or throttle and have exactly one key.
 func TestShapingActionRejectsUnknownObject(t *testing.T) {
 	for _, in := range []string{`{"pause":"3s"}`, `{"stall":"3s","throttle":{}}`, `{}`, `{"stall":3}`, `42`} {
 		var a ShapingAction

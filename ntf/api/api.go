@@ -40,7 +40,7 @@ type TLSOptions struct {
 	// SANs are the Subject Alternative Names to embed in the server leaf.
 	// Strings that parse as IPs become IP SANs; everything else is treated
 	// as a DNS name. Empty means ["localhost","127.0.0.1","::1"].
-	SANs []string `json:"sans,omitempty" jsonschema_description:"Subject Alternative Names for the server cert, IPs become IP SANs and anything else a DNS name, localhost, 127.0.0.1 and ::1 when empty"`
+	SANs []string `json:"sans,omitempty" jsonschema_description:"Subject Alternative Names for the server cert, IPs as IP SANs and other values as DNS names, localhost, 127.0.0.1 and ::1 when empty"`
 	// HandshakeFirst makes the server perform the TLS handshake before sending
 	// the INFO protocol. Clients must dial with the matching handshake-first
 	// option; the convenience helpers wire it automatically.
@@ -65,7 +65,7 @@ type CreateServerRequest struct {
 	Type        string            `json:"type,omitempty" jsonschema_description:"The type id of the request"`
 	JetStream   bool              `json:"jetstream" jsonschema_description:"Enables JetStream on the server"`
 	Description string            `json:"description,omitempty" jsonschema_description:"A description of the instance"`
-	Snippets    map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets by the extension point of the main template they fill"`
+	Snippets    map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets keyed by the main template extension point they fill"`
 	Template    string            `json:"template,omitempty" jsonschema_description:"A custom main config template, the built-in one when empty"`
 	TLS         *TLSOptions       `json:"tls,omitempty" jsonschema_description:"Generated TLS on the client port, none when absent"`
 	// Trace opts the server into a capture proxy on a trace port of its own,
@@ -79,7 +79,7 @@ type CreateServerRequest struct {
 	// Toxics puts a proxy of the instance's agent in front of the server's client
 	// listener, which Port then reports. It needs an agent that declares the
 	// toxics capability.
-	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Fronts the server's client listener with a proxy of the agent so toxics can act on it"`
+	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Fronts the server's client listener with an agent proxy so toxics can act on it"`
 }
 
 type CreateClusterRequest struct {
@@ -87,7 +87,7 @@ type CreateClusterRequest struct {
 	Servers     int               `json:"servers" jsonschema:"required,minimum=2,maximum=20" jsonschema_description:"The number of servers in the cluster"`
 	JetStream   bool              `json:"jetstream" jsonschema_description:"Enables JetStream on the servers"`
 	Description string            `json:"description,omitempty" jsonschema_description:"A description of the instance"`
-	Snippets    map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets by the extension point of the main template they fill"`
+	Snippets    map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets keyed by the main template extension point they fill"`
 	Template    string            `json:"template,omitempty" jsonschema_description:"A custom main config template, the built-in one when empty"`
 	TLS         *TLSOptions       `json:"tls,omitempty" jsonschema_description:"Generated TLS on the client ports, none when absent"`
 	// Trace fronts every node of the cluster with a capture proxy of its own,
@@ -101,7 +101,7 @@ type CreateClusterRequest struct {
 	// Toxics routes every route between the nodes and every node's clients
 	// through proxies of the instance's agent, which Links lists. It needs an
 	// agent that declares the toxics capability.
-	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Routes every route and every node's clients through proxies of the agent so toxics can act on them"`
+	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Sends every route and every node's clients through agent proxies so toxics can act on them"`
 }
 
 type CreateSuperClusterRequest struct {
@@ -110,7 +110,7 @@ type CreateSuperClusterRequest struct {
 	Clusters    int               `json:"clusters" jsonschema:"required,minimum=2,maximum=10" jsonschema_description:"The number of clusters"`
 	JetStream   bool              `json:"jetstream" jsonschema_description:"Enables JetStream on the servers"`
 	Description string            `json:"description,omitempty" jsonschema_description:"A description of the instance"`
-	Snippets    map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets by the extension point of the main template they fill"`
+	Snippets    map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets keyed by the main template extension point they fill"`
 	Template    string            `json:"template,omitempty" jsonschema_description:"A custom main config template, the built-in one when empty"`
 	TLS         *TLSOptions       `json:"tls,omitempty" jsonschema_description:"Generated TLS on the client ports, none when absent"`
 	// Trace fronts every node of every cluster with a capture proxy of its
@@ -124,7 +124,7 @@ type CreateSuperClusterRequest struct {
 	// Toxics routes every route, every gateway between the clusters and every
 	// node's clients through proxies of the instance's agent, which Links lists.
 	// It needs an agent that declares the toxics capability.
-	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Routes every route, every gateway and every node's clients through proxies of the agent so toxics can act on them"`
+	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Sends every route, every gateway and every node's clients through agent proxies so toxics can act on them"`
 }
 
 type ManagedServer struct {
@@ -338,7 +338,7 @@ type StatusResponse struct {
 type UpdateServerRequest struct {
 	Type     string            `json:"type,omitempty" jsonschema_description:"The type id of the request"`
 	Name     string            `json:"name" jsonschema:"required,minLength=1" jsonschema_description:"The name of the server to update"`
-	Snippets map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets by the extension point of the main template they fill"`
+	Snippets map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets keyed by the main template extension point they fill"`
 	Template string            `json:"template,omitempty" jsonschema_description:"A custom main config template, the built-in one when empty"`
 	// TLSTimeout, when non-nil, sets the managed TLS handshake timeout (seconds)
 	// for a server created with generated TLS. Absent means no change. Apply it
@@ -363,19 +363,19 @@ type ReloadServerResponse struct {
 
 // ShapingSet is a named group of traffic shaping rules applied to the connections
 // through an instance's capture proxies whose CONNECT name matches ConnectionName, a
-// regular expression. Rules are evaluated in order and the first rule that fires
-// takes the frame. The types carry no validation: the capturer compiles a set when
+// regular expression. Rules are evaluated in order and only the first rule that fires
+// acts on the frame. The types carry no validation: the capturer compiles a set when
 // it is applied and refuses one it cannot, naming the rule and field.
 //
-// Server, when set, names the one server of the instance whose capture proxy the
-// set applies on, a ManagedServer.Name; a server that is not captured is refused.
-// Empty applies the set on every server's capture proxy. The id is unique across
+// Server, when set, names the server of the instance whose capture proxy the
+// set applies to, a ManagedServer.Name; a server that is not captured is refused.
+// Empty applies the set to every server's capture proxy. The id is unique across
 // the instance either way.
 type ShapingSet struct {
 	ID             string        `json:"id" jsonschema_description:"The set's id, unique across the instance"`
 	ConnectionName string        `json:"connection_name" jsonschema_description:"A regular expression the CONNECT name of a connection must match"`
-	Server         string        `json:"server,omitempty" jsonschema_description:"The one server whose capture proxy the set applies on, every server when empty"`
-	Rules          []ShapingRule `json:"rules" jsonschema_description:"The rules, evaluated in order, the first that fires takes the frame"`
+	Server         string        `json:"server,omitempty" jsonschema_description:"The server whose capture proxy the set applies to, every server when empty"`
+	Rules          []ShapingRule `json:"rules" jsonschema_description:"The rules, evaluated in order, only the first that fires acts on the frame"`
 }
 
 // ShapingRule pairs a match with an action. Nth fires on the Nth matching frame
@@ -385,9 +385,9 @@ type ShapingRule struct {
 	ID     string        `json:"id" jsonschema_description:"The rule's id"`
 	Match  ShapingMatch  `json:"match" jsonschema_description:"Selects the frames the rule acts on"`
 	Action ShapingAction `json:"action" jsonschema_description:"What the rule does to a frame it fires on"`
-	Nth    int           `json:"nth,omitempty" jsonschema_description:"Fires on the Nth matching frame only, left out when zero"`
-	Every  int           `json:"every,omitempty" jsonschema_description:"Fires on every Nth matching frame, left out when zero"`
-	Limit  int           `json:"limit,omitempty" jsonschema_description:"Caps how often the rule fires, left out when zero"`
+	Nth    int           `json:"nth,omitempty" jsonschema_description:"Fires on the Nth matching frame only, ignored when zero"`
+	Every  int           `json:"every,omitempty" jsonschema_description:"Fires on every Nth matching frame, ignored when zero"`
+	Limit  int           `json:"limit,omitempty" jsonschema_description:"Caps how often the rule fires, no cap when zero"`
 }
 
 // ShapingMatch selects frames. Every field left empty matches any frame; the fields
@@ -395,7 +395,7 @@ type ShapingRule struct {
 // verbs such as "PUB" or "MSG", and SID matches a SUB, UNSUB or MSG's sid.
 type ShapingMatch struct {
 	Direction string        `json:"direction,omitempty" jsonschema_description:"The direction of the frame, to_server or from_server, either when empty"`
-	Verb      []string      `json:"verb,omitempty" jsonschema_description:"Wire verbs the frame must have one of, such as PUB or MSG"`
+	Verb      []string      `json:"verb,omitempty" jsonschema_description:"Wire verbs to match, such as PUB or MSG"`
 	Subject   *SubjectMatch `json:"subject,omitempty" jsonschema_description:"Matches the frame's subject"`
 	Reply     *SubjectMatch `json:"reply,omitempty" jsonschema_description:"Matches the frame's reply subject"`
 	Header    *HeaderMatch  `json:"header,omitempty" jsonschema_description:"Matches a header of the frame"`
@@ -417,14 +417,14 @@ type SubjectMatch struct {
 // equal the header's value too.
 type HeaderMatch struct {
 	Name  string `json:"name" jsonschema_description:"The header the frame must carry"`
-	Value string `json:"value,omitempty" jsonschema_description:"The value the header must hold, any when empty"`
+	Value string `json:"value,omitempty" jsonschema_description:"The header value to match, any when empty"`
 }
 
-// PayloadMatch matches a frame's payload. JSON maps gjson paths to the values they
-// must hold, Prefix is bytes the payload must start with, and Empty matches a
+// PayloadMatch matches a frame's payload. JSON maps gjson paths to the values to
+// match, Prefix is bytes the payload must start with, and Empty matches a
 // payload of zero length.
 type PayloadMatch struct {
-	JSON   map[string]any `json:"json,omitempty" jsonschema_description:"gjson paths and the values they must hold"`
+	JSON   map[string]any `json:"json,omitempty" jsonschema_description:"gjson paths and the values to match"`
 	Prefix string         `json:"prefix,omitempty" jsonschema_description:"Bytes the payload must start with"`
 	Empty  bool           `json:"empty,omitempty" jsonschema_description:"Matches a payload of zero length"`
 }
@@ -485,7 +485,7 @@ func (a *ShapingAction) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("shaping action must be a string or an object: %w", err)
 	}
 	if len(obj) != 1 {
-		return fmt.Errorf("shaping action object must hold exactly one key, got %d", len(obj))
+		return fmt.Errorf("shaping action object must have exactly one key, got %d", len(obj))
 	}
 
 	for kind, raw := range obj {
@@ -519,7 +519,7 @@ func (a *ShapingAction) UnmarshalJSON(data []byte) error {
 // resetting its counters. The instance must have been created with trace capture.
 type ShapeSetRequest struct {
 	Type       string     `json:"type,omitempty" jsonschema_description:"The type id of the request"`
-	InstanceID string     `json:"instance_id" jsonschema:"required,minLength=1" jsonschema_description:"The instance whose capture proxies get the set"`
+	InstanceID string     `json:"instance_id" jsonschema:"required,minLength=1" jsonschema_description:"The instance to add the set to"`
 	Set        ShapingSet `json:"set" jsonschema_description:"The shaping set to add"`
 }
 
@@ -555,13 +555,13 @@ type ShapeReportResponse struct {
 }
 
 // ShapingReport lists every time a rule of one set fired, on every server the set
-// applies on, in the order of their time. Servers counts the firings by the name
+// applies to, in time order. Servers counts the firings by the name
 // of the server whose capture proxy they fired on, with an entry, zero included,
-// for every server the set applies on.
+// for every server the set applies to.
 type ShapingReport struct {
 	ID      string          `json:"id" jsonschema_description:"The set's id"`
-	Firings []ShapingFiring `json:"firings" jsonschema_description:"Every firing of a rule of the set, in the order of their time"`
-	Servers map[string]int  `json:"servers,omitempty" jsonschema_description:"The firings counted by the server whose capture proxy they fired on"`
+	Firings []ShapingFiring `json:"firings" jsonschema_description:"Every firing of a rule of the set, in time order"`
+	Servers map[string]int  `json:"servers,omitempty" jsonschema_description:"The number of firings on each server's capture proxy"`
 }
 
 // ShapingFiring records one rule firing on one frame. FrameID is the frame's id in
@@ -677,9 +677,9 @@ type ToxicSelector struct {
 	To string `json:"to,omitempty" jsonschema_description:"A node or a cluster at the other end of the links, or the server of a client link, any when empty"`
 	// Node selects every link of one node, both ways. It cannot be combined
 	// with From or To. A cut of a node alone unplugs it.
-	Node string `json:"node,omitempty" jsonschema_description:"Selects every link of one node both ways, not combined with from or to"`
+	Node string `json:"node,omitempty" jsonschema_description:"Selects every link of one node both ways, cannot be used with from or to"`
 	// Direction is one of the ToxicDirection* constants. Empty means both.
-	Direction string `json:"direction,omitempty" jsonschema_description:"The data the toxic acts on, to, from or both, both when empty"`
+	Direction string `json:"direction,omitempty" jsonschema_description:"The direction of the data the toxic acts on, to, from or both, both when empty"`
 }
 
 // Toxic is a named fault on the links a selector names. Type is one of the
@@ -723,7 +723,7 @@ type LinkToxics struct {
 type LinkToxic struct {
 	Name       string         `json:"name" jsonschema_description:"The toxic's name"`
 	Type       string         `json:"type" jsonschema_description:"The toxic's type"`
-	Direction  string         `json:"direction" jsonschema_description:"The data the toxic acts on relative to the link, to, from or both"`
+	Direction  string         `json:"direction" jsonschema_description:"The direction of the data the toxic acts on relative to the link, to, from or both"`
 	Node       string         `json:"node,omitempty" jsonschema_description:"The source node a cut on a gateway link is limited to"`
 	Attributes map[string]any `json:"attributes,omitempty" jsonschema_description:"The attributes of the toxic's type"`
 	Toxicity   float64        `json:"toxicity" jsonschema_description:"The chance in [0, 1] that the toxic acts"`
@@ -810,9 +810,10 @@ const (
 	ClockExtra = "extra"
 )
 
-// ClockParticipant is one participant's clock. Offset is its clock less the
-// service host's, positive when it is ahead, and the true offset lies within
-// Bound of it. RoundTrip is the probe's time in flight and Bound half of it.
+// ClockParticipant is one participant's clock. Offset is its clock minus the
+// service host's clock, positive when the participant is ahead, and the true
+// offset is within Bound of it. RoundTrip is the probe's round trip time and
+// Bound half of it.
 // The durations are encoded in nanoseconds.
 type ClockParticipant struct {
 	// Kind is ClockService, ClockAgent or ClockExtra.
@@ -833,9 +834,9 @@ type ClockParticipant struct {
 	// zero offset without being probed.
 	SharedClock bool `json:"shared_clock,omitempty" jsonschema_description:"True for a participant that reads the service host's clock, reported with a zero offset without a probe"`
 
-	Offset    time.Duration `json:"offset" jsonschema_description:"The participant's clock less the service host's in nanoseconds, positive when it is ahead"`
-	RoundTrip time.Duration `json:"round_trip" jsonschema_description:"The probe's time in flight in nanoseconds"`
-	Bound     time.Duration `json:"bound" jsonschema_description:"Half the round trip in nanoseconds, the true offset lies within it of offset"`
+	Offset    time.Duration `json:"offset" jsonschema_description:"The participant's clock minus the service host's clock in nanoseconds, positive when the participant is ahead"`
+	RoundTrip time.Duration `json:"round_trip" jsonschema_description:"The probe's round trip time in nanoseconds"`
+	Bound     time.Duration `json:"bound" jsonschema_description:"Half the round trip in nanoseconds, the most the true offset can differ from offset"`
 
 	// Error is why an extra participant could not be measured, such as no
 	// reply. Offset, RoundTrip and Bound are zero when it is set.

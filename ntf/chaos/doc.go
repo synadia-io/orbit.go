@@ -41,8 +41,9 @@
 // template's user for an account its definition gives no credential for.
 //
 // The driver and the action are written in the keyed form: an object whose
-// single key names the driver or kind and whose value holds its params, which
-// the named driver or kind decodes and checks against the schema it publishes.
+// single key is the name of the driver or kind and whose value is its params,
+// which the named driver or kind decodes and checks against the schema it
+// publishes.
 //
 // For each worker the engine calls Kind.New with the action's params, giving an
 // Action, and Driver.New with the driver's params and a Clock, giving a

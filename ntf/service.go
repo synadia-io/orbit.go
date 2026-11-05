@@ -483,7 +483,7 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 
 		nc, err := nats.Connect("", nats.InProcessServer(srv))
 		if err != nil {
-			return fail(fmt.Errorf("could not connect to the management server: %w", err))
+			return fail(fmt.Errorf("could not connect to the management service: %w", err))
 		}
 		s.nc = nc
 		s.ownConn = true
@@ -554,7 +554,7 @@ func (s *Service) startEmbedded(ctx context.Context, opts EmbeddedOptions) (*ser
 			return srv, err
 		}
 
-		s.log.Warn("Management server could not listen on its chosen port", "port", port, "err", err)
+		s.log.Warn("Management service could not listen on its chosen port", "port", port, "err", err)
 	}
 
 	return nil, err
@@ -606,7 +606,7 @@ func (s *Service) runEmbedded(ctx context.Context, opts EmbeddedOptions, port in
 	if err != nil {
 		srv.Shutdown()
 		srv.WaitForShutdown()
-		return nil, fmt.Errorf("management server failed to start: %w", err)
+		return nil, fmt.Errorf("management service failed to start: %w", err)
 	}
 
 	// JetStream is enabled once the server is up rather than in Start, which on
@@ -616,7 +616,7 @@ func (s *Service) runEmbedded(ctx context.Context, opts EmbeddedOptions, port in
 	if err != nil {
 		srv.Shutdown()
 		srv.WaitForShutdown()
-		return nil, fmt.Errorf("could not enable JetStream on the management server in %s: %w", storeDir, err)
+		return nil, fmt.Errorf("could not enable JetStream for the management service in %s: %w", storeDir, err)
 	}
 
 	return srv, nil

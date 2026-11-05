@@ -121,8 +121,8 @@ type ClockSample struct {
 	// reply.
 	RoundTrip time.Duration
 
-	// Bound is half of RoundTrip. The true offset lies within Bound of
-	// Offset.
+	// Bound is half of RoundTrip. The true offset differs from Offset
+	// by at most Bound.
 	Bound time.Duration
 }
 
