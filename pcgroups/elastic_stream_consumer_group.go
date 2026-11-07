@@ -49,6 +49,8 @@ type ElasticConsumerGroupConsumerInstance struct {
 	contextCancel          context.CancelFunc
 	keyWatcher             jetstream.KeyWatcher
 	doneChan               chan error
+	errHandler             func(err error)
+	terminalErrChan        chan terminalConsumeError
 }
 
 type PartitioningFilter struct {
@@ -84,8 +86,16 @@ func GetElasticConsumerGroupConfig(ctx context.Context, js jetstream.JetStream, 
 }
 
 // ElasticConsume is the function that will start a go routine to consume messages from the stream (when active)
-func ElasticConsume(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig) (ConsumerGroupConsumeContext, error) {
+// Use [WithConsumeErrHandler] to be notified of the errors reported by the member's consumer.
+// If the member's consumer is terminated by an error (e.g. it gets deleted), the member stops consuming and
+// attempts to re-join the consumer group (re-creating its consumer).
+func ElasticConsume(ctx context.Context, js jetstream.JetStream, streamName string, consumerGroupName string, memberName string, messageHandler func(msg jetstream.Msg), config jetstream.ConsumerConfig, opts ...ConsumeOpt) (ConsumerGroupConsumeContext, error) {
 	var err error
+
+	consumeOpts, err := applyConsumeOpts(opts)
+	if err != nil {
+		return nil, err
+	}
 
 	if messageHandler == nil {
 		return nil, errors.New("a message handler must be provided")
@@ -107,6 +117,8 @@ func ElasticConsume(ctx context.Context, js jetstream.JetStream, streamName stri
 		MemberName:         memberName,
 		consumerUserConfig: config,
 		MessageHandlerCB:   messageHandler,
+		errHandler:         consumeOpts.errHandler,
+		terminalErrChan:    make(chan terminalConsumeError, 1),
 	}
 
 	instance.js = js
@@ -210,6 +222,15 @@ func (instance *ElasticConsumerGroupConsumerInstance) instanceRoutine(ctx contex
 			instance.Config.Members = newConfig.Members
 			instance.Config.MemberMappings = newConfig.MemberMappings
 			instance.processMembershipChange(ctx)
+
+		case terminalErr := <-instance.terminalErrChan:
+			// ignore errors from a consume context that was already replaced
+			if terminalErr.consumeContext != instance.consumerConsumeContext {
+				break
+			}
+			// The consume context stopped by itself, so the member would never consume again but would still hold its place in the membership.
+			// Dropping the consumer lets the catch-all below re-create it and start consuming again.
+			instance.stopConsuming()
 
 		case <-ctx.Done():
 			instance.stopConsuming()
@@ -767,7 +788,7 @@ func (instance *ElasticConsumerGroupConsumerInstance) tryCreateConsumer(ctx cont
 func (instance *ElasticConsumerGroupConsumerInstance) startConsuming() {
 	var err error
 
-	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(max(instance.consumerUserConfig.AckWait/pullTimeoutDivider, minPullExpiryPinnedTTL)), jetstream.PullPriorityGroup(priorityGroupName))
+	instance.consumerConsumeContext, err = instance.consumer.Consume(instance.consumerCallback, jetstream.PullExpiry(max(instance.consumerUserConfig.AckWait/pullTimeoutDivider, minPullExpiryPinnedTTL)), jetstream.PullPriorityGroup(priorityGroupName), newConsumeErrHandler(instance.errHandler, instance.terminalErrChan))
 	if err != nil {
 		log.Printf("Error starting to consume on my consumer: %v\n", err)
 		return
