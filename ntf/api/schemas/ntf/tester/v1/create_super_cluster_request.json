@@ -11,13 +11,13 @@
       "type": "integer",
       "maximum": 20,
       "minimum": 2,
-      "description": "The number of servers in each cluster"
+      "description": "The number of servers in each cluster, given with clusters and never with cluster_list"
     },
     "clusters": {
       "type": "integer",
       "maximum": 10,
       "minimum": 2,
-      "description": "The number of clusters"
+      "description": "The number of clusters, given with servers and never with cluster_list"
     },
     "jetstream": {
       "type": "boolean",
@@ -64,6 +64,41 @@
       "type": "object",
       "description": "Generated TLS on the client ports, none when absent"
     },
+    "cluster_list": {
+      "items": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 28,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "description": "The cluster's name, a letter then letters, digits, _ or -, at most 28 characters, the default name of its position when left out"
+          },
+          "servers": {
+            "type": "integer",
+            "maximum": 20,
+            "minimum": 1,
+            "description": "The number of servers in the cluster, the length of server_names when left out"
+          },
+          "server_names": {
+            "items": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 1,
+            "description": "The servers' names in order, each a letter then letters, digits, _ or -, at most 32 characters"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "type": "array",
+      "maxItems": 10,
+      "minItems": 2,
+      "description": "The clusters in order, each with its own size and names, given instead of clusters and servers"
+    },
     "trace": {
       "type": "boolean",
       "description": "Fronts every node with a capture proxy that stores every connection's trace, implies proxy"
@@ -79,9 +114,5 @@
   },
   "additionalProperties": false,
   "type": "object",
-  "required": [
-    "servers",
-    "clusters"
-  ],
   "title": "io.synadia.ntf.tester.v1.create_super_cluster_request"
 }

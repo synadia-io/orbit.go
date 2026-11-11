@@ -858,7 +858,7 @@ func TestToxicsCreateReportsLinks(t *testing.T) {
 		}
 
 		var live backend.Endpoint
-		for _, a := range svc.findServerByName(srv.Name).backendNode.Addresses() {
+		for _, a := range mustFindServer(t, svc, srv.Name).backendNode.Addresses() {
 			if a.Name == "client" {
 				live = a.Internal
 			}
@@ -981,7 +981,7 @@ func TestToxicsUpdate(t *testing.T) {
 	mustRequest(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Toxics: true}, &created)
 
 	name := created.Servers[0].Name
-	cfgPath := svc.findServerByName(name).backendNode.(*inProcessNode).cfgPath
+	cfgPath := mustFindServer(t, svc, name).backendNode.(*inProcessNode).cfgPath
 	before, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
@@ -1022,7 +1022,7 @@ func TestToxicsUpdateRouteTLSIsRefused(t *testing.T) {
 	mustRequest(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Toxics: true}, &created)
 
 	name := created.Servers[0].Name
-	cfgPath := svc.findServerByName(name).backendNode.(*inProcessNode).cfgPath
+	cfgPath := mustFindServer(t, svc, name).backendNode.(*inProcessNode).cfgPath
 	before, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
@@ -1165,7 +1165,7 @@ func TestToxicsUpdateGatewayRefusals(t *testing.T) {
 		t.Fatalf("no server in cluster %s", clusters[0])
 	}
 
-	cfgPath := svc.findServerByName(srv.Name).backendNode.(*inProcessNode).cfgPath
+	cfgPath := mustFindServer(t, svc, srv.Name).backendNode.(*inProcessNode).cfgPath
 	before, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
@@ -1227,7 +1227,7 @@ func TestToxicsUnparseableConfigIsRefused(t *testing.T) {
 	mustRequest(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Toxics: true}, &created)
 
 	name := created.Servers[0].Name
-	cfgPath := svc.findServerByName(name).backendNode.(*inProcessNode).cfgPath
+	cfgPath := mustFindServer(t, svc, name).backendNode.(*inProcessNode).cfgPath
 	before, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
@@ -1320,7 +1320,7 @@ func TestToxicsRenamedServerIsRefused(t *testing.T) {
 	mustRequest(t, svc.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2, Toxics: true}, &created)
 
 	name := created.Servers[1].Name
-	cfgPath := svc.findServerByName(name).backendNode.(*inProcessNode).cfgPath
+	cfgPath := mustFindServer(t, svc, name).backendNode.(*inProcessNode).cfgPath
 	before, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
@@ -1357,7 +1357,7 @@ func TestToxicsUpdateManagedTLSIsRefused(t *testing.T) {
 	mustRequest(t, svc.nc, "tester.create.super-cluster", api.CreateSuperClusterRequest{Clusters: 2, Servers: 2, TLS: &api.TLSOptions{Mode: api.TLSModeServer}, Toxics: true}, &created)
 
 	name := created.Servers[0].Name
-	cfgPath := svc.findServerByName(name).backendNode.(*inProcessNode).cfgPath
+	cfgPath := mustFindServer(t, svc, name).backendNode.(*inProcessNode).cfgPath
 	before, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
@@ -1573,7 +1573,7 @@ func TestFrontsByOptIn(t *testing.T) {
 				}
 
 				var live backend.Endpoint
-				for _, a := range svc.findServerByName(srv.Name).backendNode.Addresses() {
+				for _, a := range mustFindServer(t, svc, srv.Name).backendNode.Addresses() {
 					if a.Name == "client" {
 						live = a.Internal
 					}

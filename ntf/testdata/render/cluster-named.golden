@@ -1,0 +1,204 @@
+=== n1/config.cfg
+
+
+server_name: "alpha"
+port: <PORT1>
+
+
+log_file: "<INSTANCE_DIR>/n1/server.log"
+
+
+
+jetstream {
+	enabled: true
+	store_dir: "<INSTANCE_DIR>/n1"
+	
+}
+
+
+
+cluster {
+	name: "east"
+	port: <PORT2>
+	routes: [
+
+"nats://localhost:<PORT2>"
+
+"nats://localhost:<PORT3>"
+
+"nats://localhost:<PORT4>"
+
+	]
+}
+
+
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: true
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: true
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: true
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: true
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: true
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== n2/config.cfg
+
+
+server_name: "beta"
+port: <PORT5>
+
+
+log_file: "<INSTANCE_DIR>/n2/server.log"
+
+
+
+jetstream {
+	enabled: true
+	store_dir: "<INSTANCE_DIR>/n2"
+	
+}
+
+
+
+cluster {
+	name: "east"
+	port: <PORT3>
+	routes: [
+
+"nats://localhost:<PORT2>"
+
+"nats://localhost:<PORT3>"
+
+"nats://localhost:<PORT4>"
+
+	]
+}
+
+
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: true
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: true
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: true
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: true
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: true
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== n3/config.cfg
+
+
+server_name: "gamma"
+port: <PORT6>
+
+
+log_file: "<INSTANCE_DIR>/n3/server.log"
+
+
+
+jetstream {
+	enabled: true
+	store_dir: "<INSTANCE_DIR>/n3"
+	
+}
+
+
+
+cluster {
+	name: "east"
+	port: <PORT4>
+	routes: [
+
+"nats://localhost:<PORT2>"
+
+"nats://localhost:<PORT3>"
+
+"nats://localhost:<PORT4>"
+
+	]
+}
+
+
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: true
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: true
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: true
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: true
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: true
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}

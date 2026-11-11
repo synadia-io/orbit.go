@@ -72,8 +72,43 @@ and `template` replaces the whole body. `snippets` is a `{key: body}` map keyed 
 `websocket`, `mqtt` or `leafnode` is present, a TCP port under the same name is reserved and surfaces on
 `ManagedServer.ports[<name>]`.
 
-Server names are prefixed with the instance's short id so the same `n1` / `c1_s1` style names do not collide
-between concurrent instances.
+### Names and sizes
+
+By default every name an instance has is built from its short id, so names do not collide between concurrent
+instances: a server is `<short>-n1`, a cluster `C_<short>` with servers `<short>-n<i>`, and the clusters of a
+super-cluster `SC_<short>_<c>` with servers `<short>-c<c>_s<i>`. A create can give names instead:
+
+- `tester.create.server` takes `name`.
+- `tester.create.cluster` takes `cluster_name` and `server_names`, the servers' names in order. `servers` may be left
+  out when `server_names` is given, and must agree with it when both are.
+- `tester.create.super-cluster` takes `cluster_list`, a list of `{name, servers, server_names}` in cluster order, in
+  place of the `clusters` and `servers` counts. A request gives either both counts or `cluster_list`, and is refused
+  with `002` for both, for neither, and for one count without the other. Within an entry `name` is optional,
+  `servers` may be left out when `server_names` is given and must agree with it when both are, and each cluster has
+  its own size, from 1 to 20 servers. A super-cluster
+  may hold clusters of one server: they plan, join by gateway and run JetStream like any other.
+
+Every given name starts with a letter and holds only letters, digits, `_` and `-`, at most 32 characters; a cluster
+name is at most 28, so `<cluster>-n20` still fits. The schemas refuse a name that breaks the rule with `001`. A server
+of a named cluster that is not named itself is `<cluster>-n<i>`, and an unnamed cluster in a `cluster_list` keeps the
+default name of its position. The default names are filled in first and the whole set is then checked: every name
+is unique within the instance, and no server shares a cluster's name, since a toxic selector looks a name up as a
+server before a cluster. A clash, between given names or with a default one, is refused with `002` naming both
+holders. Names are not unique across instances; see `023` below.
+
+A given name is the server's or cluster's identity everywhere: its rendered `server_name`, the cluster and gateway
+`name`, the names of its links, the topology the agent is handed, shaping's `server`, events' `node`, status and list.
+A node's directory follows its position, `n<i>` or `c<c>_s<i>`, and never its name. `.ClusterSize` in the template
+environment is the size of the node's own cluster.
+
+`tester.stop.server`, `tester.start.server`, `tester.update.server` and `tester.reload.server` find their server by
+the `name` it reports, and take an optional `instance_id`. With `instance_id` only that instance is searched, and an
+unknown instance is refused with `404`. Without it every instance is searched. A name no server holds is refused
+with `001`. A name more than one server holds, in one instance or across several, is refused with `023`, whose
+description names the instances holding it, rather than one of them being picked. `023` is stable: a client that
+knows the instance sends the bare name first and retries with `instance_id` on `023`, which works against services
+both with and without `instance_id`. Two servers of one instance can share a name, through a custom `template`
+without `toxics`, and are refused with `023` with `instance_id` too.
 
 ## Trace capture
 
@@ -228,15 +263,15 @@ into one result. The request and reply are the
 
 | Subject                       | Description                                                                 |
 |-------------------------------|-----------------------------------------------------------------------------|
-| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`. |
-| `tester.create.cluster`       | Creates a cluster. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`.       |
-| `tester.create.super-cluster` | Creates a super-cluster. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`. |
-| `tester.stop.server`          | Stops a running server by name (names are globally unique).                 |
-| `tester.start.server`         | Starts a previously-stopped server by name.                                 |
+| `tester.create.server`        | Creates a single server. Optional `name`, `snippets`, `template`, `trace`, `proxy`, `toxics`. |
+| `tester.create.cluster`       | Creates a cluster of `servers` or `server_names`. Optional `cluster_name`, `snippets`, `template`, `trace`, `proxy`, `toxics`. |
+| `tester.create.super-cluster` | Creates a super-cluster of `clusters` and `servers`, or of a `cluster_list`. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`. |
+| `tester.stop.server`          | Stops a running server by name. Optional `instance_id`.                     |
+| `tester.start.server`         | Starts a previously-stopped server by name. Optional `instance_id`.         |
 | `tester.stop.instance`        | Stops every server in an instance, keeping config and storage.              |
 | `tester.start.instance`       | Revives a previously-stopped instance.                                      |
-| `tester.update.server`        | Renders a new on-disk config for a server. Optional `snippets`, `template`. |
-| `tester.reload.server`        | Signals a running server to re-read its on-disk config.                     |
+| `tester.update.server`        | Renders a new on-disk config for a server. Optional `instance_id`, `snippets`, `template`. |
+| `tester.reload.server`        | Signals a running server to re-read its on-disk config. Optional `instance_id`. |
 | `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxies of an instance with them, or on one `server`'s. |
 | `tester.shape.clear`          | Removes one shaping set by id, or every set when `set` is empty.            |
 | `tester.shape.report`         | Reports the rule firings of one shaping set, or of every set.               |

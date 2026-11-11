@@ -52,6 +52,12 @@
       "type": "object",
       "description": "Generated TLS on the client port, none when absent"
     },
+    "name": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "description": "The server's name, a letter then letters, digits, _ or -, at most 32 characters, the default name when left out"
+    },
     "trace": {
       "type": "boolean",
       "description": "Fronts the server with a capture proxy that stores every connection's trace, implies proxy"

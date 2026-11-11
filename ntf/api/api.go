@@ -68,6 +68,10 @@ type CreateServerRequest struct {
 	Snippets    map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets keyed by the main template extension point they fill"`
 	Template    string            `json:"template,omitempty" jsonschema_description:"A custom main config template, the built-in one when empty"`
 	TLS         *TLSOptions       `json:"tls,omitempty" jsonschema_description:"Generated TLS on the client port, none when absent"`
+	// Name names the server. It starts with a letter, holds only letters,
+	// digits, _ and -, and is at most 32 characters. Empty gives the default
+	// name.
+	Name string `json:"name,omitempty" jsonschema:"maxLength=32,pattern=^[A-Za-z][A-Za-z0-9_-]*$" jsonschema_description:"The server's name, a letter then letters, digits, _ or -, at most 32 characters, the default name when left out"`
 	// Trace opts the server into a capture proxy on a trace port of its own,
 	// which Ports["trace"] reports; every connection that reaches it has its
 	// trace stored in the TRACES object store. It implies Proxy.
@@ -83,13 +87,23 @@ type CreateServerRequest struct {
 }
 
 type CreateClusterRequest struct {
-	Type        string            `json:"type,omitempty" jsonschema_description:"The type id of the request"`
-	Servers     int               `json:"servers" jsonschema:"required,minimum=2,maximum=20" jsonschema_description:"The number of servers in the cluster"`
+	Type string `json:"type,omitempty" jsonschema_description:"The type id of the request"`
+	// Servers is the number of servers in the cluster. It may be left out
+	// when ServerNames is given, and must agree with it when both are.
+	Servers     int               `json:"servers,omitempty" jsonschema:"minimum=2,maximum=20" jsonschema_description:"The number of servers in the cluster, the length of server_names when left out"`
 	JetStream   bool              `json:"jetstream" jsonschema_description:"Enables JetStream on the servers"`
 	Description string            `json:"description,omitempty" jsonschema_description:"A description of the instance"`
 	Snippets    map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets keyed by the main template extension point they fill"`
 	Template    string            `json:"template,omitempty" jsonschema_description:"A custom main config template, the built-in one when empty"`
 	TLS         *TLSOptions       `json:"tls,omitempty" jsonschema_description:"Generated TLS on the client ports, none when absent"`
+	// ClusterName names the cluster. It follows the name rule of
+	// CreateServerRequest.Name and is at most 28 characters. Left out, it gives the
+	// default name.
+	ClusterName string `json:"cluster_name,omitempty" jsonschema:"maxLength=28,pattern=^[A-Za-z][A-Za-z0-9_-]*$" jsonschema_description:"The cluster's name, a letter then letters, digits, _ or -, at most 28 characters, the default name when left out"`
+	// ServerNames names the servers, in order, one name per server. Without
+	// it a server is named <cluster_name>-n<i> when ClusterName is given, and
+	// by default otherwise.
+	ServerNames []string `json:"server_names,omitempty" jsonschema:"minItems=2,maxItems=20,maxLength=32,pattern=^[A-Za-z][A-Za-z0-9_-]*$" jsonschema_description:"The servers' names in order, each a letter then letters, digits, _ or -, at most 32 characters"`
 	// Trace fronts every node of the cluster with a capture proxy of its own,
 	// on the trace port its Ports["trace"] reports, that stores every
 	// connection's trace. It implies Proxy.
@@ -104,15 +118,21 @@ type CreateClusterRequest struct {
 	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Sends every route and every node's clients through agent proxies so toxics can act on them"`
 }
 
+// CreateSuperClusterRequest creates a super-cluster. Its clusters are given
+// either by Clusters and Servers, that many clusters of that many servers
+// each, or by ClusterList, never by both.
 type CreateSuperClusterRequest struct {
 	Type        string            `json:"type,omitempty" jsonschema_description:"The type id of the request"`
-	Servers     int               `json:"servers" jsonschema:"required,minimum=2,maximum=20" jsonschema_description:"The number of servers in each cluster"`
-	Clusters    int               `json:"clusters" jsonschema:"required,minimum=2,maximum=10" jsonschema_description:"The number of clusters"`
+	Servers     int               `json:"servers,omitempty" jsonschema:"minimum=2,maximum=20" jsonschema_description:"The number of servers in each cluster, given with clusters and never with cluster_list"`
+	Clusters    int               `json:"clusters,omitempty" jsonschema:"minimum=2,maximum=10" jsonschema_description:"The number of clusters, given with servers and never with cluster_list"`
 	JetStream   bool              `json:"jetstream" jsonschema_description:"Enables JetStream on the servers"`
 	Description string            `json:"description,omitempty" jsonschema_description:"A description of the instance"`
 	Snippets    map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets keyed by the main template extension point they fill"`
 	Template    string            `json:"template,omitempty" jsonschema_description:"A custom main config template, the built-in one when empty"`
 	TLS         *TLSOptions       `json:"tls,omitempty" jsonschema_description:"Generated TLS on the client ports, none when absent"`
+	// ClusterList lists the clusters in order, each with its own size and
+	// names. It is given in place of Clusters and Servers.
+	ClusterList []ClusterSpec `json:"cluster_list,omitempty" jsonschema:"minItems=2,maxItems=10" jsonschema_description:"The clusters in order, each with its own size and names, given instead of clusters and servers"`
 	// Trace fronts every node of every cluster with a capture proxy of its
 	// own, on the trace port its Ports["trace"] reports, that stores every
 	// connection's trace. It implies Proxy.
@@ -125,6 +145,21 @@ type CreateSuperClusterRequest struct {
 	// node's clients through proxies of the instance's agent, which Links lists.
 	// It needs an agent that declares the toxics capability.
 	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Sends every route, every gateway and every node's clients through agent proxies so toxics can act on them"`
+}
+
+// ClusterSpec is one cluster of a super-cluster create's ClusterList.
+type ClusterSpec struct {
+	// Name names the cluster. It follows the name rule of
+	// CreateServerRequest.Name and is at most 28 characters. Left out, it gives the
+	// default name of the cluster's position.
+	Name string `json:"name,omitempty" jsonschema:"maxLength=28,pattern=^[A-Za-z][A-Za-z0-9_-]*$" jsonschema_description:"The cluster's name, a letter then letters, digits, _ or -, at most 28 characters, the default name of its position when left out"`
+	// Servers is the number of servers in the cluster. It may be left out
+	// when ServerNames is given, and must agree with it when both are.
+	Servers int `json:"servers,omitempty" jsonschema:"minimum=1,maximum=20" jsonschema_description:"The number of servers in the cluster, the length of server_names when left out"`
+	// ServerNames names the cluster's servers, in order, one name per server.
+	// Without it a server is named <name>-n<i> when Name is given, and by
+	// default otherwise.
+	ServerNames []string `json:"server_names,omitempty" jsonschema:"minItems=1,maxItems=20,maxLength=32,pattern=^[A-Za-z][A-Za-z0-9_-]*$" jsonschema_description:"The servers' names in order, each a letter then letters, digits, _ or -, at most 32 characters"`
 }
 
 type ManagedServer struct {
@@ -230,13 +265,15 @@ type ResetResponse struct {
 }
 
 type StartServerRequest struct {
-	Type string `json:"type,omitempty" jsonschema_description:"The type id of the request"`
-	Name string `json:"name" jsonschema:"required,minLength=1" jsonschema_description:"The name of the server to start"`
+	Type       string `json:"type,omitempty" jsonschema_description:"The type id of the request"`
+	Name       string `json:"name" jsonschema:"required,minLength=1" jsonschema_description:"The name of the server to start"`
+	InstanceID string `json:"instance_id,omitempty" jsonschema_description:"The instance to find the server in, every instance when empty"`
 }
 
 type StopServerRequest struct {
-	Type string `json:"type,omitempty" jsonschema_description:"The type id of the request"`
-	Name string `json:"name" jsonschema:"required,minLength=1" jsonschema_description:"The name of the server to stop"`
+	Type       string `json:"type,omitempty" jsonschema_description:"The type id of the request"`
+	Name       string `json:"name" jsonschema:"required,minLength=1" jsonschema_description:"The name of the server to stop"`
+	InstanceID string `json:"instance_id,omitempty" jsonschema_description:"The instance to find the server in, every instance when empty"`
 }
 
 type StopServerResponse struct {
@@ -336,10 +373,11 @@ type StatusResponse struct {
 }
 
 type UpdateServerRequest struct {
-	Type     string            `json:"type,omitempty" jsonschema_description:"The type id of the request"`
-	Name     string            `json:"name" jsonschema:"required,minLength=1" jsonschema_description:"The name of the server to update"`
-	Snippets map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets keyed by the main template extension point they fill"`
-	Template string            `json:"template,omitempty" jsonschema_description:"A custom main config template, the built-in one when empty"`
+	Type       string            `json:"type,omitempty" jsonschema_description:"The type id of the request"`
+	Name       string            `json:"name" jsonschema:"required,minLength=1" jsonschema_description:"The name of the server to update"`
+	InstanceID string            `json:"instance_id,omitempty" jsonschema_description:"The instance to find the server in, every instance when empty"`
+	Snippets   map[string]string `json:"snippets,omitempty" jsonschema_description:"Config snippets keyed by the main template extension point they fill"`
+	Template   string            `json:"template,omitempty" jsonschema_description:"A custom main config template, the built-in one when empty"`
 	// TLSTimeout, when non-nil, sets the managed TLS handshake timeout (seconds)
 	// for a server created with generated TLS. Absent means no change. Apply it
 	// with a subsequent reload.
@@ -352,8 +390,9 @@ type UpdateServerResponse struct {
 }
 
 type ReloadServerRequest struct {
-	Type string `json:"type,omitempty" jsonschema_description:"The type id of the request"`
-	Name string `json:"name" jsonschema:"required,minLength=1" jsonschema_description:"The name of the server to reload"`
+	Type       string `json:"type,omitempty" jsonschema_description:"The type id of the request"`
+	Name       string `json:"name" jsonschema:"required,minLength=1" jsonschema_description:"The name of the server to reload"`
+	InstanceID string `json:"instance_id,omitempty" jsonschema_description:"The instance to find the server in, every instance when empty"`
 }
 
 type ReloadServerResponse struct {

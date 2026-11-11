@@ -237,10 +237,12 @@ type instance struct {
 	ID          string
 	Kind        string
 	Description string
-	Cluster     string
-	RootDir     string
-	Servers     []*managedServer
-	Created     time.Time
+	// Cluster is the cluster name of a cluster instance, from its plan, set
+	// once planning succeeds. Guarded by Service.mu.
+	Cluster string
+	RootDir string
+	Servers []*managedServer
+	Created time.Time
 
 	// ports lists every port reserved for the instance's servers. They stay
 	// reserved while a server is stopped, so it restarts on the same ports, and

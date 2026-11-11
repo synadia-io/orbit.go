@@ -223,7 +223,8 @@ func TestRequestValidationRefusals(t *testing.T) {
 // TestRequestEmptyBody proves an empty or whitespace body reads as {} on every
 // endpoint: one with no required field runs its handler, and still refuses a
 // body its schema does not accept, and one with a required field refuses it by
-// name.
+// name. A cluster or super-cluster create's handler refuses it for want of a
+// size.
 func TestRequestEmptyBody(t *testing.T) {
 	svc := startTestService(t)
 
@@ -256,6 +257,13 @@ func TestRequestEmptyBody(t *testing.T) {
 		}
 	}
 
+	// A cluster or super-cluster create has no required field, since its size
+	// can come from either of two fields, so its handler refuses an empty body.
+	handlerRefusals := map[string]string{
+		"create.cluster":       "Invalid request: the cluster needs servers or server_names",
+		"create.super-cluster": "Invalid request: give clusters and servers, or cluster_list",
+	}
+
 	for _, body := range []string{"", " \t\r\n"} {
 		for _, ep := range api.Endpoints {
 			if validRequests[ep.Name] == `{}` {
@@ -263,6 +271,13 @@ func TestRequestEmptyBody(t *testing.T) {
 			}
 
 			code, desc := rawServiceError(t, svc.nc, "tester."+ep.Name, []byte(body))
+			want, ok := handlerRefusals[ep.Name]
+			if ok {
+				if code != "002" || desc != want {
+					t.Errorf("%s with body %q = %q %q, want 002 %q", ep.Name, body, code, desc, want)
+				}
+				continue
+			}
 			if code != "001" || !strings.HasPrefix(desc, "Invalid request: missing propert") {
 				t.Errorf("%s with body %q = %q %q, want 001 and the missing property", ep.Name, body, code, desc)
 			}

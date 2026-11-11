@@ -595,6 +595,14 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 
 	s.log.Debug("Create server", "request", creq)
 
+	if creq.Name != "" {
+		err := checkGivenServerName("name", creq.Name)
+		if err != nil {
+			req.Error("002", "Invalid request: "+err.Error(), nil)
+			return
+		}
+	}
+
 	if err := validateSnippetKeys(creq.Snippets); err != nil {
 		req.Error("007", err.Error(), nil)
 		return
@@ -647,6 +655,7 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 	spec := instanceSpec{
 		Kind:          "server",
 		Servers:       1,
+		ServerName:    creq.Name,
 		JetStream:     creq.JetStream,
 		Description:   creq.Description,
 		Snippets:      creq.Snippets,
@@ -706,6 +715,14 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		s.dropInstance(inst)
 		req.Error(planErrorCode(err), err.Error(), nil)
 		return false
+	}
+
+	// A cluster instance lists its cluster under the name the planner gave it.
+	// list reads it under s.mu.
+	if spec.Kind == "cluster" {
+		s.mu.Lock()
+		inst.Cluster = plan.Clusters[0]
+		s.mu.Unlock()
 	}
 
 	// The proxies of toxics read a plain CONNECT, so routes and gateways must
@@ -1123,13 +1140,9 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		return
 	}
 
-	if creq.Servers < 2 {
-		req.Error("002", "Invalid request: servers should be at least 2", nil)
-		return
-	}
-
-	if creq.Servers > maxServersPerCluster {
-		req.Error("002", fmt.Sprintf("Invalid request: servers should be at most %d", maxServersPerCluster), nil)
+	clusters, refusal := clusterRequestClusters(creq)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
 		return
 	}
 
@@ -1180,11 +1193,11 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 	}
 
 	inst := s.newInstance("cluster", creq.Description)
-	inst.Cluster = "C_" + shortID(inst.ID)
 
 	spec := instanceSpec{
 		Kind:          "cluster",
-		Servers:       creq.Servers,
+		Servers:       clusters[0].Servers,
+		ClusterList:   clusters,
 		JetStream:     creq.JetStream,
 		Description:   creq.Description,
 		Snippets:      creq.Snippets,
@@ -1212,23 +1225,9 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		return
 	}
 
-	if creq.Servers < 2 {
-		req.Error("002", "Invalid request: servers should be at least 2", nil)
-		return
-	}
-
-	if creq.Servers > maxServersPerCluster {
-		req.Error("002", fmt.Sprintf("Invalid request: servers should be at most %d", maxServersPerCluster), nil)
-		return
-	}
-
-	if creq.Clusters < 2 {
-		req.Error("004", "Invalid request: clusters should be at least 2", nil)
-		return
-	}
-
-	if creq.Clusters > maxClusters {
-		req.Error("004", fmt.Sprintf("Invalid request: clusters should be at most %d", maxClusters), nil)
+	clusters, refusal := superClusterRequestClusters(creq)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
 		return
 	}
 
@@ -1284,6 +1283,7 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		Kind:          "super-cluster",
 		Servers:       creq.Servers,
 		Clusters:      creq.Clusters,
+		ClusterList:   clusters,
 		JetStream:     creq.JetStream,
 		Description:   creq.Description,
 		Snippets:      creq.Snippets,
@@ -1325,9 +1325,10 @@ func (s *Service) stopServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
@@ -1378,9 +1379,10 @@ func (s *Service) startServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
@@ -1628,9 +1630,10 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
@@ -1752,9 +1755,10 @@ func (s *Service) reloadServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
@@ -2441,30 +2445,82 @@ func capturingAgentOf(inst *instance) agent.Agent {
 	return inst.agent
 }
 
-// findServerByName scans every instance for a server whose runtime name matches,
-// as its node's status reports it. The servers are read under s.mu and their
-// nodes asked with the lock released; a node that fails its status does not
-// match. Server names are made globally unique by the short-id prefix, so the
-// first match is always the right one.
-func (s *Service) findServerByName(name string) *managedServer {
+// findServerByName finds the server whose runtime name, as its node's status
+// reports it, is name. With instanceID it searches only that instance, and an
+// unknown instance fails with errInstanceNotFound; without one it searches
+// every instance. The servers are read under s.mu and their nodes asked with
+// the lock released; a node that fails its status does not match. No match
+// fails with errServerNotFound, and more than one, in one instance or across
+// several, fails with errServerNameAmbiguous naming the instances holding the
+// name, rather than picking one of them.
+func (s *Service) findServerByName(name string, instanceID string) (*managedServer, error) {
 	s.mu.Lock()
 	var servers []*managedServer
-	for _, inst := range s.instances {
-		servers = append(servers, inst.Servers...)
+	if instanceID != "" {
+		inst, ok := s.instances[instanceID]
+		if !ok {
+			s.mu.Unlock()
+			return nil, errInstanceNotFound
+		}
+		servers = slices.Clone(inst.Servers)
+	} else {
+		for _, inst := range s.instances {
+			servers = append(servers, inst.Servers...)
+		}
 	}
 	s.mu.Unlock()
 
 	ctx := context.Background()
+	var matches []*managedServer
 	for _, ms := range servers {
 		st, err := ms.backendNode.Status(ctx)
 		if err != nil {
 			continue
 		}
 		if st.ServerName == name {
-			return ms
+			matches = append(matches, ms)
 		}
 	}
-	return nil
+
+	switch len(matches) {
+	case 0:
+		return nil, errServerNotFound
+	case 1:
+		return matches[0], nil
+	}
+
+	ids := make([]string, 0, len(matches))
+	for _, ms := range matches {
+		ids = append(ids, ms.instanceID)
+	}
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+
+	if len(ids) == 1 {
+		return nil, fmt.Errorf("%w: %d servers in instance %s are named %q", errServerNameAmbiguous, len(matches), ids[0], name)
+	}
+
+	// instance_id only resolves the name when no instance holds it twice.
+	if len(ids) < len(matches) {
+		return nil, fmt.Errorf("%w: %d servers in instances %s are named %q", errServerNameAmbiguous, len(matches), strings.Join(ids, ", "), name)
+	}
+
+	return nil, fmt.Errorf("%w: %d servers in instances %s are named %q, send instance_id to choose one", errServerNameAmbiguous, len(matches), strings.Join(ids, ", "), name)
+}
+
+// serverLookupRefusal returns the code and message a stop, start, update or
+// reload of a server answers when findServerByName fails with err: 404 for an
+// unknown instance, 023 for a name more than one server reports, and 001 for
+// a name none reports.
+func serverLookupRefusal(err error) (string, string) {
+	switch {
+	case errors.Is(err, errInstanceNotFound):
+		return "404", "Instance not found"
+	case errors.Is(err, errServerNameAmbiguous):
+		return "023", err.Error()
+	default:
+		return "001", "Server not found"
+	}
 }
 
 // reservePort takes a free TCP port for one of inst's servers from the service's
@@ -2654,7 +2710,9 @@ type templateData struct {
 	ClusterIndex int
 	ClusterPort  int
 	Routes       []string
-	ClusterSize  int
+	// ClusterSize is the number of servers in this node's own cluster,
+	// which can differ between the clusters of a super-cluster.
+	ClusterSize int
 
 	// Super-cluster.
 	Clusters    []string

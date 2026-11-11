@@ -634,7 +634,7 @@ func TestUpdateAndReloadServer(t *testing.T) {
 
 	// The staged config includes the snippet file; the running server only picks
 	// it up on reload.
-	snippet, err := os.ReadFile(filepath.Join(ms.findServerByName(name).rootDir, "snippets", "accounts.conf"))
+	snippet, err := os.ReadFile(filepath.Join(mustFindServer(t, ms, name).rootDir, "snippets", "accounts.conf"))
 	if err != nil {
 		t.Fatalf("read staged snippet: %v", err)
 	}
@@ -783,7 +783,7 @@ func TestUpdateKeepsTLSTimeout(t *testing.T) {
 		t.Fatal("update without tls_timeout reported no change")
 	}
 
-	snippet, err := os.ReadFile(filepath.Join(ms.findServerByName(name).rootDir, "snippets", "_tls_managed.conf"))
+	snippet, err := os.ReadFile(filepath.Join(mustFindServer(t, ms, name).rootDir, "snippets", "_tls_managed.conf"))
 	if err != nil {
 		t.Fatalf("read managed TLS snippet: %v", err)
 	}
@@ -825,7 +825,7 @@ func TestUpdateConfigRenderFailureWritesNothing(t *testing.T) {
 		t.Errorf("answered %q %q, want 009 config render failed", code, desc)
 	}
 
-	snippet, err := os.ReadFile(filepath.Join(ms.findServerByName(name).rootDir, "snippets", "top.conf"))
+	snippet, err := os.ReadFile(filepath.Join(mustFindServer(t, ms, name).rootDir, "snippets", "top.conf"))
 	if err != nil {
 		t.Fatalf("read top snippet: %v", err)
 	}
@@ -895,6 +895,19 @@ func (n *gatedNode) Reload(ctx context.Context) error {
 	return n.Node.Reload(ctx)
 }
 
+// mustFindServer returns the server of svc that reports name, searching every
+// instance, and fails the test when none or more than one does.
+func mustFindServer(t testing.TB, svc *Service, name string) *managedServer {
+	t.Helper()
+
+	ms, err := svc.findServerByName(name, "")
+	if err != nil {
+		t.Fatalf("find server %q: %v", name, err)
+	}
+
+	return ms
+}
+
 // gateNodes swaps the backend node of each server named in names for a
 // gatedNode holding ops, and returns the channels the gated calls report on and
 // wait for. The swap is safe because it is made before any request for the
@@ -910,10 +923,7 @@ func gateNodes(t *testing.T, svc *Service, ops []string, names ...string) (chan 
 	t.Cleanup(func() { close(done) })
 
 	for _, name := range names {
-		ms := svc.findServerByName(name)
-		if ms == nil {
-			t.Fatalf("server %q not found", name)
-		}
+		ms := mustFindServer(t, svc, name)
 
 		ms.cfgMu.Lock()
 		ms.backendNode = &gatedNode{Node: ms.backendNode, ops: ops, entered: entered, release: release, done: done}
@@ -1147,6 +1157,45 @@ func TestCreateSuperCluster(t *testing.T) {
 	for name, n := range clusters {
 		if n != 2 {
 			t.Errorf("cluster %q has %d servers, want 2", name, n)
+		}
+	}
+}
+
+// TestListReportsClusterName proves list reports a cluster instance's cluster
+// under the name the planner gave it, the cluster its servers are in, and no
+// cluster for a single server or a super-cluster.
+func TestListReportsClusterName(t *testing.T) {
+	ms := startTestService(t)
+
+	var cluster, single, super api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2}, &cluster)
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{}, &single)
+	mustRequest(t, ms.nc, "tester.create.super-cluster", api.CreateSuperClusterRequest{Clusters: 2, Servers: 2}, &super)
+
+	want := map[string]string{
+		cluster.ID: "C_" + shortID(cluster.ID),
+		single.ID:  "",
+		super.ID:   "",
+	}
+	for _, srv := range cluster.Servers {
+		if srv.Cluster != want[cluster.ID] {
+			t.Errorf("cluster server %s is in cluster %q, want %q", srv.Name, srv.Cluster, want[cluster.ID])
+		}
+	}
+
+	var list api.ListResponse
+	mustRequest(t, ms.nc, "tester.list", nil, &list)
+	if len(list.Instances) != len(want) {
+		t.Fatalf("list has %d instances, want %d", len(list.Instances), len(want))
+	}
+	for _, inst := range list.Instances {
+		wantCluster, ok := want[inst.ID]
+		if !ok {
+			t.Errorf("list has unknown instance %s", inst.ID)
+			continue
+		}
+		if inst.Cluster != wantCluster {
+			t.Errorf("%s instance %s lists cluster %q, want %q", inst.Kind, inst.ID, inst.Cluster, wantCluster)
 		}
 	}
 }
@@ -1452,5 +1501,206 @@ func TestCreateRetriesAfterPortTaken(t *testing.T) {
 				t.Errorf("%d instances registered, want 1", len(list.Instances))
 			}
 		})
+	}
+}
+
+// dupTemplate renders every server it is used for with the server_name dup, so
+// two instances created with it hold two servers of that name.
+const dupTemplate = `server_name: "dup"
+port: {{ .ClientPort }}
+`
+
+// serverRunning reports whether the server of instance id that reports name
+// is running, as the status endpoint has it.
+func serverRunning(t *testing.T, nc *nats.Conn, id string, name string) bool {
+	t.Helper()
+
+	var status api.StatusResponse
+	mustRequest(t, nc, "tester.status", api.StatusRequest{InstanceID: id}, &status)
+	if len(status.Instances) != 1 {
+		t.Fatalf("status of %s reported %d instances, want 1", id, len(status.Instances))
+	}
+	for _, srv := range status.Instances[0].Servers {
+		if srv.Name == name {
+			return srv.Running
+		}
+	}
+	t.Fatalf("status of %s has no server %q", id, name)
+
+	return false
+}
+
+// TestServerRequestsWithNameInTwoInstances proves a server name two instances
+// both hold is refused as ambiguous by stop, start, update and reload, naming
+// both instances, that instance_id picks the one server of that instance, and
+// that an unknown instance_id is refused with 404.
+func TestServerRequestsWithNameInTwoInstances(t *testing.T) {
+	ms := startTestService(t)
+
+	var a, b api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{Template: dupTemplate}, &a)
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{Template: dupTemplate}, &b)
+
+	bare := []struct {
+		subject string
+		req     any
+	}{
+		{"tester.stop.server", api.StopServerRequest{Name: "dup"}},
+		{"tester.start.server", api.StartServerRequest{Name: "dup"}},
+		{"tester.update.server", api.UpdateServerRequest{Name: "dup"}},
+		{"tester.reload.server", api.ReloadServerRequest{Name: "dup"}},
+	}
+	for _, tt := range bare {
+		code, msg := serviceError(t, ms.nc, tt.subject, tt.req)
+		if code != "023" {
+			t.Errorf("%s of a bare repeated name: code %q (%s), want 023", tt.subject, code, msg)
+		}
+		if !strings.Contains(msg, a.ID) || !strings.Contains(msg, b.ID) {
+			t.Errorf("%s of a bare repeated name: message %q does not name both %s and %s", tt.subject, msg, a.ID, b.ID)
+		}
+	}
+
+	_, err := ms.findServerByName("dup", "")
+	if !errors.Is(err, errServerNameAmbiguous) {
+		t.Errorf("findServerByName of a repeated name = %v, want %v", err, errServerNameAmbiguous)
+	}
+
+	var stopped api.StopServerResponse
+	mustRequest(t, ms.nc, "tester.stop.server", api.StopServerRequest{Name: "dup", InstanceID: a.ID}, &stopped)
+	if !stopped.Shutdown {
+		t.Fatal("stop with instance_id reported no shutdown")
+	}
+	if serverRunning(t, ms.nc, a.ID, "dup") {
+		t.Errorf("server dup of %s running after its stop", a.ID)
+	}
+	if !serverRunning(t, ms.nc, b.ID, "dup") {
+		t.Errorf("server dup of %s stopped by the stop of %s's", b.ID, a.ID)
+	}
+
+	var started api.StartServerResponse
+	mustRequest(t, ms.nc, "tester.start.server", api.StartServerRequest{Name: "dup", InstanceID: a.ID}, &started)
+	if !started.Started {
+		t.Fatal("start with instance_id reported not started")
+	}
+	if !serverRunning(t, ms.nc, a.ID, "dup") {
+		t.Errorf("server dup of %s stopped after its start", a.ID)
+	}
+
+	var updated api.UpdateServerResponse
+	mustRequest(t, ms.nc, "tester.update.server", api.UpdateServerRequest{
+		Name:       "dup",
+		InstanceID: b.ID,
+		Template:   dupTemplate,
+		Snippets: map[string]string{"accounts": `accounts {
+	USERS1 { users = [ { user: "user1", pass: "password" } ] }
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}`},
+	}, &updated)
+	if !updated.Updated {
+		t.Fatal("update with instance_id reported no change")
+	}
+	for _, tt := range []struct {
+		id     string
+		staged bool
+	}{{a.ID, false}, {b.ID, true}} {
+		srv, err := ms.findServerByName("dup", tt.id)
+		if err != nil {
+			t.Fatalf("findServerByName dup in %s: %v", tt.id, err)
+		}
+		_, err = os.Stat(filepath.Join(srv.rootDir, "snippets", "accounts.conf"))
+		if staged := err == nil; staged != tt.staged {
+			t.Errorf("accounts snippet staged on dup of %s = %t, want %t", tt.id, staged, tt.staged)
+		}
+	}
+
+	var reloaded api.ReloadServerResponse
+	mustRequest(t, ms.nc, "tester.reload.server", api.ReloadServerRequest{Name: "dup", InstanceID: b.ID}, &reloaded)
+	if !reloaded.Reloaded {
+		t.Fatal("reload with instance_id reported no reload")
+	}
+
+	unknown := []struct {
+		subject string
+		req     any
+	}{
+		{"tester.stop.server", api.StopServerRequest{Name: "dup", InstanceID: "no-such-instance"}},
+		{"tester.start.server", api.StartServerRequest{Name: "dup", InstanceID: "no-such-instance"}},
+		{"tester.update.server", api.UpdateServerRequest{Name: "dup", InstanceID: "no-such-instance"}},
+		{"tester.reload.server", api.ReloadServerRequest{Name: "dup", InstanceID: "no-such-instance"}},
+	}
+	for _, tt := range unknown {
+		code, msg := serviceError(t, ms.nc, tt.subject, tt.req)
+		if code != "404" || msg != "Instance not found" {
+			t.Errorf("%s with an unknown instance_id: %q %q, want 404 Instance not found", tt.subject, code, msg)
+		}
+	}
+
+	// A name the instance does not hold is not found there, though another
+	// instance holds it.
+	var c api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{}, &c)
+	code, msg := serviceError(t, ms.nc, "tester.stop.server", api.StopServerRequest{Name: "dup", InstanceID: c.ID})
+	if code != "001" || msg != "Server not found" {
+		t.Errorf("stop of a name another instance holds: %q %q, want 001 Server not found", code, msg)
+	}
+}
+
+// renamedNode reports name as its server name in Status and passes every other
+// call to the node it wraps, so a test can give two servers of one instance the
+// same live name without rendering it into their configs.
+type renamedNode struct {
+	backend.Node
+	name string
+}
+
+func (n *renamedNode) Status(ctx context.Context) (backend.NodeStatus, error) {
+	st, err := n.Node.Status(ctx)
+	if err != nil {
+		return st, err
+	}
+	st.ServerName = n.name
+
+	return st, nil
+}
+
+// TestServerRequestRefusesNameRepeatedInInstance proves a name two servers of
+// one instance both report is refused as ambiguous, with and without
+// instance_id, rather than the first of them taken.
+func TestServerRequestRefusesNameRepeatedInInstance(t *testing.T) {
+	ms := startTestService(t)
+
+	var created api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 3}, &created)
+
+	// The swap is made before any request for the servers is sent, as
+	// gateNodes makes its own.
+	for _, srv := range created.Servers[:2] {
+		node := mustFindServer(t, ms, srv.Name)
+		node.cfgMu.Lock()
+		node.backendNode = &renamedNode{Node: node.backendNode, name: "twin"}
+		node.cfgMu.Unlock()
+	}
+
+	for _, id := range []string{"", created.ID} {
+		code, msg := serviceError(t, ms.nc, "tester.stop.server", api.StopServerRequest{Name: "twin", InstanceID: id})
+		if code != "023" {
+			t.Errorf("stop of twin with instance_id %q: code %q (%s), want 023", id, code, msg)
+		}
+		if !strings.Contains(msg, created.ID) {
+			t.Errorf("stop of twin with instance_id %q: message %q does not name %s", id, msg, created.ID)
+		}
+
+		_, err := ms.findServerByName("twin", id)
+		if !errors.Is(err, errServerNameAmbiguous) {
+			t.Errorf("findServerByName of twin with instance_id %q = %v, want %v", id, err, errServerNameAmbiguous)
+		}
+	}
+
+	var status api.StatusResponse
+	mustRequest(t, ms.nc, "tester.status", api.StatusRequest{InstanceID: created.ID}, &status)
+	for _, srv := range status.Instances[0].Servers {
+		if !srv.Running {
+			t.Errorf("server %q stopped by a refused stop", srv.Name)
+		}
 	}
 }

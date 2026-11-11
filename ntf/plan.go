@@ -32,12 +32,22 @@ type instanceSpec struct {
 	Kind string
 
 	// Servers is the number of servers in each cluster, or 1 for a single
-	// server.
+	// server. ClusterList takes its place when set.
 	Servers int
 
 	// Clusters is the number of clusters in a super-cluster, 0 for any other
-	// kind.
+	// kind. ClusterList takes its place when set.
 	Clusters int
+
+	// ServerName is the given name of a single server, empty for the default
+	// name.
+	ServerName string
+
+	// ClusterList lists the clusters of a cluster or super-cluster in order,
+	// each with its own size and given names. When set it takes the place of
+	// Servers and Clusters; when empty every cluster has Servers servers and
+	// the default names.
+	ClusterList []clusterSpec
 
 	// JetStream enables JetStream on every server.
 	JetStream bool
@@ -88,6 +98,42 @@ type instanceSpec struct {
 	// clusters and every node's client listener, and advertises a dead
 	// address for routes and gateways.
 	Toxics bool
+}
+
+// clusterSpec is one cluster of a cluster or super-cluster, as a validated
+// create request asks for it.
+type clusterSpec struct {
+	// Name is the cluster's given name, empty for the default name of its
+	// position.
+	Name string
+
+	// Servers is the number of servers in the cluster.
+	Servers int
+
+	// ServerNames are the given names of the cluster's servers, in order, one
+	// per server. Empty gives every server its default name.
+	ServerNames []string
+}
+
+// clusters returns the clusters of spec, a cluster or super-cluster, in
+// order: its ClusterList when set, and otherwise one cluster for a cluster and
+// Clusters for a super-cluster, each of Servers servers and named by default.
+func (s instanceSpec) clusters() []clusterSpec {
+	if len(s.ClusterList) > 0 {
+		return s.ClusterList
+	}
+
+	count := s.Clusters
+	if s.Kind == "cluster" {
+		count = 1
+	}
+
+	clusters := make([]clusterSpec, count)
+	for i := range clusters {
+		clusters[i].Servers = s.Servers
+	}
+
+	return clusters
 }
 
 // instancePlan is the record of what an instance is: its nodes, how they

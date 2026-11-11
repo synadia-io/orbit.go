@@ -151,13 +151,13 @@ func TestInProcessPlacementReleasesOnTeardown(t *testing.T) {
 }
 
 // TestInProcessPlacementDirectories proves the in-process placement returns
-// today's directory layout: <Dir>/<id> for the instance, and n<i> or c<c>_s<i>
-// under it as a node's store directory, which is the node's directory.
+// today's directory layout: <Dir>/<id> for the instance, and a node's
+// directory, n<i> or c<c>_s<i>, under it as the node's store directory, with
+// nothing trimmed from it.
 func TestInProcessPlacementDirectories(t *testing.T) {
 	s := placementService(t, freeRange(t, 1))
 	inst := s.newInstance("super-cluster", "")
 	p := placeInstance(t, s, inst)
-	short := shortID(inst.ID)
 	root := filepath.Join(s.Dir(), inst.ID)
 
 	if p.InstanceDir() != root {
@@ -165,15 +165,17 @@ func TestInProcessPlacementDirectories(t *testing.T) {
 	}
 
 	cases := map[string]string{
-		short + "-n1":    filepath.Join(root, "n1"),
-		short + "-n3":    filepath.Join(root, "n3"),
-		short + "-c1_s1": filepath.Join(root, "c1_s1"),
-		short + "-c2_s3": filepath.Join(root, "c2_s3"),
+		"n1":    filepath.Join(root, "n1"),
+		"n3":    filepath.Join(root, "n3"),
+		"c1_s1": filepath.Join(root, "c1_s1"),
+		"c2_s3": filepath.Join(root, "c2_s3"),
+		// A dir that happens to start like a node name keeps its prefix.
+		shortID(inst.ID) + "-n1": filepath.Join(root, shortID(inst.ID)+"-n1"),
 	}
-	for node, want := range cases {
-		got := p.StoreDir(node)
+	for dir, want := range cases {
+		got := p.StoreDir(dir)
 		if got != want {
-			t.Errorf("StoreDir(%q) = %q, want %q", node, got, want)
+			t.Errorf("StoreDir(%q) = %q, want %q", dir, got, want)
 		}
 	}
 }

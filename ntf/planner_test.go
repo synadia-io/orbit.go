@@ -84,8 +84,8 @@ func (p *fakePlacement) InstanceDir() string {
 	return filepath.Join("/ntf-plan", p.id)
 }
 
-func (p *fakePlacement) StoreDir(node string) string {
-	return filepath.Join(p.InstanceDir(), strings.TrimPrefix(node, shortID(p.id)+"-"))
+func (p *fakePlacement) StoreDir(dir string) string {
+	return filepath.Join(p.InstanceDir(), dir)
 }
 
 var _ backend.Placement = (*fakePlacement)(nil)
@@ -424,13 +424,72 @@ func TestPlanInstanceDirVersionPersistent(t *testing.T) {
 					t.Errorf("node %s version = %q, want 9.8.7", n.Name, n.Version)
 				}
 
-				store := place.StoreDir(n.Name)
+				store := place.StoreDir(n.Dir)
 				if !slices.Equal(n.Persistent, []string{store}) {
 					t.Errorf("node %s persistent = %v, want [%s]", n.Name, n.Persistent, store)
 				}
 				if n.TemplateData.StoreDir != store {
 					t.Errorf("node %s renders store dir %q, want %q", n.Name, n.TemplateData.StoreDir, store)
 				}
+			}
+		})
+	}
+}
+
+// storePlacement is a fakePlacement whose store directories lie under a store
+// directory of their own, apart from the node directories, so a store
+// directory worked out from anything but the node's Dir shows. It records the
+// argument of every StoreDir call.
+type storePlacement struct {
+	*fakePlacement
+	asked []string
+}
+
+func (p *storePlacement) StoreDir(dir string) string {
+	p.asked = append(p.asked, dir)
+	return filepath.Join(p.InstanceDir(), "store", dir)
+}
+
+// TestPlanInstanceStoreDirFollowsDir proves the planner asks placement for each
+// node's store directory by the node's Dir, never by its Name, and records the
+// answer as the node's persistent path and its rendered .StoreDir.
+func TestPlanInstanceStoreDirFollowsDir(t *testing.T) {
+	specs := []instanceSpec{
+		{Kind: "server", Servers: 1},
+		{Kind: "cluster", Servers: 3},
+		{Kind: "super-cluster", Servers: 2, Clusters: 2},
+	}
+
+	for _, spec := range specs {
+		t.Run(spec.Kind, func(t *testing.T) {
+			spec.MainTemplate = serverConfigTemplate
+
+			id := nuid.Next()
+			place := &storePlacement{fakePlacement: newFakePlacement(id)}
+
+			plan, err := planInstance(spec, id, place, server.VERSION)
+			if err != nil {
+				t.Fatalf("planInstance: %v", err)
+			}
+
+			var dirs []string
+			for _, n := range plan.nodes {
+				dirs = append(dirs, n.Dir)
+				if n.Name == n.Dir {
+					t.Fatalf("node %s is named for its dir, so the test cannot tell them apart", n.Name)
+				}
+
+				want := filepath.Join(place.InstanceDir(), "store", n.Dir)
+				if !slices.Equal(n.Persistent, []string{want}) {
+					t.Errorf("node %s persistent = %v, want [%s]", n.Name, n.Persistent, want)
+				}
+				if n.TemplateData.StoreDir != want {
+					t.Errorf("node %s renders store dir %q, want %q", n.Name, n.TemplateData.StoreDir, want)
+				}
+			}
+
+			if !slices.Equal(place.asked, dirs) {
+				t.Errorf("StoreDir asked for %v, want the node dirs %v", place.asked, dirs)
 			}
 		})
 	}
@@ -536,5 +595,273 @@ func TestPlanInstanceErrors(t *testing.T) {
 				t.Errorf("error %v does not wrap %v", err, tt.is)
 			}
 		})
+	}
+}
+
+// TestPlanInstanceClusterList proves a super-cluster planned from a cluster
+// list of lon with five servers and nyc with three has eight nodes in two
+// clusters of their own sizes and names: routes only within each cluster,
+// gateways named lon and nyc, a .ClusterSize of each node's own cluster, and
+// the names in server_name, the link names and the nodes the agent is handed.
+func TestPlanInstanceClusterList(t *testing.T) {
+	id := nuid.Next()
+	spec := instanceSpec{
+		Kind:         "super-cluster",
+		ClusterList:  []clusterSpec{{Name: "lon", Servers: 5}, {Name: "nyc", Servers: 3}},
+		MainTemplate: serverConfigTemplate,
+		Toxics:       true,
+	}
+
+	plan, err := planInstance(spec, id, newFakePlacement(id), server.VERSION)
+	if err != nil {
+		t.Fatalf("planInstance: %v", err)
+	}
+
+	if !slices.Equal(plan.Clusters, []string{"lon", "nyc"}) {
+		t.Errorf("clusters = %v, want [lon nyc]", plan.Clusters)
+	}
+
+	wantNames := []string{"lon-n1", "lon-n2", "lon-n3", "lon-n4", "lon-n5", "nyc-n1", "nyc-n2", "nyc-n3"}
+	wantDirs := []string{"c1_s1", "c1_s2", "c1_s3", "c1_s4", "c1_s5", "c2_s1", "c2_s2", "c2_s3"}
+	var names, dirs []string
+	size := map[string]int{"lon": 5, "nyc": 3}
+	for _, n := range plan.nodes {
+		names = append(names, n.Name)
+		dirs = append(dirs, n.Dir)
+
+		td := n.TemplateData
+		if td.ClusterSize != size[n.Cluster] {
+			t.Errorf("node %s .ClusterSize = %d, want %d", n.Name, td.ClusterSize, size[n.Cluster])
+		}
+		if len(td.Routes) != size[n.Cluster] {
+			t.Errorf("node %s has %d routes, want %d", n.Name, len(td.Routes), size[n.Cluster])
+		}
+		if len(td.Gateways["lon"]) != 5 || len(td.Gateways["nyc"]) != 3 || len(td.Gateways) != 2 {
+			t.Errorf("node %s gateways = %v, want lon with 5 and nyc with 3", n.Name, td.Gateways)
+		}
+
+		config := string(n.Config)
+		for _, want := range []string{
+			fmt.Sprintf("server_name: %q", n.Name),
+			fmt.Sprintf("name: %q", n.Cluster),
+			`{ name: "lon", urls: [`,
+			`{ name: "nyc", urls: [`,
+		} {
+			if !strings.Contains(config, want) {
+				t.Errorf("node %s config does not hold %s", n.Name, want)
+			}
+		}
+	}
+	if !slices.Equal(names, wantNames) {
+		t.Errorf("nodes = %v, want %v", names, wantNames)
+	}
+	if !slices.Equal(dirs, wantDirs) {
+		t.Errorf("node dirs = %v, want %v", dirs, wantDirs)
+	}
+
+	cluster := map[string]string{}
+	for _, n := range plan.nodes {
+		cluster[n.Name] = n.Cluster
+	}
+
+	routes := 0
+	for _, lk := range plan.Links {
+		if lk.Kind == "route" {
+			routes++
+			if cluster[lk.Node] != cluster[lk.Peer] {
+				t.Errorf("route link from %s to %s crosses clusters", lk.Node, lk.Peer)
+			}
+		}
+	}
+	if routes != 5*4+3*2 {
+		t.Errorf("plan has %d route links, want %d", routes, 5*4+3*2)
+	}
+
+	var proxies []string
+	for _, p := range plan.proxies {
+		proxies = append(proxies, p.Name)
+	}
+	for _, want := range []string{"route:lon-n1->lon-n5", "route:nyc-n3->nyc-n1", "gateway:lon->nyc-n2", "gateway:nyc->lon-n4"} {
+		if !slices.Contains(proxies, want) {
+			t.Errorf("proxies %v do not hold %s", proxies, want)
+		}
+	}
+	// 26 routes, then a gateway proxy from lon to each of nyc's 3 servers
+	// and from nyc to each of lon's 5.
+	if len(proxies) != 26+3+5 {
+		t.Errorf("plan has %d route and gateway proxies, want %d", len(proxies), 26+3+5)
+	}
+	for _, name := range wantNames {
+		_, ok := plan.clientProxies[name]
+		if !ok {
+			t.Errorf("node %s has no client proxy", name)
+		}
+	}
+}
+
+// TestPlanInstanceGivenServerNames proves the names a create gives the
+// servers become their plan names, and with them each server_name, route link
+// name and .ServerName, while the directories follow the positions.
+func TestPlanInstanceGivenServerNames(t *testing.T) {
+	id := nuid.Next()
+	spec := instanceSpec{
+		Kind:         "cluster",
+		ClusterList:  []clusterSpec{{Name: "east", Servers: 2, ServerNames: []string{"alpha", "beta"}}},
+		MainTemplate: serverConfigTemplate,
+		Toxics:       true,
+	}
+
+	plan, err := planInstance(spec, id, newFakePlacement(id), server.VERSION)
+	if err != nil {
+		t.Fatalf("planInstance: %v", err)
+	}
+
+	if !slices.Equal(plan.Clusters, []string{"east"}) {
+		t.Errorf("clusters = %v, want [east]", plan.Clusters)
+	}
+
+	for i, want := range []string{"alpha", "beta"} {
+		n := plan.nodes[i]
+		if n.Name != want || n.Cluster != "east" || n.Dir != fmt.Sprintf("n%d", i+1) {
+			t.Errorf("node %d = %s in %s at %s, want %s in east at n%d", i+1, n.Name, n.Cluster, n.Dir, want, i+1)
+		}
+		if n.TemplateData.ServerName != want {
+			t.Errorf("node %s .ServerName = %q", want, n.TemplateData.ServerName)
+		}
+		if !strings.Contains(string(n.Config), fmt.Sprintf("server_name: %q", want)) {
+			t.Errorf("node %s config does not set its server_name", want)
+		}
+	}
+
+	var proxies []string
+	for _, p := range plan.proxies {
+		proxies = append(proxies, p.Name)
+	}
+	if !slices.Equal(proxies, []string{"route:alpha->beta", "route:beta->alpha"}) {
+		t.Errorf("proxies = %v, want the routes between alpha and beta", proxies)
+	}
+}
+
+// TestPlanNames proves the names the planner gives an instance: an unnamed
+// instance keeps the names of its short id, a server of a named cluster not
+// named itself gets <cluster>-n<i>, an unnamed cluster of a cluster list keeps
+// the default name of its position, and a set holding one name twice, given
+// or default, is refused naming who holds it.
+func TestPlanNames(t *testing.T) {
+	const short = "AbCd1234"
+
+	tests := []struct {
+		name    string
+		spec    instanceSpec
+		want    []namedCluster
+		wantErr string
+	}{
+		{
+			name: "server",
+			spec: instanceSpec{Kind: "server", Servers: 1},
+			want: []namedCluster{{Servers: []string{short + "-n1"}}},
+		},
+		{
+			name: "named server",
+			spec: instanceSpec{Kind: "server", Servers: 1, ServerName: "solo"},
+			want: []namedCluster{{Servers: []string{"solo"}}},
+		},
+		{
+			name: "cluster",
+			spec: instanceSpec{Kind: "cluster", Servers: 2},
+			want: []namedCluster{{Name: "C_" + short, Servers: []string{short + "-n1", short + "-n2"}}},
+		},
+		{
+			name: "named cluster",
+			spec: instanceSpec{Kind: "cluster", ClusterList: []clusterSpec{{Name: "east", Servers: 2}}},
+			want: []namedCluster{{Name: "east", Servers: []string{"east-n1", "east-n2"}}},
+		},
+		{
+			name: "named servers of an unnamed cluster",
+			spec: instanceSpec{Kind: "cluster", ClusterList: []clusterSpec{{Servers: 2, ServerNames: []string{"a", "b"}}}},
+			want: []namedCluster{{Name: "C_" + short, Servers: []string{"a", "b"}}},
+		},
+		{
+			name: "super-cluster",
+			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2},
+			want: []namedCluster{
+				{Name: "SC_" + short + "_1", Servers: []string{short + "-c1_s1", short + "-c1_s2"}},
+				{Name: "SC_" + short + "_2", Servers: []string{short + "-c2_s1", short + "-c2_s2"}},
+			},
+		},
+		{
+			name: "cluster list with an unnamed cluster",
+			spec: instanceSpec{Kind: "super-cluster", ClusterList: []clusterSpec{{Name: "lon", Servers: 2}, {Servers: 1}, {Servers: 2, ServerNames: []string{"x", "y"}}}},
+			want: []namedCluster{
+				{Name: "lon", Servers: []string{"lon-n1", "lon-n2"}},
+				{Name: "SC_" + short + "_2", Servers: []string{short + "-c2_s1"}},
+				{Name: "SC_" + short + "_3", Servers: []string{"x", "y"}},
+			},
+		},
+		{
+			name:    "duplicate cluster name",
+			spec:    instanceSpec{Kind: "super-cluster", ClusterList: []clusterSpec{{Name: "lon", Servers: 2}, {Name: "lon", Servers: 2}}},
+			wantErr: `names must be unique, "lon" names both cluster lon and cluster lon`,
+		},
+		{
+			name:    "duplicate server name",
+			spec:    instanceSpec{Kind: "super-cluster", ClusterList: []clusterSpec{{Name: "lon", Servers: 1, ServerNames: []string{"a"}}, {Name: "nyc", Servers: 2, ServerNames: []string{"b", "a"}}}},
+			wantErr: `names must be unique, "a" names both server 1 of cluster lon and server 2 of cluster nyc`,
+		},
+		{
+			name:    "server named like a cluster",
+			spec:    instanceSpec{Kind: "super-cluster", ClusterList: []clusterSpec{{Name: "lon", Servers: 1}, {Name: "nyc", Servers: 2, ServerNames: []string{"lon", "b"}}}},
+			wantErr: `names must be unique, "lon" names both cluster lon and server 1 of cluster nyc`,
+		},
+		{
+			name:    "given name clashing with a derived one",
+			spec:    instanceSpec{Kind: "super-cluster", ClusterList: []clusterSpec{{Name: "lon", Servers: 2}, {Name: "nyc", Servers: 1, ServerNames: []string{"lon-n2"}}}},
+			wantErr: `names must be unique, "lon-n2" names both server 2 of cluster lon and server 1 of cluster nyc`,
+		},
+		{
+			name:    "server named like its own cluster",
+			spec:    instanceSpec{Kind: "cluster", ClusterList: []clusterSpec{{Name: "east", Servers: 2, ServerNames: []string{"east", "b"}}}},
+			wantErr: `names must be unique, "east" names both cluster east and server 1 of cluster east`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := planNames(tt.spec, short)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("planNames error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("planNames: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("planNames = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPlanInstanceNameClash proves planning an instance whose names clash
+// fails with a planErrNames error, answered with 002 and an Invalid request
+// prefix.
+func TestPlanInstanceNameClash(t *testing.T) {
+	id := nuid.Next()
+	spec := instanceSpec{Kind: "super-cluster", ClusterList: []clusterSpec{{Name: "lon", Servers: 2}, {Name: "nyc", Servers: 2, ServerNames: []string{"lon-n1", "b"}}}, MainTemplate: serverConfigTemplate}
+
+	_, err := planInstance(spec, id, newFakePlacement(id), server.VERSION)
+
+	var perr *planError
+	if !errors.As(err, &perr) || perr.Kind != planErrNames {
+		t.Fatalf("planInstance error = %v, want a planErrNames error", err)
+	}
+	if planErrorCode(err) != "002" {
+		t.Errorf("code = %q, want 002", planErrorCode(err))
+	}
+	want := `Invalid request: names must be unique, "lon-n1" names both server 1 of cluster lon and server 1 of cluster nyc`
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
 	}
 }

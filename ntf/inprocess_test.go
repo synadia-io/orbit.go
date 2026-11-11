@@ -422,7 +422,7 @@ func TestStartRacedByDestroyAnswersNotFound(t *testing.T) {
 	dir := svc.instances[created.ID].RootDir
 	svc.mu.Unlock()
 
-	node := svc.findServerByName(name).backendNode.(*inProcessNode)
+	node := mustFindServer(t, svc, name).backendNode.(*inProcessNode)
 	nodeTorn := func() bool {
 		node.mu.Lock()
 		defer node.mu.Unlock()
