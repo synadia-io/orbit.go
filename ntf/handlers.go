@@ -1325,9 +1325,10 @@ func (s *Service) stopServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
@@ -1378,9 +1379,10 @@ func (s *Service) startServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
@@ -1628,9 +1630,10 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
@@ -1752,9 +1755,10 @@ func (s *Service) reloadServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
@@ -2441,30 +2445,82 @@ func capturingAgentOf(inst *instance) agent.Agent {
 	return inst.agent
 }
 
-// findServerByName scans every instance for a server whose runtime name matches,
-// as its node's status reports it. The servers are read under s.mu and their
-// nodes asked with the lock released; a node that fails its status does not
-// match. Server names are made globally unique by the short-id prefix, so the
-// first match is always the right one.
-func (s *Service) findServerByName(name string) *managedServer {
+// findServerByName finds the server whose runtime name, as its node's status
+// reports it, is name. With instanceID it searches only that instance, and an
+// unknown instance fails with errInstanceNotFound; without one it searches
+// every instance. The servers are read under s.mu and their nodes asked with
+// the lock released; a node that fails its status does not match. No match
+// fails with errServerNotFound, and more than one, in one instance or across
+// several, fails with errServerNameAmbiguous naming the instances holding the
+// name, rather than picking one of them.
+func (s *Service) findServerByName(name string, instanceID string) (*managedServer, error) {
 	s.mu.Lock()
 	var servers []*managedServer
-	for _, inst := range s.instances {
-		servers = append(servers, inst.Servers...)
+	if instanceID != "" {
+		inst, ok := s.instances[instanceID]
+		if !ok {
+			s.mu.Unlock()
+			return nil, errInstanceNotFound
+		}
+		servers = slices.Clone(inst.Servers)
+	} else {
+		for _, inst := range s.instances {
+			servers = append(servers, inst.Servers...)
+		}
 	}
 	s.mu.Unlock()
 
 	ctx := context.Background()
+	var matches []*managedServer
 	for _, ms := range servers {
 		st, err := ms.backendNode.Status(ctx)
 		if err != nil {
 			continue
 		}
 		if st.ServerName == name {
-			return ms
+			matches = append(matches, ms)
 		}
 	}
-	return nil
+
+	switch len(matches) {
+	case 0:
+		return nil, errServerNotFound
+	case 1:
+		return matches[0], nil
+	}
+
+	ids := make([]string, 0, len(matches))
+	for _, ms := range matches {
+		ids = append(ids, ms.instanceID)
+	}
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+
+	if len(ids) == 1 {
+		return nil, fmt.Errorf("%w: %d servers in instance %s are named %q", errServerNameAmbiguous, len(matches), ids[0], name)
+	}
+
+	// instance_id only resolves the name when no instance holds it twice.
+	if len(ids) < len(matches) {
+		return nil, fmt.Errorf("%w: %d servers in instances %s are named %q", errServerNameAmbiguous, len(matches), strings.Join(ids, ", "), name)
+	}
+
+	return nil, fmt.Errorf("%w: %d servers in instances %s are named %q, send instance_id to choose one", errServerNameAmbiguous, len(matches), strings.Join(ids, ", "), name)
+}
+
+// serverLookupRefusal returns the code and message a stop, start, update or
+// reload of a server answers when findServerByName fails with err: 404 for an
+// unknown instance, 023 for a name more than one server reports, and 001 for
+// a name none reports.
+func serverLookupRefusal(err error) (string, string) {
+	switch {
+	case errors.Is(err, errInstanceNotFound):
+		return "404", "Instance not found"
+	case errors.Is(err, errServerNameAmbiguous):
+		return "023", err.Error()
+	default:
+		return "001", "Server not found"
+	}
 }
 
 // reservePort takes a free TCP port for one of inst's servers from the service's

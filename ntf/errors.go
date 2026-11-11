@@ -85,3 +85,14 @@ var errServerName = errors.New("toxics requires each node to set server_name to 
 // because a node's config does not parse, so the checks of its routes and
 // gateways cannot read it.
 var errConfigParse = errors.New("toxics needs a config that parses")
+
+// errServerNotFound is the cause of a stop, start, update or reload of a
+// server refused because no server reports the name, in the instance the
+// request names or, without one, in any instance.
+var errServerNotFound = errors.New("server not found")
+
+// errServerNameAmbiguous is the cause of a stop, start, update or reload of a
+// server refused because more than one server reports the name, in one
+// instance or across several. Clients that know the instance retry with its
+// instance_id on this refusal.
+var errServerNameAmbiguous = errors.New("server name is ambiguous")

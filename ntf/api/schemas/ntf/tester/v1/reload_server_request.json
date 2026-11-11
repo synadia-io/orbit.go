@@ -11,6 +11,10 @@
       "type": "string",
       "minLength": 1,
       "description": "The name of the server to reload"
+    },
+    "instance_id": {
+      "type": "string",
+      "description": "The instance to find the server in, every instance when empty"
     }
   },
   "additionalProperties": false,

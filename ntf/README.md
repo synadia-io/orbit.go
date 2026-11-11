@@ -75,6 +75,15 @@ and `template` replaces the whole body. `snippets` is a `{key: body}` map keyed 
 Server names are prefixed with the instance's short id so the same `n1` / `c1_s1` style names do not collide
 between concurrent instances.
 
+`tester.stop.server`, `tester.start.server`, `tester.update.server` and `tester.reload.server` find their server by
+the `name` it reports, and take an optional `instance_id`. With `instance_id` only that instance is searched, and an
+unknown instance is refused with `404`. Without it every instance is searched. A name no server holds is refused
+with `001`. A name more than one server holds, in one instance or across several, is refused with `023`, whose
+description names the instances holding it, rather than one of them being picked. `023` is stable: a client that
+knows the instance sends the bare name first and retries with `instance_id` on `023`, which works against services
+both with and without `instance_id`. Two servers of one instance can share a name, through a custom `template`
+without `toxics`, and are refused with `023` with `instance_id` too.
+
 ## Trace capture
 
 `Create*` requests accept `trace` to front a server's client port with a capture proxy that stores every
@@ -231,12 +240,12 @@ into one result. The request and reply are the
 | `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`. |
 | `tester.create.cluster`       | Creates a cluster. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`.       |
 | `tester.create.super-cluster` | Creates a super-cluster. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`. |
-| `tester.stop.server`          | Stops a running server by name (names are globally unique).                 |
-| `tester.start.server`         | Starts a previously-stopped server by name.                                 |
+| `tester.stop.server`          | Stops a running server by name. Optional `instance_id`.                     |
+| `tester.start.server`         | Starts a previously-stopped server by name. Optional `instance_id`.         |
 | `tester.stop.instance`        | Stops every server in an instance, keeping config and storage.              |
 | `tester.start.instance`       | Revives a previously-stopped instance.                                      |
-| `tester.update.server`        | Renders a new on-disk config for a server. Optional `snippets`, `template`. |
-| `tester.reload.server`        | Signals a running server to re-read its on-disk config.                     |
+| `tester.update.server`        | Renders a new on-disk config for a server. Optional `instance_id`, `snippets`, `template`. |
+| `tester.reload.server`        | Signals a running server to re-read its on-disk config. Optional `instance_id`. |
 | `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxies of an instance with them, or on one `server`'s. |
 | `tester.shape.clear`          | Removes one shaping set by id, or every set when `set` is empty.            |
 | `tester.shape.report`         | Reports the rule firings of one shaping set, or of every set.               |
