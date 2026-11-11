@@ -82,6 +82,15 @@ type createOptions struct {
 	tls            *api.TLSOptions
 	trace          bool
 	toxics         bool
+
+	// Names, from WithName, WithClusterName, WithServerNames and
+	// WithClusters. kindOpts records which of them were given, so a create
+	// of another kind refuses them.
+	name        string
+	clusterName string
+	serverNames []string
+	clusterList []api.ClusterSpec
+	kindOpts    []kindOpt
 }
 
 // TLSOpt customizes a WithGeneratedTLS call.
@@ -487,7 +496,9 @@ func (c *Client) withServer(t testing.TB, js bool, h func(testing.TB, *nats.Conn
 
 // WithJetStreamCluster creates a cluster with the given server count running
 // JetStream and connects to a random server. Pass CreateOptions to customize
-// the rendered config and the post-create nats.Connect.
+// the rendered config and the post-create nats.Connect, and WithClusterName and
+// WithServerNames to name the cluster and its servers; with WithServerNames the
+// server count may be zero.
 //
 // Usable from benchmarks; see Client for the *testing.B caveat.
 func (c *Client) WithJetStreamCluster(t testing.TB, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
@@ -498,7 +509,9 @@ func (c *Client) WithJetStreamCluster(t testing.TB, servers int, h func(testing.
 
 // WithCluster creates a non JetStream cluster with the given server count and
 // connects to a random server. Pass CreateOptions to customize the rendered
-// config and the post-create nats.Connect.
+// config and the post-create nats.Connect, and WithClusterName and
+// WithServerNames to name the cluster and its servers; with WithServerNames the
+// server count may be zero.
 //
 // Usable from benchmarks; see Client for the *testing.B caveat.
 func (c *Client) WithCluster(t testing.TB, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
@@ -514,8 +527,9 @@ func (c *Client) withCluster(t testing.TB, servers int, js bool, h func(testing.
 	inst := c.CreateCluster(t, servers, js, opts...)
 	defer inst.Destroy(t)
 
-	if len(inst.Servers) != servers {
-		t.Fatalf("expected number of servers to be %d got %d", servers, len(inst.Servers))
+	want := co.clusterSize(servers)
+	if len(inst.Servers) != want {
+		t.Fatalf("expected number of servers to be %d got %d", want, len(inst.Servers))
 	}
 
 	nc, err := nats.Connect(inst.RandomServer().URL, helperConnectOptions(t, co, inst)...)
@@ -552,7 +566,8 @@ func (c *Client) WaitForJetStream(t testing.TB, nc *nats.Conn) {
 // WithJetStreamSuperCluster creates a super-cluster with the given server and
 // cluster counts running JetStream and connects to a random server. Pass
 // CreateOptions to customize the rendered config and the post-create
-// nats.Connect.
+// nats.Connect. To give each cluster its own name, size and server names, pass
+// WithClusters with both counts zero.
 //
 // Usable from benchmarks; see Client for the *testing.B caveat.
 func (c *Client) WithJetStreamSuperCluster(t testing.TB, clusters int, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
@@ -563,7 +578,9 @@ func (c *Client) WithJetStreamSuperCluster(t testing.TB, clusters int, servers i
 
 // WithSuperCluster creates a non JetStream super-cluster with the given server
 // and cluster counts and connects to a random server. Pass CreateOptions to
-// customize the rendered config and the post-create nats.Connect.
+// customize the rendered config and the post-create nats.Connect. To give each
+// cluster its own name, size and server names, pass WithClusters with both
+// counts zero.
 //
 // Usable from benchmarks; see Client for the *testing.B caveat.
 func (c *Client) WithSuperCluster(t testing.TB, clusters int, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
@@ -579,8 +596,9 @@ func (c *Client) withSuperCluster(t testing.TB, clusters int, servers int, js bo
 	inst := c.CreateSuperCluster(t, clusters, servers, js, opts...)
 	defer inst.Destroy(t)
 
-	if len(inst.Servers) != servers*clusters {
-		t.Fatalf("expected number of servers to be %d got %d", servers*clusters, len(inst.Servers))
+	want := co.superClusterSize(clusters, servers)
+	if len(inst.Servers) != want {
+		t.Fatalf("expected number of servers to be %d got %d", want, len(inst.Servers))
 	}
 
 	nc, err := nats.Connect(inst.RandomServer().URL, helperConnectOptions(t, co, inst)...)
@@ -596,7 +614,8 @@ func (c *Client) withSuperCluster(t testing.TB, clusters int, servers int, js bo
 	h(t, nc, inst)
 }
 
-// CreateSuperCluster creates a super cluster
+// CreateSuperCluster creates a super cluster. See Manager.CreateSuperCluster for
+// WithClusters.
 func (c *Client) CreateSuperCluster(t testing.TB, clusters int, servers int, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
@@ -607,7 +626,8 @@ func (c *Client) CreateSuperCluster(t testing.TB, clusters int, servers int, js 
 	return inst
 }
 
-// CreateCluster creates a cluster
+// CreateCluster creates a cluster. See Manager.CreateCluster for
+// WithClusterName and WithServerNames.
 func (c *Client) CreateCluster(t testing.TB, servers int, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
@@ -618,7 +638,7 @@ func (c *Client) CreateCluster(t testing.TB, servers int, js bool, opts ...Creat
 	return inst
 }
 
-// CreateServer creates a server
+// CreateServer creates a server. See Manager.CreateServer for WithName.
 func (c *Client) CreateServer(t testing.TB, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
@@ -694,11 +714,15 @@ func serverName(server *api.ManagedServer) string {
 	return server.Name
 }
 
-// StopServer stops a single server within this instance.
+// StopServer stops a single server within this instance. It uses
+// Manager.StopInstanceServer, so it reaches this instance's server even when
+// another instance holds a server of the same name. server must be one of
+// this instance's servers: a server of another instance, whose name this
+// instance does not hold, fails the test on a service that accepts instance IDs.
 func (i *Instance) StopServer(t testing.TB, server *api.ManagedServer) *api.StopServerResponse {
 	t.Helper()
 
-	resp, err := i.m.StopServer(context.Background(), serverName(server))
+	resp, err := i.m.StopInstanceServer(context.Background(), i.ID, serverName(server))
 	if err != nil {
 		t.Fatalf("could not stop server: %v", err)
 	}
@@ -706,11 +730,12 @@ func (i *Instance) StopServer(t testing.TB, server *api.ManagedServer) *api.Stop
 }
 
 // StartServer starts a single server within this instance that was previously
-// stopped.
+// stopped. Like StopServer, it reaches this instance's server even when another
+// instance holds a server of the same name.
 func (i *Instance) StartServer(t testing.TB, server *api.ManagedServer) *api.StartServerResponse {
 	t.Helper()
 
-	resp, err := i.m.StartServer(context.Background(), serverName(server))
+	resp, err := i.m.StartInstanceServer(context.Background(), i.ID, serverName(server))
 	if err != nil {
 		t.Fatalf("could not start server: %v", err)
 	}
@@ -724,11 +749,12 @@ func (i *Instance) StartServer(t testing.TB, server *api.ManagedServer) *api.Sta
 //
 // The set of port-bearing snippets present at create time (websocket, mqtt,
 // leafnode) is fixed for the server's lifetime; an update that adds or drops
-// one is rejected.
+// one is rejected. Like StopServer, it reaches this instance's server even when
+// another instance holds a server of the same name.
 func (i *Instance) UpdateServer(t testing.TB, server *api.ManagedServer, opts ...UpdateOption) *api.UpdateServerResponse {
 	t.Helper()
 
-	resp, err := i.m.UpdateServer(context.Background(), serverName(server), opts...)
+	resp, err := i.m.UpdateInstanceServer(context.Background(), i.ID, serverName(server), opts...)
 	if err != nil {
 		t.Fatalf("could not update server: %v", err)
 	}
@@ -737,11 +763,12 @@ func (i *Instance) UpdateServer(t testing.TB, server *api.ManagedServer, opts ..
 
 // ReloadServer signals the running server to re-read its on-disk config
 // (nats-server Reload()). Pair it with a prior UpdateServer to apply a staged
-// change without restarting.
+// change without restarting. Like StopServer, it reaches this instance's server
+// even when another instance holds a server of the same name.
 func (i *Instance) ReloadServer(t testing.TB, server *api.ManagedServer) *api.ReloadServerResponse {
 	t.Helper()
 
-	resp, err := i.m.ReloadServer(context.Background(), serverName(server))
+	resp, err := i.m.ReloadInstanceServer(context.Background(), i.ID, serverName(server))
 	if err != nil {
 		t.Fatalf("could not reload server: %v", err)
 	}

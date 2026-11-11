@@ -26,6 +26,18 @@ var (
 	// instance with the requested ID.
 	ErrInstanceNotFound = errors.New("instance not found")
 
+	// ErrServerNameAmbiguous is returned when the management service refuses a
+	// stop, start, update or reload because more than one server holds the
+	// name, with error code 023. It is returned wrapped together with
+	// ErrService.
+	ErrServerNameAmbiguous = errors.New("server name is held by more than one server")
+
+	// ErrInvalidCreateOption is returned, before any request is sent, when a
+	// create option does not apply to the kind of instance being created,
+	// WithServerNames or WithClusters is given empty, or WithClusters is given
+	// together with cluster and server counts.
+	ErrInvalidCreateOption = errors.New("invalid create option")
+
 	// ErrTraceStore is returned when the TRACES object store cannot be opened,
 	// listed, or read.
 	ErrTraceStore = errors.New("could not access the TRACES object store")
