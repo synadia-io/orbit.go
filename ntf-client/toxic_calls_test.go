@@ -117,7 +117,7 @@ func TestUnplug(t *testing.T) {
 
 // TestManagerToxicRefusals pins that the Manager returns the service's
 // refusals as ErrService: a toxic on an instance created without toxics, and an
-// attribute the agent does not accept, named in the error.
+// attribute the service does not accept, named in the error.
 func TestManagerToxicRefusals(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -145,9 +145,11 @@ func TestManagerToxicRefusals(t *testing.T) {
 	}
 	defer proxied.Destroy(t)
 
+	// The agent names the toxic and the attribute; a service that checks the
+	// request against its schema first names the attribute's path instead.
 	_, err = m.AddToxic(ctx, proxied.ID, api.Toxic{Name: "x", Type: api.ToxicLatency, Attributes: map[string]any{"latency": -1}})
-	if !errors.Is(err, ErrService) || !strings.Contains(err.Error(), `toxic "x": latency attribute "latency"`) {
-		t.Errorf("toxic with a negative latency: err = %v, want ErrService naming the toxic and the attribute", err)
+	if !errors.Is(err, ErrService) || !(strings.Contains(err.Error(), `toxic "x": latency attribute "latency"`) || strings.Contains(err.Error(), "toxic.attributes.latency")) {
+		t.Errorf("toxic with a negative latency: err = %v, want ErrService naming the attribute", err)
 	}
 
 	_, err = m.RemoveToxic(ctx, proxied.ID, "nope")

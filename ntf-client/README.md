@@ -139,7 +139,8 @@ Every method takes a `testing.TB` rather than a `*testing.T`, so the same helper
 Outside a test, use `ntf.Connect`, which returns a `*ntf.Manager`. Its methods take a `context.Context` and return an
 error instead of failing a test; the `testing.TB` methods on `Client` and `Instance` are thin wrappers over them. A
 context without a deadline gets the same default timeout the wrapper uses. Instance operations take the instance ID,
-and server operations the server name:
+and server operations the server name, or the instance ID and the server name (see
+[Naming servers and clusters](#naming-servers-and-clusters)):
 
 ```go
 m, err := ntf.Connect(ctx, "nats://localhost:4222")
@@ -156,7 +157,8 @@ defer m.Destroy(ctx, inst.ID)
 ```
 
 Errors wrap the sentinels in `errors.go`, such as `ntf.ErrService` when the service refuses a request, so check them
-with `errors.Is`.
+with `errors.Is`. A refusal with code `404` also wraps `ntf.ErrInstanceNotFound`, and one with code `023` wraps
+`ntf.ErrServerNameAmbiguous`.
 
 The request and response types, including `ManagedServer` and the shaping types, come from
 `github.com/synadia-io/orbit.go/ntf/api`, the package the service itself serializes with.
@@ -193,6 +195,11 @@ The full family, each available with and without JetStream:
 | `WithCluster` / `WithJetStreamCluster`           | a cluster (`servers >= 2`)                          |
 | `WithSuperCluster` / `WithJetStreamSuperCluster` | a super-cluster (`clusters`, `servers` both `>= 2`) |
 
+A cluster's `servers` may be `0` when `WithServerNames` gives the names, and a super-cluster's counts are both `0` when
+`WithClusters` lists the clusters; see [Naming servers and clusters](#naming-servers-and-clusters). The helpers fail
+the test when the instance does not hold the number of servers asked for, counted from those options when they give
+it.
+
 For more control, call `client.CreateServer` / `CreateCluster` / `CreateSuperCluster` directly and clean up with
 `defer inst.Destroy(t)`; you then dial the servers yourself (`inst.RandomServer().URL`, or iterate `inst.Servers`):
 
@@ -208,12 +215,73 @@ defer nc.Close()
 ```
 
 All of these accept `CreateOption` values: typed snippet helpers (`WithAccounts`, `WithWebSocket`, …) to customize the
-rendered config, and `WithConnectOptions(...nats.Option)` to apply auth, TLS, or any client-side option to the
-connection the helper opens.
+rendered config, `WithConnectOptions(...nats.Option)` to apply auth, TLS, or any client-side option to the
+connection the helper opens, and the naming options below.
+
+### Naming servers and clusters
+
+By default every name carries the instance's short ID, the last 8 characters of its UUID: a server is `<short>-n1`, a
+cluster `C_<short>` with servers `<short>-n<i>`, and a super-cluster's clusters `SC_<short>_<c>` with servers
+`<short>-c<c>_s<i>`. These create options give names, and sizes per cluster, of your own. They need a service with
+custom names (`ntf` from `125ec5a`, or the `ntf-server` nightly images built after custom names were merged); older
+services ignore or refuse them.
+
+| Option                       | Applies to           | Gives                                                                  |
+|------------------------------|----------------------|------------------------------------------------------------------------|
+| `WithName(name)`             | `CreateServer`       | the server's name                                                      |
+| `WithClusterName(name)`      | `CreateCluster`      | the cluster's name; its servers are `<cluster>-n<i>` unless named      |
+| `WithServerNames(names...)`  | `CreateCluster`      | the servers' names, in order; the `servers` count may then be `0`      |
+| `WithClusters(clusters...)`  | `CreateSuperCluster` | each cluster's name, size and server names, in place of the counts     |
+
+```go
+// A cluster named east of servers e1, e2 and e3.
+client.WithJetStreamCluster(t, 0, func(t testing.TB, nc *nats.Conn, inst *ntf.Instance) {
+    // ...
+}, ntf.WithClusterName("east"), ntf.WithServerNames("e1", "e2", "e3"))
+
+// A super-cluster of east (one server, east-n1), west (w1 and w2) and a cluster of two with the default names.
+client.WithSuperCluster(t, 0, 0, func(t testing.TB, nc *nats.Conn, inst *ntf.Instance) {
+    // ...
+}, ntf.WithClusters(ntf.SizedCluster("east", 1), ntf.ClusterWithServerNames("west", "w1", "w2"), ntf.SizedCluster("", 2)))
+```
+
+`WithClusters` takes `api.ClusterSpec` entries of `Name`, `Servers` and `ServerNames`; `ntf.SizedCluster(name, servers)`
+and `ntf.ClusterWithServerNames(name, serverNames...)` build the two common shapes, and an empty name keeps the default name of
+the cluster's position. The service takes 2 to 10 clusters of 1 to 20 servers each, and a cluster of 2 to 20 servers.
+With `WithClusters`, the `clusters` and `servers` arguments must both be `0`, and the request carries the list alone. A
+naming option given to a create of another kind, `WithServerNames` or `WithClusters` given empty, or `WithClusters`
+given with counts, returns
+`ntf.ErrInvalidCreateOption` before any request is sent (the `testing.TB` methods fail the test with it). A later use
+of the same option replaces an earlier one.
+
+A name starts with a letter and holds only letters, digits, `_` and `-`, at most 32 characters; a cluster name is at
+most 28. Every name is unique within its instance, and the service refuses a clash, or a name that breaks the rule.
+
+Names are not unique across instances, so two instances may each hold a server named `a`. The service then refuses a
+stop, start, update or reload of the bare name `a` with code `023` (`ntf.ErrServerNameAmbiguous`), naming the
+instances that hold it. Say which instance's server is meant with the per-instance `Manager` methods:
+
+```go
+m.StopInstanceServer(ctx, instanceID, name)
+m.StartInstanceServer(ctx, instanceID, name)
+m.UpdateInstanceServer(ctx, instanceID, name, opts...)
+m.ReloadInstanceServer(ctx, instanceID, name)
+```
+
+They send the name with the instance ID, so only that instance is searched: an unknown instance returns
+`ntf.ErrInstanceNotFound`, and a name the instance does not hold returns `ntf.ErrService`. Older services from before
+instance IDs either ignore the ID or refuse it with `001`; on that refusal the request is sent again with the bare
+name, and the `Manager` sends the bare name from then on. Those services find the name among all their servers, where
+names were unique across instances, so `name` should be one of the instance's own servers. The `Instance` helpers
+(`inst.StopServer`, `StartServer`, `UpdateServer`, `ReloadServer`) go through these methods, so they reach their own
+server whatever other instances are named; passing them another instance's server fails. The plain
+`m.StopServer(ctx, name)` and its siblings send the bare name only, and return `ntf.ErrServerNameAmbiguous` for a
+name more than one server holds.
 
 ### Parallel tests
 
-Because each instance has its own UUID, storage dir, and auto-generated cluster name, `t.Parallel()` is safe:
+Because each instance has its own UUID, storage dir, and auto-generated cluster name, `t.Parallel()` is safe, and it
+stays safe with names of your own, since the `Instance` helpers say which instance's server they mean:
 
 ```go
 for i := range 3 {
@@ -392,8 +460,8 @@ adds or removes one is rejected; changing the body of an existing one is fine.
 
 Beyond `Destroy`, an instance exposes per-server and whole-instance operations:
 
-- `inst.StopServer(t, srv)` / `inst.StartServer(t, srv)` — stop or revive one node by name (names are globally
-  unique), useful for failure-injection tests.
+- `inst.StopServer(t, srv)` / `inst.StartServer(t, srv)` — stop or revive one node of this instance by name, even
+  when another instance holds a server of the same name, useful for failure-injection tests.
 - `inst.Status(t)` — current status of just this instance; `client.Status(t)` and `client.List(t)` report every
   instance.
 - `client.Reset(t)` — tear down **every** instance (a CI safety net between stages); prefer `Destroy` for normal
@@ -546,7 +614,7 @@ environment. Cluster fields are zero on a single server; super-cluster fields ar
 
 | Field               | Type                | Notes                                                                              |
 |---------------------|---------------------|------------------------------------------------------------------------------------|
-| `.ServerName`       | string              | globally unique; `<short>-n<i>` or `<short>-c<c>_s<i>`                             |
+| `.ServerName`       | string              | unique within the instance; given, or `<short>-n<i>`, `<cluster>-n<i>` or `<short>-c<c>_s<i>` |
 | `.ShortID`          | string              | 8-char tail of the instance UUID                                                   |
 | `.InstanceID`       | string              | full instance UUID                                                                 |
 | `.ServerIndex`      | int                 | 1-based index within the cluster                                                   |
@@ -558,6 +626,7 @@ environment. Cluster fields are zero on a single server; super-cluster fields ar
 | `.JetStream`        | bool                | mirrors the `jetstream` request field                                              |
 | `.ClusterName`      | string              | empty for single-server instances                                                  |
 | `.ClusterPort`      | int                 | cluster route listener port                                                        |
+| `.ClusterSize`      | int                 | number of servers in this server's own cluster; differs between clusters of a super-cluster |
 | `.Routes`           | []string            | `host:port` strings of every cluster peer                                          |
 | `.Gateways`         | map[string][]string | cluster name → gateway URLs (super-cluster only)                                   |
 | `.Ports`            | map[string]int      | listener ports keyed by name (auto-populated for WS/MQTT/LeafNode)                 |
@@ -585,13 +654,13 @@ debugging):
 
 | Subject                       | Description                                                               |
 |-------------------------------|---------------------------------------------------------------------------|
-| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `tls`, `trace`, `toxics`. |
-| `tester.create.cluster`       | Creates a cluster.                                                        |
-| `tester.create.super-cluster` | Creates a super-cluster.                                                  |
-| `tester.stop.server`          | Stops a running server by name.                                           |
-| `tester.start.server`         | Starts a previously-stopped server by name.                               |
-| `tester.update.server`        | Renders a new on-disk config for a server.                                |
-| `tester.reload.server`        | Signals a running server to re-read its on-disk config.                   |
+| `tester.create.server`        | Creates a single server. Optional `name`, `snippets`, `template`, `tls`, `trace`, `toxics`. |
+| `tester.create.cluster`       | Creates a cluster. Optional `cluster_name` and `server_names`.            |
+| `tester.create.super-cluster` | Creates a super-cluster of `clusters` × `servers`, or from a `cluster_list`. |
+| `tester.stop.server`          | Stops a running server by name; optional `instance_id`.                   |
+| `tester.start.server`         | Starts a previously-stopped server by name; optional `instance_id`.       |
+| `tester.update.server`        | Renders a new on-disk config for a server; optional `instance_id`.        |
+| `tester.reload.server`        | Signals a running server to re-read its on-disk config; optional `instance_id`. |
 | `tester.status`               | Status of all instances; optional `instance_id` filter.                   |
 | `tester.list`                 | Lightweight summary of every instance.                                    |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                            |
