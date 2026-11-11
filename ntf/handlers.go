@@ -595,6 +595,14 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 
 	s.log.Debug("Create server", "request", creq)
 
+	if creq.Name != "" {
+		err := checkGivenServerName("name", creq.Name)
+		if err != nil {
+			req.Error("002", "Invalid request: "+err.Error(), nil)
+			return
+		}
+	}
+
 	if err := validateSnippetKeys(creq.Snippets); err != nil {
 		req.Error("007", err.Error(), nil)
 		return
@@ -647,6 +655,7 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 	spec := instanceSpec{
 		Kind:          "server",
 		Servers:       1,
+		ServerName:    creq.Name,
 		JetStream:     creq.JetStream,
 		Description:   creq.Description,
 		Snippets:      creq.Snippets,
@@ -1131,13 +1140,9 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		return
 	}
 
-	if creq.Servers < 2 {
-		req.Error("002", "Invalid request: servers should be at least 2", nil)
-		return
-	}
-
-	if creq.Servers > maxServersPerCluster {
-		req.Error("002", fmt.Sprintf("Invalid request: servers should be at most %d", maxServersPerCluster), nil)
+	clusters, refusal := clusterRequestClusters(creq)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
 		return
 	}
 
@@ -1191,7 +1196,8 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 
 	spec := instanceSpec{
 		Kind:          "cluster",
-		Servers:       creq.Servers,
+		Servers:       clusters[0].Servers,
+		ClusterList:   clusters,
 		JetStream:     creq.JetStream,
 		Description:   creq.Description,
 		Snippets:      creq.Snippets,
@@ -1219,23 +1225,9 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		return
 	}
 
-	if creq.Servers < 2 {
-		req.Error("002", "Invalid request: servers should be at least 2", nil)
-		return
-	}
-
-	if creq.Servers > maxServersPerCluster {
-		req.Error("002", fmt.Sprintf("Invalid request: servers should be at most %d", maxServersPerCluster), nil)
-		return
-	}
-
-	if creq.Clusters < 2 {
-		req.Error("004", "Invalid request: clusters should be at least 2", nil)
-		return
-	}
-
-	if creq.Clusters > maxClusters {
-		req.Error("004", fmt.Sprintf("Invalid request: clusters should be at most %d", maxClusters), nil)
+	clusters, refusal := superClusterRequestClusters(creq)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
 		return
 	}
 
@@ -1291,6 +1283,7 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		Kind:          "super-cluster",
 		Servers:       creq.Servers,
 		Clusters:      creq.Clusters,
+		ClusterList:   clusters,
 		JetStream:     creq.JetStream,
 		Description:   creq.Description,
 		Snippets:      creq.Snippets,
@@ -2717,7 +2710,9 @@ type templateData struct {
 	ClusterIndex int
 	ClusterPort  int
 	Routes       []string
-	ClusterSize  int
+	// ClusterSize is the number of servers in this node's own cluster,
+	// which can differ between the clusters of a super-cluster.
+	ClusterSize int
 
 	// Super-cluster.
 	Clusters    []string

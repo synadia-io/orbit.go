@@ -53,6 +53,10 @@ const (
 	// planErrTemplate means the main template failed to parse or render.
 	// Answered with 002.
 	planErrTemplate
+
+	// planErrNames means two of the instance's names, given or default, are
+	// the same. Answered with 002.
+	planErrNames
 )
 
 // errNoFreePort is the cause of a planErrPort failure for a client, cluster or
@@ -81,6 +85,8 @@ func (e *planError) Error() string {
 		return "Snippet failure: " + e.Err.Error()
 	case planErrTemplate:
 		return "Template parse failure: " + e.Err.Error()
+	case planErrNames:
+		return "Invalid request: " + e.Err.Error()
 	default:
 		return e.Err.Error()
 	}
@@ -115,19 +121,31 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 		return nil, &planError{Kind: kind, Err: err}
 	}
 
+	switch spec.Kind {
+	case "server", "cluster", "super-cluster":
+	default:
+		return nil, fmt.Errorf("unknown instance kind %q", spec.Kind)
+	}
+
+	// The names of the clusters and nodes, checked before anything is made.
+	clusters, err := planNames(spec, short)
+	if err != nil {
+		return fail(planErrNames, err)
+	}
+
 	// 1. The TLS material, shared by every node.
 	var tlsFiles *tlsInstanceFiles
 	if spec.TLS {
-		var err error
 		tlsFiles, err = planTLS(plan, spec, place.InstanceDir())
 		if err != nil {
 			return fail(planErrTLSSetup, err)
 		}
 	}
 
-	// 2. The clusters and nodes, in start order. Each node's Dir is its
-	// directory relative to the instance directory, the prefix of its files'
-	// paths.
+	// 2. The clusters and nodes, in start order, named as planNames names
+	// them. Each node's Dir is its directory relative to the instance
+	// directory, the prefix of its files' paths, which follows its position
+	// and never its name.
 	addNode := func(n backend.NodePlan) {
 		n.Version = version
 		wrapped := &nodePlan{NodePlan: n}
@@ -137,33 +155,27 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 
 	switch spec.Kind {
 	case "server":
-		addNode(backend.NodePlan{Name: short + "-n1", Dir: "n1", ServerIndex: 1})
+		addNode(backend.NodePlan{Name: clusters[0].Servers[0], Dir: "n1", ServerIndex: 1})
 
 	case "cluster":
-		cluster := "C_" + short
-		plan.Clusters = []string{cluster}
-		for i := 1; i <= spec.Servers; i++ {
-			dir := fmt.Sprintf("n%d", i)
-			addNode(backend.NodePlan{Name: short + "-" + dir, Dir: dir, ServerIndex: i, Cluster: cluster})
+		cluster := clusters[0]
+		plan.Clusters = []string{cluster.Name}
+		for i, name := range cluster.Servers {
+			addNode(backend.NodePlan{Name: name, Dir: fmt.Sprintf("n%d", i+1), ServerIndex: i + 1, Cluster: cluster.Name})
 		}
 
 	case "super-cluster":
-		for c := 1; c <= spec.Clusters; c++ {
-			cluster := fmt.Sprintf("SC_%s_%d", short, c)
-			plan.Clusters = append(plan.Clusters, cluster)
-			for i := 1; i <= spec.Servers; i++ {
-				dir := fmt.Sprintf("c%d_s%d", c, i)
-				addNode(backend.NodePlan{Name: short + "-" + dir, Dir: dir, ServerIndex: i, ClusterIndex: c, Cluster: cluster})
+		for c, cluster := range clusters {
+			plan.Clusters = append(plan.Clusters, cluster.Name)
+			for i, name := range cluster.Servers {
+				addNode(backend.NodePlan{Name: name, Dir: fmt.Sprintf("c%d_s%d", c+1, i+1), ServerIndex: i + 1, ClusterIndex: c + 1, Cluster: cluster.Name})
 			}
 		}
-
-	default:
-		return nil, fmt.Errorf("unknown instance kind %q", spec.Kind)
 	}
 
 	// 3. Every listener address, in the order the create handlers have always
 	// reserved them.
-	err := reserveListeners(plan, spec, place)
+	err = reserveListeners(plan, spec, place)
 	if err != nil {
 		return fail(planErrPort, err)
 	}
@@ -580,7 +592,7 @@ func planTemplateData(plan *instancePlan, n *nodePlan, spec instanceSpec, dir, s
 		td.ClusterIndex = n.ClusterIndex
 		td.ClusterPort = listenerOf(n, "cluster").Endpoint.Port
 		td.Routes = dialAddresses(plan, n, nodesOf(plan, n.Cluster), "cluster", "route")
-		td.ClusterSize = spec.Servers
+		td.ClusterSize = len(nodesOf(plan, n.Cluster))
 	}
 
 	if plan.Kind == "super-cluster" {

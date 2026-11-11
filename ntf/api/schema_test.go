@@ -827,3 +827,84 @@ func TestSchemaUnknownType(t *testing.T) {
 		t.Errorf("got %v, want ErrUnknownType", err)
 	}
 }
+
+// TestCreateRequestNamesSchema proves the create schemas accept the name
+// fields and a cluster list in place of the counts, and refuse a name that
+// starts with other than a letter, holds other characters, or is too long:
+// 32 characters for a server and 28 for a cluster.
+func TestCreateRequestNamesSchema(t *testing.T) {
+	v := newSchemaValidator(t)
+
+	long := func(n int) string { return strings.Repeat("a", n) }
+
+	tests := []struct {
+		name  string
+		typ   string
+		req   any
+		valid bool
+	}{
+		{"named server", TypeCreateServerRequest, CreateServerRequest{Name: "solo"}, true},
+		{"server name of 32", TypeCreateServerRequest, CreateServerRequest{Name: long(32)}, true},
+		{"server name of 33", TypeCreateServerRequest, CreateServerRequest{Name: long(33)}, false},
+		{"server name starting with a digit", TypeCreateServerRequest, CreateServerRequest{Name: "1a"}, false},
+		{"server name starting with -", TypeCreateServerRequest, CreateServerRequest{Name: "-a"}, false},
+		{"server name with a dot", TypeCreateServerRequest, CreateServerRequest{Name: "a.b"}, false},
+		{"cluster of counts", TypeCreateClusterRequest, CreateClusterRequest{Servers: 3}, true},
+		{"cluster of names", TypeCreateClusterRequest, CreateClusterRequest{ClusterName: "east", ServerNames: []string{"a_1", "B-2"}}, true},
+		{"cluster without a size", TypeCreateClusterRequest, CreateClusterRequest{ClusterName: "east"}, true},
+		{"cluster name of 28", TypeCreateClusterRequest, CreateClusterRequest{Servers: 2, ClusterName: long(28)}, true},
+		{"cluster name of 29", TypeCreateClusterRequest, CreateClusterRequest{Servers: 2, ClusterName: long(29)}, false},
+		{"cluster of one name", TypeCreateClusterRequest, CreateClusterRequest{ServerNames: []string{"a"}}, false},
+		{"cluster server name of 33", TypeCreateClusterRequest, CreateClusterRequest{ServerNames: []string{"a", long(33)}}, false},
+		{"super-cluster of counts", TypeCreateSuperClusterRequest, CreateSuperClusterRequest{Servers: 2, Clusters: 2}, true},
+		{"super-cluster of a list", TypeCreateSuperClusterRequest, CreateSuperClusterRequest{ClusterList: []ClusterSpec{{Name: "lon", Servers: 5}, {Name: "nyc", ServerNames: []string{"n1"}}, {Servers: 1}}}, true},
+		{"super-cluster of one cluster", TypeCreateSuperClusterRequest, CreateSuperClusterRequest{ClusterList: []ClusterSpec{{Servers: 2}}}, false},
+		{"listed cluster name starting with a digit", TypeCreateSuperClusterRequest, CreateSuperClusterRequest{ClusterList: []ClusterSpec{{Name: "1lon", Servers: 2}, {Servers: 2}}}, false},
+		{"listed cluster name of 29", TypeCreateSuperClusterRequest, CreateSuperClusterRequest{ClusterList: []ClusterSpec{{Name: long(29), Servers: 2}, {Servers: 2}}}, false},
+		{"listed cluster of 21", TypeCreateSuperClusterRequest, CreateSuperClusterRequest{ClusterList: []ClusterSpec{{Servers: 21}, {Servers: 2}}}, false},
+		{"listed server name of 33", TypeCreateSuperClusterRequest, CreateSuperClusterRequest{ClusterList: []ClusterSpec{{ServerNames: []string{long(33)}}, {Servers: 2}}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := v.validate(tt.req, tt.typ)
+			if tt.valid && err != nil {
+				t.Errorf("refused: %v", err)
+			}
+			if !tt.valid && err == nil {
+				t.Error("accepted, want a refusal")
+			}
+		})
+	}
+}
+
+// TestCreateRequestsWithoutNamesSendNoNewFields proves a create that uses
+// none of the name fields or the cluster list sends none of them, nor any
+// other field a service from before them would refuse, so it still validates
+// against that service's schemas, which refuse fields they do not declare.
+func TestCreateRequestsWithoutNamesSendNoNewFields(t *testing.T) {
+	tests := []struct {
+		req  any
+		want []string
+	}{
+		{CreateServerRequest{JetStream: true}, []string{"jetstream"}},
+		{CreateClusterRequest{Servers: 3}, []string{"jetstream", "servers"}},
+		{CreateSuperClusterRequest{Servers: 2, Clusters: 3}, []string{"clusters", "jetstream", "servers"}},
+	}
+
+	for _, tt := range tests {
+		data, err := json.Marshal(tt.req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		err = json.Unmarshal(data, &fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := slices.Sorted(maps.Keys(fields))
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("%T sends %v, want %v", tt.req, got, tt.want)
+		}
+	}
+}

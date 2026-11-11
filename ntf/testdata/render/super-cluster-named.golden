@@ -1,0 +1,562 @@
+=== c1_s1/config.cfg
+
+include "snippets/top.conf"
+server_name: "lon-n1"
+port: <PORT1>
+
+client_advertise: "localhost:<PORT2>"
+
+
+log_file: "<INSTANCE_DIR>/c1_s1/server.log"
+
+
+
+
+
+cluster {
+	name: "lon"
+	port: <PORT3>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://localhost:<PORT3>"
+
+"nats://127.0.0.1:<PORT5>"
+
+"nats://127.0.0.1:<PORT6>"
+
+	]
+}
+
+
+
+gateway {
+	name: "lon"
+	port: <PORT7>
+	advertise: "127.0.0.1:<PORT4>"
+	gateways: [
+
+		{ name: "SC_<SHORT>_3", urls: [
+		"nats://127.0.0.1:<PORT8>"
+]}
+
+		{ name: "lon", urls: [
+		"nats://localhost:<PORT7>"
+
+		"nats://localhost:<PORT9>"
+
+		"nats://localhost:<PORT10>"
+]}
+
+		{ name: "nyc", urls: [
+		"nats://127.0.0.1:<PORT11>"
+
+		"nats://127.0.0.1:<PORT12>"
+]}
+
+	]
+}
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== c1_s1/snippets/top.conf
+# lon-n1 is server 1 of 3 in lon, cluster 1 of [lon nyc SC_<SHORT>_3]
+
+=== c1_s2/config.cfg
+
+include "snippets/top.conf"
+server_name: "lon-n2"
+port: <PORT13>
+
+client_advertise: "localhost:<PORT14>"
+
+
+log_file: "<INSTANCE_DIR>/c1_s2/server.log"
+
+
+
+
+
+cluster {
+	name: "lon"
+	port: <PORT15>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://127.0.0.1:<PORT16>"
+
+"nats://localhost:<PORT15>"
+
+"nats://127.0.0.1:<PORT17>"
+
+	]
+}
+
+
+
+gateway {
+	name: "lon"
+	port: <PORT9>
+	advertise: "127.0.0.1:<PORT4>"
+	gateways: [
+
+		{ name: "SC_<SHORT>_3", urls: [
+		"nats://127.0.0.1:<PORT8>"
+]}
+
+		{ name: "lon", urls: [
+		"nats://localhost:<PORT7>"
+
+		"nats://localhost:<PORT9>"
+
+		"nats://localhost:<PORT10>"
+]}
+
+		{ name: "nyc", urls: [
+		"nats://127.0.0.1:<PORT11>"
+
+		"nats://127.0.0.1:<PORT12>"
+]}
+
+	]
+}
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== c1_s2/snippets/top.conf
+# lon-n2 is server 2 of 3 in lon, cluster 1 of [lon nyc SC_<SHORT>_3]
+
+=== c1_s3/config.cfg
+
+include "snippets/top.conf"
+server_name: "lon-n3"
+port: <PORT18>
+
+client_advertise: "localhost:<PORT19>"
+
+
+log_file: "<INSTANCE_DIR>/c1_s3/server.log"
+
+
+
+
+
+cluster {
+	name: "lon"
+	port: <PORT20>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://127.0.0.1:<PORT21>"
+
+"nats://127.0.0.1:<PORT22>"
+
+"nats://localhost:<PORT20>"
+
+	]
+}
+
+
+
+gateway {
+	name: "lon"
+	port: <PORT10>
+	advertise: "127.0.0.1:<PORT4>"
+	gateways: [
+
+		{ name: "SC_<SHORT>_3", urls: [
+		"nats://127.0.0.1:<PORT8>"
+]}
+
+		{ name: "lon", urls: [
+		"nats://localhost:<PORT7>"
+
+		"nats://localhost:<PORT9>"
+
+		"nats://localhost:<PORT10>"
+]}
+
+		{ name: "nyc", urls: [
+		"nats://127.0.0.1:<PORT11>"
+
+		"nats://127.0.0.1:<PORT12>"
+]}
+
+	]
+}
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== c1_s3/snippets/top.conf
+# lon-n3 is server 3 of 3 in lon, cluster 1 of [lon nyc SC_<SHORT>_3]
+
+=== c2_s1/config.cfg
+
+include "snippets/top.conf"
+server_name: "ny-a"
+port: <PORT23>
+
+client_advertise: "localhost:<PORT24>"
+
+
+log_file: "<INSTANCE_DIR>/c2_s1/server.log"
+
+
+
+
+
+cluster {
+	name: "nyc"
+	port: <PORT25>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://localhost:<PORT25>"
+
+"nats://127.0.0.1:<PORT26>"
+
+	]
+}
+
+
+
+gateway {
+	name: "nyc"
+	port: <PORT27>
+	advertise: "127.0.0.1:<PORT4>"
+	gateways: [
+
+		{ name: "SC_<SHORT>_3", urls: [
+		"nats://127.0.0.1:<PORT28>"
+]}
+
+		{ name: "lon", urls: [
+		"nats://127.0.0.1:<PORT29>"
+
+		"nats://127.0.0.1:<PORT30>"
+
+		"nats://127.0.0.1:<PORT31>"
+]}
+
+		{ name: "nyc", urls: [
+		"nats://localhost:<PORT27>"
+
+		"nats://localhost:<PORT32>"
+]}
+
+	]
+}
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== c2_s1/snippets/top.conf
+# ny-a is server 1 of 2 in nyc, cluster 2 of [lon nyc SC_<SHORT>_3]
+
+=== c2_s2/config.cfg
+
+include "snippets/top.conf"
+server_name: "ny-b"
+port: <PORT33>
+
+client_advertise: "localhost:<PORT34>"
+
+
+log_file: "<INSTANCE_DIR>/c2_s2/server.log"
+
+
+
+
+
+cluster {
+	name: "nyc"
+	port: <PORT35>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://127.0.0.1:<PORT36>"
+
+"nats://localhost:<PORT35>"
+
+	]
+}
+
+
+
+gateway {
+	name: "nyc"
+	port: <PORT32>
+	advertise: "127.0.0.1:<PORT4>"
+	gateways: [
+
+		{ name: "SC_<SHORT>_3", urls: [
+		"nats://127.0.0.1:<PORT28>"
+]}
+
+		{ name: "lon", urls: [
+		"nats://127.0.0.1:<PORT29>"
+
+		"nats://127.0.0.1:<PORT30>"
+
+		"nats://127.0.0.1:<PORT31>"
+]}
+
+		{ name: "nyc", urls: [
+		"nats://localhost:<PORT27>"
+
+		"nats://localhost:<PORT32>"
+]}
+
+	]
+}
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== c2_s2/snippets/top.conf
+# ny-b is server 2 of 2 in nyc, cluster 2 of [lon nyc SC_<SHORT>_3]
+
+=== c3_s1/config.cfg
+
+include "snippets/top.conf"
+server_name: "<SHORT>-c3_s1"
+port: <PORT37>
+
+client_advertise: "localhost:<PORT38>"
+
+
+log_file: "<INSTANCE_DIR>/c3_s1/server.log"
+
+
+
+
+
+cluster {
+	name: "SC_<SHORT>_3"
+	port: <PORT39>
+	advertise: "127.0.0.1:<PORT4>"
+	routes: [
+
+"nats://localhost:<PORT39>"
+
+	]
+}
+
+
+
+gateway {
+	name: "SC_<SHORT>_3"
+	port: <PORT40>
+	advertise: "127.0.0.1:<PORT4>"
+	gateways: [
+
+		{ name: "SC_<SHORT>_3", urls: [
+		"nats://localhost:<PORT40>"
+]}
+
+		{ name: "lon", urls: [
+		"nats://127.0.0.1:<PORT41>"
+
+		"nats://127.0.0.1:<PORT42>"
+
+		"nats://127.0.0.1:<PORT43>"
+]}
+
+		{ name: "nyc", urls: [
+		"nats://127.0.0.1:<PORT44>"
+
+		"nats://127.0.0.1:<PORT45>"
+]}
+
+	]
+}
+
+
+
+
+
+
+
+
+system_account: "$SYS"
+no_auth_user: user1
+
+accounts {
+	USERS1 {
+		users = [ { user: "user1", pass: "password" } ]
+		jetstream: false
+	}
+	USERS2 {
+		users = [ { user: "user2", pass: "password" } ]
+		jetstream: false
+	}
+	USERS3 {
+		users = [ { user: "user3", pass: "password" } ]
+		jetstream: false
+	}
+	USERS4 {
+		users = [ { user: "user4", pass: "password" } ]
+		jetstream: false
+	}
+	USERS5 {
+		users = [ { user: "user5", pass: "password" } ]
+		jetstream: false
+	}
+	$SYS { users = [ { user: "system", pass: "password" } ] }
+}
+=== c3_s1/snippets/top.conf
+# <SHORT>-c3_s1 is server 1 of 1 in SC_<SHORT>_3, cluster 3 of [lon nyc SC_<SHORT>_3]
+

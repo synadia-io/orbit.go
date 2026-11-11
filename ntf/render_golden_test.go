@@ -79,6 +79,12 @@ max_connections: 1000
 `,
 }
 
+// goldenNamedSnippets are the snippets of the named super-cluster case, which
+// print each node's names and the size of its own cluster.
+var goldenNamedSnippets = map[string]string{
+	"top": "# {{ .ServerName }} is server {{ .ServerIndex }} of {{ .ClusterSize }} in {{ .ClusterName }}, cluster {{ .ClusterIndex }} of {{ .Clusters }}\n",
+}
+
 // goldenCustomTemplate is the main template of the custom template case. Its
 // comments print every template variable, and its config wires the cluster from
 // .Routes.
@@ -245,6 +251,50 @@ func goldenCases() []goldenCase {
 				Servers:      2,
 				Clusters:     2,
 				Description:  "golden super-cluster with toxics",
+				MainTemplate: serverConfigTemplate,
+				Toxics:       true,
+			},
+		},
+		{
+			name:    "cluster-named",
+			subject: "tester.create.cluster",
+			req: api.CreateClusterRequest{
+				ClusterName: "east",
+				ServerNames: []string{"alpha", "beta", "gamma"},
+				JetStream:   true,
+				Description: "golden named cluster",
+			},
+			spec: instanceSpec{
+				Kind:         "cluster",
+				Servers:      3,
+				ClusterList:  []clusterSpec{{Name: "east", Servers: 3, ServerNames: []string{"alpha", "beta", "gamma"}}},
+				JetStream:    true,
+				Description:  "golden named cluster",
+				MainTemplate: serverConfigTemplate,
+			},
+		},
+		{
+			name:    "super-cluster-named",
+			subject: "tester.create.super-cluster",
+			req: api.CreateSuperClusterRequest{
+				ClusterList: []api.ClusterSpec{
+					{Name: "lon", Servers: 3},
+					{Name: "nyc", ServerNames: []string{"ny-a", "ny-b"}},
+					{Servers: 1},
+				},
+				Description: "golden named super-cluster",
+				Snippets:    goldenNamedSnippets,
+				Toxics:      true,
+			},
+			spec: instanceSpec{
+				Kind: "super-cluster",
+				ClusterList: []clusterSpec{
+					{Name: "lon", Servers: 3},
+					{Name: "nyc", Servers: 2, ServerNames: []string{"ny-a", "ny-b"}},
+					{Servers: 1},
+				},
+				Description:  "golden named super-cluster",
+				Snippets:     goldenNamedSnippets,
 				MainTemplate: serverConfigTemplate,
 				Toxics:       true,
 			},
