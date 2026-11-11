@@ -1161,6 +1161,45 @@ func TestCreateSuperCluster(t *testing.T) {
 	}
 }
 
+// TestListReportsClusterName proves list reports a cluster instance's cluster
+// under the name the planner gave it, the cluster its servers are in, and no
+// cluster for a single server or a super-cluster.
+func TestListReportsClusterName(t *testing.T) {
+	ms := startTestService(t)
+
+	var cluster, single, super api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2}, &cluster)
+	mustRequest(t, ms.nc, "tester.create.server", api.CreateServerRequest{}, &single)
+	mustRequest(t, ms.nc, "tester.create.super-cluster", api.CreateSuperClusterRequest{Clusters: 2, Servers: 2}, &super)
+
+	want := map[string]string{
+		cluster.ID: "C_" + shortID(cluster.ID),
+		single.ID:  "",
+		super.ID:   "",
+	}
+	for _, srv := range cluster.Servers {
+		if srv.Cluster != want[cluster.ID] {
+			t.Errorf("cluster server %s is in cluster %q, want %q", srv.Name, srv.Cluster, want[cluster.ID])
+		}
+	}
+
+	var list api.ListResponse
+	mustRequest(t, ms.nc, "tester.list", nil, &list)
+	if len(list.Instances) != len(want) {
+		t.Fatalf("list has %d instances, want %d", len(list.Instances), len(want))
+	}
+	for _, inst := range list.Instances {
+		wantCluster, ok := want[inst.ID]
+		if !ok {
+			t.Errorf("list has unknown instance %s", inst.ID)
+			continue
+		}
+		if inst.Cluster != wantCluster {
+			t.Errorf("%s instance %s lists cluster %q, want %q", inst.Kind, inst.ID, inst.Cluster, wantCluster)
+		}
+	}
+}
+
 // TestStatusReportsClientPort proves the status handler reports the client port
 // (not the cluster/route port) so callers can build a usable connect URL.
 func TestStatusReportsClientPort(t *testing.T) {

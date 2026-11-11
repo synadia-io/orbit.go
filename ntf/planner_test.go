@@ -84,8 +84,8 @@ func (p *fakePlacement) InstanceDir() string {
 	return filepath.Join("/ntf-plan", p.id)
 }
 
-func (p *fakePlacement) StoreDir(node string) string {
-	return filepath.Join(p.InstanceDir(), strings.TrimPrefix(node, shortID(p.id)+"-"))
+func (p *fakePlacement) StoreDir(dir string) string {
+	return filepath.Join(p.InstanceDir(), dir)
 }
 
 var _ backend.Placement = (*fakePlacement)(nil)
@@ -424,13 +424,72 @@ func TestPlanInstanceDirVersionPersistent(t *testing.T) {
 					t.Errorf("node %s version = %q, want 9.8.7", n.Name, n.Version)
 				}
 
-				store := place.StoreDir(n.Name)
+				store := place.StoreDir(n.Dir)
 				if !slices.Equal(n.Persistent, []string{store}) {
 					t.Errorf("node %s persistent = %v, want [%s]", n.Name, n.Persistent, store)
 				}
 				if n.TemplateData.StoreDir != store {
 					t.Errorf("node %s renders store dir %q, want %q", n.Name, n.TemplateData.StoreDir, store)
 				}
+			}
+		})
+	}
+}
+
+// storePlacement is a fakePlacement whose store directories lie under a store
+// directory of their own, apart from the node directories, so a store
+// directory worked out from anything but the node's Dir shows. It records the
+// argument of every StoreDir call.
+type storePlacement struct {
+	*fakePlacement
+	asked []string
+}
+
+func (p *storePlacement) StoreDir(dir string) string {
+	p.asked = append(p.asked, dir)
+	return filepath.Join(p.InstanceDir(), "store", dir)
+}
+
+// TestPlanInstanceStoreDirFollowsDir proves the planner asks placement for each
+// node's store directory by the node's Dir, never by its Name, and records the
+// answer as the node's persistent path and its rendered .StoreDir.
+func TestPlanInstanceStoreDirFollowsDir(t *testing.T) {
+	specs := []instanceSpec{
+		{Kind: "server", Servers: 1},
+		{Kind: "cluster", Servers: 3},
+		{Kind: "super-cluster", Servers: 2, Clusters: 2},
+	}
+
+	for _, spec := range specs {
+		t.Run(spec.Kind, func(t *testing.T) {
+			spec.MainTemplate = serverConfigTemplate
+
+			id := nuid.Next()
+			place := &storePlacement{fakePlacement: newFakePlacement(id)}
+
+			plan, err := planInstance(spec, id, place, server.VERSION)
+			if err != nil {
+				t.Fatalf("planInstance: %v", err)
+			}
+
+			var dirs []string
+			for _, n := range plan.nodes {
+				dirs = append(dirs, n.Dir)
+				if n.Name == n.Dir {
+					t.Fatalf("node %s is named for its dir, so the test cannot tell them apart", n.Name)
+				}
+
+				want := filepath.Join(place.InstanceDir(), "store", n.Dir)
+				if !slices.Equal(n.Persistent, []string{want}) {
+					t.Errorf("node %s persistent = %v, want [%s]", n.Name, n.Persistent, want)
+				}
+				if n.TemplateData.StoreDir != want {
+					t.Errorf("node %s renders store dir %q, want %q", n.Name, n.TemplateData.StoreDir, want)
+				}
+			}
+
+			if !slices.Equal(place.asked, dirs) {
+				t.Errorf("StoreDir asked for %v, want the node dirs %v", place.asked, dirs)
 			}
 		})
 	}

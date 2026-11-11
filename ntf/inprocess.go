@@ -569,11 +569,10 @@ func (p *inProcessPlacement) InstanceDir() string {
 	return p.rec.inst.RootDir
 }
 
-// StoreDir returns the node's directory under the instance directory: n<i> for
-// a single server or a cluster node, c<c>_s<i> for a super-cluster node. It is
-// the node's name without the "<short id>-" prefix the planner gives it.
-func (p *inProcessPlacement) StoreDir(node string) string {
-	return filepath.Join(p.InstanceDir(), strings.TrimPrefix(node, shortID(p.rec.inst.ID)+"-"))
+// StoreDir returns the node's directory, dir, under the instance directory: n<i>
+// for a single server or a cluster node, c<c>_s<i> for a super-cluster node.
+func (p *inProcessPlacement) StoreDir(dir string) string {
+	return filepath.Join(p.InstanceDir(), dir)
 }
 
 // inProcessNode is one server the in-process backend started.

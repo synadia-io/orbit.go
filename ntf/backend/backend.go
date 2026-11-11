@@ -150,10 +150,13 @@ type Placement interface {
 	// File.Path is relative to it.
 	InstanceDir() string
 
-	// StoreDir returns the store directory of the node named node,
-	// NodePlan.Name. The node's config renders it as its store directory, and
-	// it is one of the node's NodePlan.Persistent paths.
-	StoreDir(node string) string
+	// StoreDir returns the store directory, as the server sees it, of the node
+	// whose directory is dir, its NodePlan.Dir, itself relative to the instance
+	// directory. It is worked out from the node's directory, never from its
+	// NodePlan.Name, so no path holds a name. The node's config renders it as
+	// its store directory, and it is one of the node's NodePlan.Persistent
+	// paths.
+	StoreDir(dir string) string
 }
 
 // Node is one server of an instance, as Backend.Provision returns it.

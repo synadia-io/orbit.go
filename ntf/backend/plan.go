@@ -43,8 +43,8 @@ type InstancePlan struct {
 	// are called with.
 	ID string
 
-	// ShortID is the short, name-safe form of ID that prefixes node and
-	// cluster names.
+	// ShortID is a short, name-safe form of ID: its last eight characters, or
+	// ID itself when shorter. Templates see it as .ShortID.
 	ShortID string
 
 	// Kind is the kind of instance: "server", "cluster" or "super-cluster".

@@ -182,7 +182,7 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 	for _, n := range plan.nodes {
 		// 5. The node's store directory, which survives a revision, and its
 		// template data.
-		storeDir := place.StoreDir(n.Name)
+		storeDir := place.StoreDir(n.Dir)
 		n.Persistent = []string{storeDir}
 		td := planTemplateData(plan, n, spec, filepath.Join(place.InstanceDir(), n.Dir), storeDir)
 

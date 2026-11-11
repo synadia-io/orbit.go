@@ -708,6 +708,14 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		return false
 	}
 
+	// A cluster instance lists its cluster under the name the planner gave it.
+	// list reads it under s.mu.
+	if spec.Kind == "cluster" {
+		s.mu.Lock()
+		inst.Cluster = plan.Clusters[0]
+		s.mu.Unlock()
+	}
+
 	// The proxies of toxics read a plain CONNECT, so routes and gateways must
 	// not use TLS, the gateway gate admits only a gateway named for its
 	// cluster, and toxic selectors name each server by its node name, so its
@@ -1180,7 +1188,6 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 	}
 
 	inst := s.newInstance("cluster", creq.Description)
-	inst.Cluster = "C_" + shortID(inst.ID)
 
 	spec := instanceSpec{
 		Kind:          "cluster",
