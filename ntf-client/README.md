@@ -157,8 +157,9 @@ defer m.Destroy(ctx, inst.ID)
 ```
 
 Errors wrap the sentinels in `errors.go`, such as `ntf.ErrService` when the service refuses a request, so check them
-with `errors.Is`. A refusal with code `404` also wraps `ntf.ErrInstanceNotFound`, and one with code `023` wraps
-`ntf.ErrServerNameAmbiguous`.
+with `errors.Is`. A refusal with code `404` also wraps `ntf.ErrInstanceNotFound`, one with code `023` wraps
+`ntf.ErrServerNameAmbiguous`, and one with code `024` wraps `ntf.ErrJetStreamNotReady` (see
+[Waiting for JetStream](#waiting-for-jetstream)).
 
 The request and response types, including `ManagedServer` and the shaping types, come from
 `github.com/synadia-io/orbit.go/ntf/api`, the package the service itself serializes with.
@@ -217,6 +218,73 @@ defer nc.Close()
 All of these accept `CreateOption` values: typed snippet helpers (`WithAccounts`, `WithWebSocket`, …) to customize the
 rendered config, `WithConnectOptions(...nats.Option)` to apply auth, TLS, or any client-side option to the
 connection the helper opens, and the naming options below.
+
+### Waiting for JetStream
+
+A create returns once every server has started, before a JetStream cluster has elected its meta leader, so the first
+JetStream requests to a new cluster can fail with `10008` or time out. `WithJetStreamWait(timeout)` makes a JetStream
+create of any kind return only once JetStream takes requests: every server reports JetStream enabled under the same
+meta leader, which lists every other server as a current peer. The service polls `$SYS.REQ.SERVER.PING.JSZ` for up to
+`timeout` (sub-second durations honored, at most 5 minutes); a non-positive duration turns the wait off, undoing an
+earlier `WithJetStreamWait`.
+
+```go
+inst := client.CreateCluster(t, 3, true, ntf.WithJetStreamWait(30*time.Second))
+defer inst.Destroy(t)
+
+nc, _ := nats.Connect(inst.RandomServer().URL)
+js, _ := jetstream.New(nc)
+
+// No retry needed: the meta leader is elected and every peer is current.
+_, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "ORDERS", Replicas: 3})
+```
+
+The service asks as the built-in template's `system` user. A create whose `WithTemplate`, `WithAccounts` or
+`WithSystemAccount` replaces that user gives the system account's user with
+`WithSystemCredentials(user, password)`:
+
+```go
+inst := client.CreateCluster(t, 3, true,
+    ntf.WithAccounts(accounts),
+    ntf.WithJetStreamWait(30*time.Second),
+    ntf.WithSystemCredentials("admin", "s3cret"))
+```
+
+The service refuses, with `ntf.ErrService` and before anything starts, a wait without JetStream, a wait with one of
+those options and no credentials, a wait with a non-empty `WithTLSSnippet` (it cannot dial a TLS block it has no certificates
+for; `WithGeneratedTLS` works), credentials without a wait, and a wait above 5 minutes. A service from before the wait
+was added refuses `wait_jetstream` as an unknown property, also with `ntf.ErrService`.
+
+A create with a wait gets a request timeout of the usual create timeout plus the wait plus a 5 second margin, so a
+`Manager` call with a context without a deadline, and every `Client` call, waits long enough for the service's answer.
+A `Manager` call whose context has a deadline keeps it: give it more than the wait plus the time a create takes, or the
+create returns `ntf.ErrRequest` while the service is still waiting, and the instance it goes on to create stays on the
+service, unknown to the caller, until it is destroyed or the service is reset.
+
+When the wait ends with JetStream not ready — the timeout passed, every server refused the system credentials, or the
+service closed — the create fails with an error matching both `ntf.ErrJetStreamNotReady` and `ntf.ErrService`, whose
+text is the service's reason, naming the instance and each server not ready and why. The service leaves the instance in
+place, and **the caller owns it**:
+
+- `Manager.CreateServer`, `CreateCluster` and `CreateSuperCluster` return the `*Instance` alongside the error, so check
+  it before returning and destroy it (or inspect it first):
+
+  ```go
+  inst, err := m.CreateCluster(ctx, 3, true, ntf.WithJetStreamWait(30*time.Second))
+  if errors.Is(err, ntf.ErrJetStreamNotReady) && inst != nil {
+      m.Destroy(ctx, inst.ID)
+  }
+  if err != nil {
+      return err
+  }
+  ```
+
+  The instance is `nil` for every other error, and for a `024` whose answer carries no instance.
+- The `Client` create methods and the `WithX` helpers destroy the instance themselves before failing the test.
+
+A destroy or reset of the instance while its create waits normally ends the wait with `ntf.ErrInstanceNotFound` and no
+instance. One that lands in the wait's last round can instead end it with `ntf.ErrJetStreamNotReady` and an instance
+that is already gone; the `Client` methods ignore the not found when they destroy it.
 
 ### Naming servers and clusters
 

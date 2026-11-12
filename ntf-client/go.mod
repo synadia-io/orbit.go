@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/nats-io/nats.go v1.55.0
-	github.com/synadia-io/orbit.go/ntf v0.0.4
+	github.com/synadia-io/orbit.go/ntf v0.0.5-0.20261112141415-c7d6d038be53
 )
 
 require (
