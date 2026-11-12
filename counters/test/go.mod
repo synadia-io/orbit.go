@@ -15,8 +15,8 @@ require (
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/minio/highwayhash v1.0.4 // indirect
-	github.com/nats-io/jwt/v2 v2.8.2 // indirect
-	github.com/nats-io/nkeys v0.4.16 // indirect
+	github.com/nats-io/jwt/v2 v2.8.3 // indirect
+	github.com/nats-io/nkeys v0.4.17 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/synadia-io/orbit.go/jetstreamext v0.3.2 // indirect
 	github.com/synadia-io/orbit.go/natsext v0.1.3 // indirect
