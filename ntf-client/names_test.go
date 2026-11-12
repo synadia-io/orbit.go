@@ -547,14 +547,19 @@ func TestNamedSuperCluster(t *testing.T) {
 			t.Fatalf("servers = %d, want 5", len(inst.Servers))
 		}
 
+		// The third cluster keeps the default names of its position: c3 and
+		// c3-n<i>, or SC_<short>_3 and <short>-c3_s<i> on a service from before
+		// default names dropped the short ID.
 		short := inst.ID[len(inst.ID)-8:]
-		want := []struct{ name, cluster string }{
+		defaultNames := []struct{ name, cluster string }{{"c3-n1", "c3"}, {"c3-n2", "c3"}}
+		if inst.Servers[3].Cluster != "c3" {
+			defaultNames = []struct{ name, cluster string }{{short + "-c3_s1", "SC_" + short + "_3"}, {short + "-c3_s2", "SC_" + short + "_3"}}
+		}
+		want := append([]struct{ name, cluster string }{
 			{"east-n1", "east"},
 			{"w1", "west"},
 			{"w2", "west"},
-			{short + "-c3_s1", "SC_" + short + "_3"},
-			{short + "-c3_s2", "SC_" + short + "_3"},
-		}
+		}, defaultNames...)
 		for i, srv := range inst.Servers {
 			if srv.Name != want[i].name || srv.Cluster != want[i].cluster {
 				t.Errorf("server %d = %s in %s, want %s in %s", i, srv.Name, srv.Cluster, want[i].name, want[i].cluster)

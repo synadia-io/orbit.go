@@ -74,9 +74,11 @@ and `template` replaces the whole body. `snippets` is a `{key: body}` map keyed 
 
 ### Names and sizes
 
-By default every name an instance has is built from its short id, so names do not collide between concurrent
-instances: a server is `<short>-n1`, a cluster `C_<short>` with servers `<short>-n<i>`, and the clusters of a
-super-cluster `SC_<short>_<c>` with servers `<short>-c<c>_s<i>`. A create can give names instead:
+By default a name says where a server or cluster sits in its instance and carries no id, so the same default names
+repeat across instances: a server is `n1`, a cluster `c1` with servers `n1` to `n<N>`, and the clusters of a
+super-cluster `c1` to `c<N>` with servers `<cluster>-n<i>`, such as `c2-n3`. `.ServerName` and `.ClusterName` are
+therefore unique within an instance only; a template or snippet that needs a value unique across the service, such as
+a path outside the server's directory, uses `.InstanceID` or `.ShortID`. A create can give names instead:
 
 - `tester.create.server` takes `name`.
 - `tester.create.cluster` takes `cluster_name` and `server_names`, the servers' names in order. `servers` may be left
@@ -91,10 +93,12 @@ super-cluster `SC_<short>_<c>` with servers `<short>-c<c>_s<i>`. A create can gi
 Every given name starts with a letter and holds only letters, digits, `_` and `-`, at most 32 characters; a cluster
 name is at most 28, so `<cluster>-n20` still fits. The schemas refuse a name that breaks the rule with `001`. A server
 of a named cluster that is not named itself is `<cluster>-n<i>`, and an unnamed cluster in a `cluster_list` keeps the
-default name of its position. The default names are filled in first and the whole set is then checked: every name
-is unique within the instance, and no server shares a cluster's name, since a toxic selector looks a name up as a
-server before a cluster. A clash, between given names or with a default one, is refused with `002` naming both
-holders. Names are not unique across instances; see `023` below.
+default name of its position, `c<c>`, with servers `c<c>-n<i>`. The default names are filled in first and the whole
+set is then checked: every name is unique within the instance, and no server shares a cluster's name, since a toxic
+selector looks a name up as a server before a cluster. A clash, between given names or with a default one, is refused
+with `002` naming both holders: a second cluster named `c1` beside an unnamed first cluster, or a server named `c1`
+in a cluster left with its default name, is refused like any other. Names are not unique across instances; see `023`
+below.
 
 A given name is the server's or cluster's identity everywhere: its rendered `server_name`, the cluster and gateway
 `name`, the names of its links, the topology the agent is handed, shaping's `server`, events' `node`, status and list.
@@ -105,10 +109,38 @@ environment is the size of the node's own cluster.
 the `name` it reports, and take an optional `instance_id`. With `instance_id` only that instance is searched, and an
 unknown instance is refused with `404`. Without it every instance is searched. A name no server holds is refused
 with `001`. A name more than one server holds, in one instance or across several, is refused with `023`, whose
-description names the instances holding it, rather than one of them being picked. `023` is stable: a client that
-knows the instance sends the bare name first and retries with `instance_id` on `023`, which works against services
-both with and without `instance_id`. Two servers of one instance can share a name, through a custom `template`
+description names the instances holding it, rather than one of them being picked. `023` is stable. A client that
+knows the instance sends `instance_id`, and against a service from before it, which refuses the field with `001`
+naming `instance_id`, sends the bare name instead; ntf-client does this. Two servers of one instance can share a name, through a custom `template`
 without `toxics`, and are refused with `023` with `instance_id` too.
+
+#### Release note: default names repeat across instances
+
+Default names no longer carry the instance's short id:
+
+| Kind          | Before                                        | Now                         |
+|---------------|-----------------------------------------------|-----------------------------|
+| Server        | `<short>-n1`                                  | `n1`                        |
+| Cluster       | `C_<short>`, servers `<short>-n<i>`           | `c1`, servers `n<i>`        |
+| Super-cluster | `SC_<short>_<c>`, servers `<short>-c<c>_s<i>` | `c<c>`, servers `c<c>-n<i>` |
+
+Given names, the `<cluster>-n<i>` servers of a named cluster and every node's directory are unchanged.
+
+- Any two default-named instances alive at once now share names, so a bare-name `tester.stop.server`,
+  `tester.start.server`, `tester.update.server` or `tester.reload.server` that used to find one server is refused
+  with `023`. Clients that send `instance_id` are unaffected; a client that sends the bare name alone is refused
+  whenever another instance holds the same name.
+- A template or snippet that relied on `.ServerName` or `.ClusterName` being unique across the service uses
+  `.InstanceID` or `.ShortID` instead.
+- nats-server refuses a leafnode connection between two clusters of the same name: the accepting side answers
+  `remote leafnode has same cluster name` and the soliciting side waits 30 seconds before it tries again. Two
+  default-named cluster instances are both `c1`, and the clusters of two default-named super-clusters are `c1`, `c2`
+  and so on in both, so a test that joins them by leafnode names at least one side apart, with `cluster_name` for a
+  cluster or `cluster_list` for a super-cluster. The two ends of one leafnode connection may share server names.
+- nats-server also takes a second leafnode from a remote with the same server name, cluster name and account as an
+  existing one for a reconnect of it, and closes the existing one. Two default-named instances that solicit
+  leafnodes into the same hub account, such as two `n1` servers or two `c1` clusters, keep replacing each other's
+  connection and never both stay connected. Name them apart with `name`, `cluster_name` or `server_names`.
 
 ## Trace capture
 

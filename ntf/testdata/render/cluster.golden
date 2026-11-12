@@ -1,7 +1,7 @@
 === n1/config.cfg
 
 
-server_name: "<SHORT>-n1"
+server_name: "n1"
 port: <PORT1>
 
 client_advertise: "localhost:<PORT1>"
@@ -20,7 +20,7 @@ jetstream {
 
 
 cluster {
-	name: "C_<SHORT>"
+	name: "c1"
 	port: <PORT2>
 	routes: [
 
@@ -103,7 +103,7 @@ websocket {
 === n2/config.cfg
 
 
-server_name: "<SHORT>-n2"
+server_name: "n2"
 port: <PORT8>
 
 client_advertise: "localhost:<PORT8>"
@@ -122,7 +122,7 @@ jetstream {
 
 
 cluster {
-	name: "C_<SHORT>"
+	name: "c1"
 	port: <PORT3>
 	routes: [
 
@@ -205,7 +205,7 @@ websocket {
 === n3/config.cfg
 
 
-server_name: "<SHORT>-n3"
+server_name: "n3"
 port: <PORT12>
 
 client_advertise: "localhost:<PORT12>"
@@ -224,7 +224,7 @@ jetstream {
 
 
 cluster {
-	name: "C_<SHORT>"
+	name: "c1"
 	port: <PORT4>
 	routes: [
 

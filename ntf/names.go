@@ -235,18 +235,19 @@ type namedCluster struct {
 }
 
 // planNames returns the clusters and servers of spec with their names, the
-// given ones and the default ones of the instance whose short id is short,
-// and checks the whole set: every name is unique in the instance, so no server
-// shares a cluster's name either, since a toxic selector looks a name up as a
-// node first. A server is named <short>-n1 by default. A cluster is named
-// C_<short> or SC_<short>_<c> by default, and its servers <cluster>-n<i> when
-// the cluster has a given name, and <short>-n<i> or <short>-c<c>_s<i>
-// otherwise.
-func planNames(spec instanceSpec, short string) ([]namedCluster, error) {
+// given ones and the default ones, and checks the whole set: every name is
+// unique in the instance, so no server shares a cluster's name either, since a
+// toxic selector looks a name up as a node first. No default name carries the
+// instance's id, so default names repeat across instances. A server is named
+// n1 by default. A cluster is named c<c> by default, after its 1-based
+// position, so a cluster instance's one cluster is c1. A server of a cluster
+// instance whose cluster is not given a name is n<i>, and any other server not
+// given a name is <cluster>-n<i>.
+func planNames(spec instanceSpec) ([]namedCluster, error) {
 	if spec.Kind == "server" {
 		name := spec.ServerName
 		if name == "" {
-			name = short + "-n1"
+			name = "n1"
 		}
 		return []namedCluster{{Servers: []string{name}}}, nil
 	}
@@ -258,11 +259,7 @@ func planNames(spec instanceSpec, short string) ([]namedCluster, error) {
 
 		cluster.Name = cs.Name
 		if cluster.Name == "" {
-			if spec.Kind == "cluster" {
-				cluster.Name = "C_" + short
-			} else {
-				cluster.Name = fmt.Sprintf("SC_%s_%d", short, c+1)
-			}
+			cluster.Name = fmt.Sprintf("c%d", c+1)
 		}
 
 		for i := range cs.Servers {
@@ -270,12 +267,10 @@ func planNames(spec instanceSpec, short string) ([]namedCluster, error) {
 			switch {
 			case len(cs.ServerNames) > 0:
 				name = cs.ServerNames[i]
-			case cs.Name != "":
-				name = fmt.Sprintf("%s-n%d", cs.Name, i+1)
-			case spec.Kind == "cluster":
-				name = fmt.Sprintf("%s-n%d", short, i+1)
+			case spec.Kind == "cluster" && cs.Name == "":
+				name = fmt.Sprintf("n%d", i+1)
 			default:
-				name = fmt.Sprintf("%s-c%d_s%d", short, c+1, i+1)
+				name = fmt.Sprintf("%s-n%d", cluster.Name, i+1)
 			}
 			cluster.Servers = append(cluster.Servers, name)
 		}

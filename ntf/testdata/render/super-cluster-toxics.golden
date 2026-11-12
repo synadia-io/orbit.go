@@ -1,7 +1,7 @@
 === c1_s1/config.cfg
 
 
-server_name: "<SHORT>-c1_s1"
+server_name: "c1-n1"
 port: <PORT1>
 
 client_advertise: "localhost:<PORT2>"
@@ -14,7 +14,7 @@ log_file: "<INSTANCE_DIR>/c1_s1/server.log"
 
 
 cluster {
-	name: "SC_<SHORT>_1"
+	name: "c1"
 	port: <PORT3>
 	advertise: "127.0.0.1:<PORT4>"
 	routes: [
@@ -29,18 +29,18 @@ cluster {
 
 
 gateway {
-	name: "SC_<SHORT>_1"
+	name: "c1"
 	port: <PORT6>
 	advertise: "127.0.0.1:<PORT4>"
 	gateways: [
 
-		{ name: "SC_<SHORT>_1", urls: [
+		{ name: "c1", urls: [
 		"nats://localhost:<PORT6>"
 
 		"nats://localhost:<PORT7>"
 ]}
 
-		{ name: "SC_<SHORT>_2", urls: [
+		{ name: "c2", urls: [
 		"nats://127.0.0.1:<PORT8>"
 
 		"nats://127.0.0.1:<PORT9>"
@@ -85,7 +85,7 @@ accounts {
 === c1_s2/config.cfg
 
 
-server_name: "<SHORT>-c1_s2"
+server_name: "c1-n2"
 port: <PORT10>
 
 client_advertise: "localhost:<PORT11>"
@@ -98,7 +98,7 @@ log_file: "<INSTANCE_DIR>/c1_s2/server.log"
 
 
 cluster {
-	name: "SC_<SHORT>_1"
+	name: "c1"
 	port: <PORT12>
 	advertise: "127.0.0.1:<PORT4>"
 	routes: [
@@ -113,18 +113,18 @@ cluster {
 
 
 gateway {
-	name: "SC_<SHORT>_1"
+	name: "c1"
 	port: <PORT7>
 	advertise: "127.0.0.1:<PORT4>"
 	gateways: [
 
-		{ name: "SC_<SHORT>_1", urls: [
+		{ name: "c1", urls: [
 		"nats://localhost:<PORT6>"
 
 		"nats://localhost:<PORT7>"
 ]}
 
-		{ name: "SC_<SHORT>_2", urls: [
+		{ name: "c2", urls: [
 		"nats://127.0.0.1:<PORT8>"
 
 		"nats://127.0.0.1:<PORT9>"
@@ -169,7 +169,7 @@ accounts {
 === c2_s1/config.cfg
 
 
-server_name: "<SHORT>-c2_s1"
+server_name: "c2-n1"
 port: <PORT14>
 
 client_advertise: "localhost:<PORT15>"
@@ -182,7 +182,7 @@ log_file: "<INSTANCE_DIR>/c2_s1/server.log"
 
 
 cluster {
-	name: "SC_<SHORT>_2"
+	name: "c2"
 	port: <PORT16>
 	advertise: "127.0.0.1:<PORT4>"
 	routes: [
@@ -197,18 +197,18 @@ cluster {
 
 
 gateway {
-	name: "SC_<SHORT>_2"
+	name: "c2"
 	port: <PORT18>
 	advertise: "127.0.0.1:<PORT4>"
 	gateways: [
 
-		{ name: "SC_<SHORT>_1", urls: [
+		{ name: "c1", urls: [
 		"nats://127.0.0.1:<PORT19>"
 
 		"nats://127.0.0.1:<PORT20>"
 ]}
 
-		{ name: "SC_<SHORT>_2", urls: [
+		{ name: "c2", urls: [
 		"nats://localhost:<PORT18>"
 
 		"nats://localhost:<PORT21>"
@@ -253,7 +253,7 @@ accounts {
 === c2_s2/config.cfg
 
 
-server_name: "<SHORT>-c2_s2"
+server_name: "c2-n2"
 port: <PORT22>
 
 client_advertise: "localhost:<PORT23>"
@@ -266,7 +266,7 @@ log_file: "<INSTANCE_DIR>/c2_s2/server.log"
 
 
 cluster {
-	name: "SC_<SHORT>_2"
+	name: "c2"
 	port: <PORT24>
 	advertise: "127.0.0.1:<PORT4>"
 	routes: [
@@ -281,18 +281,18 @@ cluster {
 
 
 gateway {
-	name: "SC_<SHORT>_2"
+	name: "c2"
 	port: <PORT21>
 	advertise: "127.0.0.1:<PORT4>"
 	gateways: [
 
-		{ name: "SC_<SHORT>_1", urls: [
+		{ name: "c1", urls: [
 		"nats://127.0.0.1:<PORT19>"
 
 		"nats://127.0.0.1:<PORT20>"
 ]}
 
-		{ name: "SC_<SHORT>_2", urls: [
+		{ name: "c2", urls: [
 		"nats://localhost:<PORT18>"
 
 		"nats://localhost:<PORT21>"

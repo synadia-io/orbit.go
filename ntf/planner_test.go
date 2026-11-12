@@ -52,7 +52,7 @@ func newFakePlacement(id string) *fakePlacement {
 }
 
 func (p *fakePlacement) ListenerAddress(node, name string) (backend.Listener, error) {
-	p.calls = append(p.calls, strings.TrimPrefix(node, shortID(p.id)+"-")+"/"+name)
+	p.calls = append(p.calls, node+"/"+name)
 	if len(p.calls) == p.failAt {
 		return backend.Listener{}, fmt.Errorf("%w: fake", ErrPortRangeExhausted)
 	}
@@ -176,9 +176,9 @@ func TestPlanInstanceReservationOrder(t *testing.T) {
 			name: "super-cluster",
 			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2},
 			want: slices.Concat(
-				[]string{"c1_s1/gateway", "c1_s2/gateway", "c2_s1/gateway", "c2_s2/gateway"},
-				[]string{"c1_s1/cluster", "c1_s2/cluster"}, node("c1_s1"), node("c1_s2"),
-				[]string{"c2_s1/cluster", "c2_s2/cluster"}, node("c2_s1"), node("c2_s2"),
+				[]string{"c1-n1/gateway", "c1-n2/gateway", "c2-n1/gateway", "c2-n2/gateway"},
+				[]string{"c1-n1/cluster", "c1-n2/cluster"}, node("c1-n1"), node("c1-n2"),
+				[]string{"c2-n1/cluster", "c2-n2/cluster"}, node("c2-n1"), node("c2-n2"),
 			),
 		},
 	}
@@ -209,7 +209,6 @@ func TestPlanInstanceReservationOrder(t *testing.T) {
 // capture proxy fronts.
 func TestPlanInstanceNodesAndLinks(t *testing.T) {
 	id := nuid.Next()
-	short := shortID(id)
 	place := newFakePlacement(id)
 	spec := instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: serverConfigTemplate, Proxy: true}
 
@@ -218,7 +217,7 @@ func TestPlanInstanceNodesAndLinks(t *testing.T) {
 		t.Fatalf("planInstance: %v", err)
 	}
 
-	wantClusters := []string{"SC_" + short + "_1", "SC_" + short + "_2"}
+	wantClusters := []string{"c1", "c2"}
 	if !slices.Equal(plan.Clusters, wantClusters) {
 		t.Errorf("clusters = %v, want %v", plan.Clusters, wantClusters)
 	}
@@ -234,7 +233,7 @@ func TestPlanInstanceNodesAndLinks(t *testing.T) {
 			t.Errorf("node %s has no template data of its own", n.Name)
 		}
 	}
-	wantNames := []string{short + "-c1_s1", short + "-c1_s2", short + "-c2_s1", short + "-c2_s2"}
+	wantNames := []string{"c1-n1", "c1-n2", "c2-n1", "c2-n2"}
 	if !slices.Equal(names, wantNames) {
 		t.Errorf("nodes = %v, want %v", names, wantNames)
 	}
@@ -452,11 +451,12 @@ func (p *storePlacement) StoreDir(dir string) string {
 
 // TestPlanInstanceStoreDirFollowsDir proves the planner asks placement for each
 // node's store directory by the node's Dir, never by its Name, and records the
-// answer as the node's persistent path and its rendered .StoreDir.
+// answer as the node's persistent path and its rendered .StoreDir. The server
+// and cluster are named, since their default names, n<i>, are their dirs.
 func TestPlanInstanceStoreDirFollowsDir(t *testing.T) {
 	specs := []instanceSpec{
-		{Kind: "server", Servers: 1},
-		{Kind: "cluster", Servers: 3},
+		{Kind: "server", Servers: 1, ServerName: "solo"},
+		{Kind: "cluster", ClusterList: []clusterSpec{{Name: "east", Servers: 3}}},
 		{Kind: "super-cluster", Servers: 2, Clusters: 2},
 	}
 
@@ -743,13 +743,11 @@ func TestPlanInstanceGivenServerNames(t *testing.T) {
 }
 
 // TestPlanNames proves the names the planner gives an instance: an unnamed
-// instance keeps the names of its short id, a server of a named cluster not
-// named itself gets <cluster>-n<i>, an unnamed cluster of a cluster list keeps
-// the default name of its position, and a set holding one name twice, given
-// or default, is refused naming who holds it.
+// instance's names carry no id, a server of a named cluster not named itself
+// gets <cluster>-n<i>, an unnamed cluster of a cluster list keeps the default
+// name of its position, c<c>, and a set holding one name twice, given or
+// default, is refused naming who holds it.
 func TestPlanNames(t *testing.T) {
-	const short = "AbCd1234"
-
 	tests := []struct {
 		name    string
 		spec    instanceSpec
@@ -759,7 +757,7 @@ func TestPlanNames(t *testing.T) {
 		{
 			name: "server",
 			spec: instanceSpec{Kind: "server", Servers: 1},
-			want: []namedCluster{{Servers: []string{short + "-n1"}}},
+			want: []namedCluster{{Servers: []string{"n1"}}},
 		},
 		{
 			name: "named server",
@@ -769,7 +767,7 @@ func TestPlanNames(t *testing.T) {
 		{
 			name: "cluster",
 			spec: instanceSpec{Kind: "cluster", Servers: 2},
-			want: []namedCluster{{Name: "C_" + short, Servers: []string{short + "-n1", short + "-n2"}}},
+			want: []namedCluster{{Name: "c1", Servers: []string{"n1", "n2"}}},
 		},
 		{
 			name: "named cluster",
@@ -779,14 +777,14 @@ func TestPlanNames(t *testing.T) {
 		{
 			name: "named servers of an unnamed cluster",
 			spec: instanceSpec{Kind: "cluster", ClusterList: []clusterSpec{{Servers: 2, ServerNames: []string{"a", "b"}}}},
-			want: []namedCluster{{Name: "C_" + short, Servers: []string{"a", "b"}}},
+			want: []namedCluster{{Name: "c1", Servers: []string{"a", "b"}}},
 		},
 		{
 			name: "super-cluster",
 			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2},
 			want: []namedCluster{
-				{Name: "SC_" + short + "_1", Servers: []string{short + "-c1_s1", short + "-c1_s2"}},
-				{Name: "SC_" + short + "_2", Servers: []string{short + "-c2_s1", short + "-c2_s2"}},
+				{Name: "c1", Servers: []string{"c1-n1", "c1-n2"}},
+				{Name: "c2", Servers: []string{"c2-n1", "c2-n2"}},
 			},
 		},
 		{
@@ -794,8 +792,8 @@ func TestPlanNames(t *testing.T) {
 			spec: instanceSpec{Kind: "super-cluster", ClusterList: []clusterSpec{{Name: "lon", Servers: 2}, {Servers: 1}, {Servers: 2, ServerNames: []string{"x", "y"}}}},
 			want: []namedCluster{
 				{Name: "lon", Servers: []string{"lon-n1", "lon-n2"}},
-				{Name: "SC_" + short + "_2", Servers: []string{short + "-c2_s1"}},
-				{Name: "SC_" + short + "_3", Servers: []string{"x", "y"}},
+				{Name: "c2", Servers: []string{"c2-n1"}},
+				{Name: "c3", Servers: []string{"x", "y"}},
 			},
 		},
 		{
@@ -819,6 +817,21 @@ func TestPlanNames(t *testing.T) {
 			wantErr: `names must be unique, "lon-n2" names both server 2 of cluster lon and server 1 of cluster nyc`,
 		},
 		{
+			name:    "given cluster name clashing with a default one",
+			spec:    instanceSpec{Kind: "super-cluster", ClusterList: []clusterSpec{{Servers: 1}, {Name: "c1", Servers: 1}}},
+			wantErr: `names must be unique, "c1" names both cluster c1 and cluster c1`,
+		},
+		{
+			name:    "given server name clashing with a default cluster name",
+			spec:    instanceSpec{Kind: "cluster", ClusterList: []clusterSpec{{Servers: 2, ServerNames: []string{"c1", "b"}}}},
+			wantErr: `names must be unique, "c1" names both cluster c1 and server 1 of cluster c1`,
+		},
+		{
+			name:    "given server name clashing with a default server name",
+			spec:    instanceSpec{Kind: "super-cluster", ClusterList: []clusterSpec{{Servers: 2}, {Name: "nyc", Servers: 1, ServerNames: []string{"c1-n2"}}}},
+			wantErr: `names must be unique, "c1-n2" names both server 2 of cluster c1 and server 1 of cluster nyc`,
+		},
+		{
 			name:    "server named like its own cluster",
 			spec:    instanceSpec{Kind: "cluster", ClusterList: []clusterSpec{{Name: "east", Servers: 2, ServerNames: []string{"east", "b"}}}},
 			wantErr: `names must be unique, "east" names both cluster east and server 1 of cluster east`,
@@ -827,7 +840,7 @@ func TestPlanNames(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := planNames(tt.spec, short)
+			got, err := planNames(tt.spec)
 			if tt.wantErr != "" {
 				if err == nil || err.Error() != tt.wantErr {
 					t.Fatalf("planNames error = %v, want %q", err, tt.wantErr)

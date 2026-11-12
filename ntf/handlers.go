@@ -862,7 +862,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 			s.releaseProxyHolds(inst.ID, []string{traceProxyName(n.Name)})
 		}
 		if capture || spec.Toxics {
-			ep, terr := s.frontClient(netAgent, agent.Front{ServerName: n.Name, Client: client.Internal, Capture: capture})
+			ep, terr := s.frontClient(inst.ID, netAgent, agent.Front{ServerName: n.Name, Client: client.Internal, Capture: capture})
 			if terr != nil {
 				s.stopAgent(inst, netAgent)
 				s.dropInstance(inst)
@@ -1084,7 +1084,7 @@ func (s *Service) releaseProxyHolds(instanceID string, names []string) {
 // toxics, which the create refuses unless the agent declares capture or toxics,
 // so an agent that does not implement agent.ClientEdge is a fault in the agent.
 // The caller must stop the agent and tear the instance down on failure.
-func (s *Service) frontClient(a agent.Agent, front agent.Front) (backend.Endpoint, error) {
+func (s *Service) frontClient(instanceID string, a agent.Agent, front agent.Front) (backend.Endpoint, error) {
 	edge, ok := a.(agent.ClientEdge)
 	if !ok {
 		capability := agent.CapabilityToxics
@@ -1103,9 +1103,9 @@ func (s *Service) frontClient(a agent.Agent, front agent.Front) (backend.Endpoin
 	}
 
 	if front.Capture {
-		s.log.Info("Trace proxy listening", "server", front.ServerName, "address", ep.String())
+		s.log.Info("Trace proxy listening", "instance", instanceID, "server", front.ServerName, "address", ep.String())
 	} else {
-		s.log.Info("Client proxy listening", "server", front.ServerName, "address", ep.String())
+		s.log.Info("Client proxy listening", "instance", instanceID, "server", front.ServerName, "address", ep.String())
 	}
 
 	return ep, nil
@@ -1417,7 +1417,7 @@ func (s *Service) startServer(req micro.Request) {
 		if err == nil {
 			serr := node.Stop(ctx)
 			if serr != nil {
-				s.log.Warn("Could not stop server of a destroyed instance", "server", creq.Name, "err", serr)
+				s.log.Warn("Could not stop server of a destroyed instance", "instance", ms.instanceID, "server", creq.Name, "err", serr)
 			}
 		}
 		req.Error("404", "Instance destroyed during start", nil)
@@ -1486,7 +1486,7 @@ func (s *Service) stopInstance(req micro.Request) {
 		if err == nil && st.Running {
 			err = node.Stop(ctx)
 			if err != nil {
-				s.log.Warn("Could not stop server", "server", node.Name(), "err", err)
+				s.log.Warn("Could not stop server", "instance", creq.InstanceID, "server", node.Name(), "err", err)
 			}
 			stopped = err == nil
 		}
@@ -1574,7 +1574,7 @@ func (s *Service) startInstance(req micro.Request) {
 			if err == nil {
 				serr := node.Stop(ctx)
 				if serr != nil {
-					s.log.Warn("Could not stop server of a destroyed instance", "server", node.Name(), "err", serr)
+					s.log.Warn("Could not stop server of a destroyed instance", "instance", creq.InstanceID, "server", node.Name(), "err", serr)
 				}
 			}
 			ms.cfgMu.Unlock()

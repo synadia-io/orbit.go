@@ -448,7 +448,7 @@ func TestStatusReportsEventsSeq(t *testing.T) {
 	var first, second api.CreateResponse
 	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{}, &first)
 	mustRequest(t, svc.nc, "tester.create.server", api.CreateServerRequest{}, &second)
-	mustRequest(t, svc.nc, "tester.stop.server", api.StopServerRequest{Name: first.Servers[0].Name}, nil)
+	mustRequest(t, svc.nc, "tester.stop.server", api.StopServerRequest{InstanceID: first.ID, Name: first.Servers[0].Name}, nil)
 
 	for _, id := range []string{first.ID, second.ID} {
 		stored := storedEvents(t, svc.nc, DefaultGroup, id)

@@ -128,7 +128,7 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 	}
 
 	// The names of the clusters and nodes, checked before anything is made.
-	clusters, err := planNames(spec, short)
+	clusters, err := planNames(spec)
 	if err != nil {
 		return fail(planErrNames, err)
 	}

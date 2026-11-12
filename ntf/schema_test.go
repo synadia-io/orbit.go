@@ -505,10 +505,10 @@ func TestResponsesMatchSchemas(t *testing.T) {
 
 	c.request("create.super-cluster", api.CreateSuperClusterRequest{Servers: 2, Clusters: 2}, nil)
 
-	c.request("stop.server", api.StopServerRequest{Name: name}, nil)
-	c.request("start.server", api.StartServerRequest{Name: name}, nil)
-	c.request("update.server", api.UpdateServerRequest{Name: name}, nil)
-	c.request("reload.server", api.ReloadServerRequest{Name: name}, nil)
+	c.request("stop.server", api.StopServerRequest{InstanceID: plain.ID, Name: name}, nil)
+	c.request("start.server", api.StartServerRequest{InstanceID: plain.ID, Name: name}, nil)
+	c.request("update.server", api.UpdateServerRequest{InstanceID: plain.ID, Name: name}, nil)
+	c.request("reload.server", api.ReloadServerRequest{InstanceID: plain.ID, Name: name}, nil)
 	c.request("stop.instance", api.StopInstanceRequest{InstanceID: plain.ID}, nil)
 	c.request("start.instance", api.StartInstanceRequest{InstanceID: plain.ID}, nil)
 

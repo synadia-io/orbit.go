@@ -220,11 +220,19 @@ connection the helper opens, and the naming options below.
 
 ### Naming servers and clusters
 
-By default every name carries the instance's short ID, the last 8 characters of its UUID: a server is `<short>-n1`, a
-cluster `C_<short>` with servers `<short>-n<i>`, and a super-cluster's clusters `SC_<short>_<c>` with servers
-`<short>-c<c>_s<i>`. These create options give names, and sizes per cluster, of your own. They need a service with
-custom names (`ntf` from `125ec5a`, or the `ntf-server` nightly images built after custom names were merged); older
-services ignore or refuse them.
+By default no name carries an ID, so the same default names repeat across instances: a server is `n1`, a cluster `c1`
+with servers `n<i>`, and a super-cluster's clusters `c<c>` with servers `<cluster>-n<i>`, such as `c2-n3`. Services
+from before default names dropped the instance's short ID, the last 8 characters of its UUID, name them `<short>-n1`,
+`C_<short>` with servers `<short>-n<i>`, and `SC_<short>_<c>` with servers `<short>-c<c>_s<i>`.
+
+Repeated names matter to leafnodes. nats-server refuses a leafnode between two clusters of one name, so two
+default-named clusters, both `c1`, need a name of their own on at least one side to join by leafnode. It also takes a
+second leafnode with the same server name, cluster name and account as an existing one for a reconnect and closes the
+first, so two default-named instances soliciting into one hub account keep replacing each other; name them apart.
+
+These create options give names, and sizes per cluster, of your own. They need a service with custom names (`ntf`
+from `125ec5a`, or the `ntf-server` nightly images built after custom names were merged); older services ignore or
+refuse them.
 
 | Option                       | Applies to           | Gives                                                                  |
 |------------------------------|----------------------|------------------------------------------------------------------------|
@@ -280,8 +288,8 @@ name more than one server holds.
 
 ### Parallel tests
 
-Because each instance has its own UUID, storage dir, and auto-generated cluster name, `t.Parallel()` is safe, and it
-stays safe with names of your own, since the `Instance` helpers say which instance's server they mean:
+Because each instance has its own UUID and storage dir, `t.Parallel()` is safe. Default names repeat across instances,
+as names of your own may, and that stays safe too, since the `Instance` helpers say which instance's server they mean:
 
 ```go
 for i := range 3 {
@@ -614,7 +622,7 @@ environment. Cluster fields are zero on a single server; super-cluster fields ar
 
 | Field               | Type                | Notes                                                                              |
 |---------------------|---------------------|------------------------------------------------------------------------------------|
-| `.ServerName`       | string              | unique within the instance; given, or `<short>-n<i>`, `<cluster>-n<i>` or `<short>-c<c>_s<i>` |
+| `.ServerName`       | string              | unique within the instance, not across instances; given, or `n<i>` or `<cluster>-n<i>`; use `.InstanceID` or `.ShortID` for a value unique across the service |
 | `.ShortID`          | string              | 8-char tail of the instance UUID                                                   |
 | `.InstanceID`       | string              | full instance UUID                                                                 |
 | `.ServerIndex`      | int                 | 1-based index within the cluster                                                   |
@@ -624,7 +632,7 @@ environment. Cluster fields are zero on a single server; super-cluster fields ar
 | `.AdvertiseHost`    | string              | `--advertise` value; empty when unset                                              |
 | `.ClientPort`       | int                 | client listener port, reserved by the service                                      |
 | `.JetStream`        | bool                | mirrors the `jetstream` request field                                              |
-| `.ClusterName`      | string              | empty for single-server instances                                                  |
+| `.ClusterName`      | string              | empty for single-server instances; given, or `c<c>`, so not unique across instances |
 | `.ClusterPort`      | int                 | cluster route listener port                                                        |
 | `.ClusterSize`      | int                 | number of servers in this server's own cluster; differs between clusters of a super-cluster |
 | `.Routes`           | []string            | `host:port` strings of every cluster peer                                          |
