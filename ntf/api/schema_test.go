@@ -119,6 +119,13 @@ func describeToxicTypes(s *invopop.Schema) {
 	}
 }
 
+// JSONSchemaExtend makes a credential hold exactly one type, as the keyed
+// form of a chaos run's credential does.
+func (Credential) JSONSchemaExtend(s *invopop.Schema) {
+	s.MinProperties = new(uint64(1))
+	s.MaxProperties = new(uint64(1))
+}
+
 // JSONSchemaExtend opens the attributes object. It keeps the rules of Toxic's,
 // which ActiveToxic would otherwise inherit, out of the responses.
 func (ActiveToxic) JSONSchemaExtend(s *invopop.Schema) {
@@ -447,7 +454,14 @@ func examples() map[string]any {
 			TLS:         &TLSOptions{Mode: TLSModeMutual, SANs: []string{"localhost"}, HandshakeFirst: true, Timeout: 0.5},
 			Trace:       true,
 		},
-		TypeCreateClusterRequest:      CreateClusterRequest{Type: TypeCreateClusterRequest, Servers: 3, JetStream: true, Toxics: true},
+		TypeCreateClusterRequest: CreateClusterRequest{
+			Type:              TypeCreateClusterRequest,
+			Servers:           3,
+			JetStream:         true,
+			Toxics:            true,
+			WaitJetStream:     30,
+			SystemCredentials: &Credential{UserPassword: &UserPassword{User: "admin", Password: "s3cret"}},
+		},
 		TypeCreateSuperClusterRequest: CreateSuperClusterRequest{Type: TypeCreateSuperClusterRequest, Servers: 3, Clusters: 2, Proxy: true},
 		TypeCreateResponse: CreateResponse{
 			Type:    TypeCreateResponse,
@@ -875,6 +889,82 @@ func TestCreateRequestNamesSchema(t *testing.T) {
 				t.Error("accepted, want a refusal")
 			}
 		})
+	}
+}
+
+// TestCreateRequestWaitSchema proves every create schema accepts a JetStream
+// wait of up to 300 seconds, fractions included, with system credentials in
+// the keyed form, and refuses a negative or longer wait and credentials
+// without exactly one complete type.
+func TestCreateRequestWaitSchema(t *testing.T) {
+	v := newSchemaValidator(t)
+
+	userPassword := func(user, password string) *Credential {
+		return &Credential{UserPassword: &UserPassword{User: user, Password: password}}
+	}
+
+	tests := []struct {
+		name  string
+		wait  float64
+		creds *Credential
+		extra map[string]any
+		valid bool
+	}{
+		{"wait", 30, nil, nil, true},
+		{"fractional wait", 0.5, nil, nil, true},
+		{"wait of 300", 300, nil, nil, true},
+		{"wait of 301", 301, nil, nil, false},
+		{"negative wait", -1, nil, nil, false},
+		{"credentials", 30, userPassword("admin", "s3cret"), nil, true},
+		{"credentials without a password", 30, userPassword("admin", ""), nil, true},
+		{"credentials without a user", 30, userPassword("", "s3cret"), nil, false},
+		{"credentials without a type", 30, &Credential{}, nil, false},
+		{"credentials of an unknown type", 30, nil, map[string]any{"system_credentials": map[string]any{"nkey": map[string]any{"seed": "x"}}}, false},
+		{"credentials of two types", 30, nil, map[string]any{"system_credentials": map[string]any{"user_password": map[string]any{"user": "a"}, "token": map[string]any{}}}, false},
+	}
+
+	kinds := []struct {
+		typ string
+		req func(wait float64, creds *Credential) any
+	}{
+		{TypeCreateServerRequest, func(wait float64, creds *Credential) any {
+			return CreateServerRequest{JetStream: true, WaitJetStream: wait, SystemCredentials: creds}
+		}},
+		{TypeCreateClusterRequest, func(wait float64, creds *Credential) any {
+			return CreateClusterRequest{Servers: 3, JetStream: true, WaitJetStream: wait, SystemCredentials: creds}
+		}},
+		{TypeCreateSuperClusterRequest, func(wait float64, creds *Credential) any {
+			return CreateSuperClusterRequest{Clusters: 2, Servers: 2, JetStream: true, WaitJetStream: wait, SystemCredentials: creds}
+		}},
+	}
+
+	for _, kind := range kinds {
+		for _, tt := range tests {
+			t.Run(kind.typ+"/"+tt.name, func(t *testing.T) {
+				var req any = kind.req(tt.wait, tt.creds)
+				if tt.extra != nil {
+					data, err := json.Marshal(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					fields := map[string]any{}
+					err = json.Unmarshal(data, &fields)
+					if err != nil {
+						t.Fatal(err)
+					}
+					maps.Copy(fields, tt.extra)
+					req = fields
+				}
+
+				err := v.validate(req, kind.typ)
+				if tt.valid && err != nil {
+					t.Errorf("refused: %v", err)
+				}
+				if !tt.valid && err == nil {
+					t.Error("accepted, want a refusal")
+				}
+			})
+		}
 	}
 }
 

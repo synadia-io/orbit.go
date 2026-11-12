@@ -96,3 +96,11 @@ var errServerNotFound = errors.New("server not found")
 // instance or across several. Clients that know the instance retry with its
 // instance_id on this refusal.
 var errServerNameAmbiguous = errors.New("server name is ambiguous")
+
+// errJetStreamNotReady is the cause of a create with wait_jetstream answered
+// with 024 because JetStream was not ready on every node when the wait ended.
+var errJetStreamNotReady = errors.New("JetStream not ready")
+
+// errInstanceDestroyed is the cause of a create with wait_jetstream answered
+// with 404 because its instance was destroyed while it waited.
+var errInstanceDestroyed = errors.New("instance destroyed")

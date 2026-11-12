@@ -613,6 +613,12 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 		return
 	}
 
+	wait, refusal := newJetStreamWait(creq.WaitJetStream, creq.SystemCredentials, creq.JetStream, creq.Snippets, creq.Template)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
+		return
+	}
+
 	if err := validateTLSRequest(creq.TLS, creq.Snippets, creq.Template); err != nil {
 		req.Error("007", err.Error(), nil)
 		return
@@ -664,6 +670,7 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 		Proxy:         proxied,
 		StoreCaptures: creq.Trace,
 		Toxics:        creq.Toxics,
+		JetStreamWait: wait,
 	}
 	setSpecTLS(&spec, creq.TLS)
 
@@ -814,6 +821,7 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 
 	servers := make([]*managedServer, 0, len(nodes))
 	ready := make([]*events.NodeAction, 0, len(nodes))
+	waitNodes := make([]waitNode, 0, len(nodes))
 
 	for i, n := range nodes {
 		node := started[i]
@@ -891,6 +899,11 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 			serverName = st.ServerName
 		}
 		ready = append(ready, &events.NodeAction{Action: events.NodeReady, Node: n.Name, ServerName: serverName})
+		// The JetStream wait dials the node's Internal client address, which
+		// the in-process backend serves on loopback in the service's own host,
+		// and which bypasses any client proxy. A backend whose Internal address
+		// the service cannot reach would need the wait to dial another one.
+		waitNodes = append(waitNodes, waitNode{name: n.Name, serverName: serverName, client: client.Internal})
 		resp.Servers = append(resp.Servers, &api.ManagedServer{
 			Name:      n.Name,
 			Port:      clientPort,
@@ -954,7 +967,23 @@ func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, 
 		return false
 	}
 
-	req.RespondJSON(resp)
+	if spec.JetStreamWait == nil {
+		req.RespondJSON(resp)
+		return false
+	}
+
+	// The wait runs once the instance is published, so a destroy or a status
+	// meanwhile finds it, and in a goroutine of its own, so the creates queued
+	// behind this one do not wait for it as well. It holds no lock while it
+	// waits.
+	dial := waitDial{user: spec.JetStreamWait.user, password: spec.JetStreamWait.password, tls: resp.TLS, handshakeFirst: spec.TLSHandshakeFirst}
+	if resp.TLS != nil {
+		dial.sans = effectiveSANs(spec.TLSSANs, spec.AdvertiseHost)
+	}
+
+	s.detach(req, func(r micro.Request) {
+		s.answerAfterJetStreamWait(r, inst, spec.JetStreamWait, dial, waitNodes, resp)
+	})
 
 	return false
 }
@@ -1156,6 +1185,12 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		return
 	}
 
+	wait, refusal := newJetStreamWait(creq.WaitJetStream, creq.SystemCredentials, creq.JetStream, creq.Snippets, creq.Template)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
+		return
+	}
+
 	if err := validateTLSRequest(creq.TLS, creq.Snippets, creq.Template); err != nil {
 		req.Error("007", err.Error(), nil)
 		return
@@ -1206,6 +1241,7 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		Proxy:         proxied,
 		StoreCaptures: creq.Trace,
 		Toxics:        creq.Toxics,
+		JetStreamWait: wait,
 	}
 	setSpecTLS(&spec, creq.TLS)
 
@@ -1238,6 +1274,12 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 
 	if err := validateJetStreamSnippet(creq.Snippets, creq.JetStream); err != nil {
 		req.Error("011", err.Error(), nil)
+		return
+	}
+
+	wait, refusal := newJetStreamWait(creq.WaitJetStream, creq.SystemCredentials, creq.JetStream, creq.Snippets, creq.Template)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
 		return
 	}
 
@@ -1292,6 +1334,7 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		Proxy:         proxied,
 		StoreCaptures: creq.Trace,
 		Toxics:        creq.Toxics,
+		JetStreamWait: wait,
 	}
 	setSpecTLS(&spec, creq.TLS)
 

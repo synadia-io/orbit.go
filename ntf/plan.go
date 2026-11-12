@@ -98,6 +98,11 @@ type instanceSpec struct {
 	// clusters and every node's client listener, and advertises a dead
 	// address for routes and gateways.
 	Toxics bool
+
+	// JetStreamWait is how the create waits for JetStream once its nodes are
+	// published, before it answers. Nil answers at once. The planner never
+	// reads it.
+	JetStreamWait *jetStreamWait
 }
 
 // clusterSpec is one cluster of a cluster or super-cluster, as a validated

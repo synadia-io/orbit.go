@@ -84,6 +84,19 @@ type CreateServerRequest struct {
 	// listener, which Port then reports. It needs an agent that declares the
 	// toxics capability.
 	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Fronts the server's client listener with an agent proxy so toxics can act on it"`
+	// WaitJetStream is how long, in seconds, the create waits once its
+	// servers are ready for JetStream to take requests: every server answers
+	// with JetStream enabled and the same meta leader, which lists every other
+	// server as a current peer. Fractions are honored. Zero does not wait. It
+	// needs JetStream, and SystemCredentials when the instance's system
+	// account is not the built-in template's. A create still waiting when it
+	// passes fails with 024 and leaves the instance in place.
+	WaitJetStream float64 `json:"wait_jetstream,omitempty" jsonschema:"minimum=0,maximum=300" jsonschema_description:"How long in seconds the create waits, once its servers are ready, for every server to report JetStream enabled under one meta leader with every peer current, fractions honored, no wait when zero"`
+	// SystemCredentials are how the JetStream wait authenticates to the
+	// system account. Absent, it uses the built-in template's system user,
+	// which a custom template or an accounts or system_account snippet
+	// replaces, so such a create needs them to wait.
+	SystemCredentials *Credential `json:"system_credentials,omitempty" jsonschema_description:"How the JetStream wait authenticates to the system account, the built-in template's system user when absent"`
 }
 
 type CreateClusterRequest struct {
@@ -116,6 +129,19 @@ type CreateClusterRequest struct {
 	// through proxies of the instance's agent, which Links lists. It needs an
 	// agent that declares the toxics capability.
 	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Sends every route and every node's clients through agent proxies so toxics can act on them"`
+	// WaitJetStream is how long, in seconds, the create waits once its
+	// servers are ready for JetStream to take requests: every server answers
+	// with JetStream enabled and the same meta leader, which lists every other
+	// server as a current peer. Fractions are honored. Zero does not wait. It
+	// needs JetStream, and SystemCredentials when the instance's system
+	// account is not the built-in template's. A create still waiting when it
+	// passes fails with 024 and leaves the instance in place.
+	WaitJetStream float64 `json:"wait_jetstream,omitempty" jsonschema:"minimum=0,maximum=300" jsonschema_description:"How long in seconds the create waits, once its servers are ready, for every server to report JetStream enabled under one meta leader with every peer current, fractions honored, no wait when zero"`
+	// SystemCredentials are how the JetStream wait authenticates to the
+	// system account. Absent, it uses the built-in template's system user,
+	// which a custom template or an accounts or system_account snippet
+	// replaces, so such a create needs them to wait.
+	SystemCredentials *Credential `json:"system_credentials,omitempty" jsonschema_description:"How the JetStream wait authenticates to the system account, the built-in template's system user when absent"`
 }
 
 // CreateSuperClusterRequest creates a super-cluster. Its clusters are given
@@ -145,6 +171,19 @@ type CreateSuperClusterRequest struct {
 	// node's clients through proxies of the instance's agent, which Links lists.
 	// It needs an agent that declares the toxics capability.
 	Toxics bool `json:"toxics,omitempty" jsonschema_description:"Sends every route, every gateway and every node's clients through agent proxies so toxics can act on them"`
+	// WaitJetStream is how long, in seconds, the create waits once its
+	// servers are ready for JetStream to take requests: every server answers
+	// with JetStream enabled and the same meta leader, which lists every other
+	// server as a current peer. Fractions are honored. Zero does not wait. It
+	// needs JetStream, and SystemCredentials when the instance's system
+	// account is not the built-in template's. A create still waiting when it
+	// passes fails with 024 and leaves the instance in place.
+	WaitJetStream float64 `json:"wait_jetstream,omitempty" jsonschema:"minimum=0,maximum=300" jsonschema_description:"How long in seconds the create waits, once its servers are ready, for every server to report JetStream enabled under one meta leader with every peer current, fractions honored, no wait when zero"`
+	// SystemCredentials are how the JetStream wait authenticates to the
+	// system account. Absent, it uses the built-in template's system user,
+	// which a custom template or an accounts or system_account snippet
+	// replaces, so such a create needs them to wait.
+	SystemCredentials *Credential `json:"system_credentials,omitempty" jsonschema_description:"How the JetStream wait authenticates to the system account, the built-in template's system user when absent"`
 }
 
 // ClusterSpec is one cluster of a super-cluster create's ClusterList.
@@ -160,6 +199,22 @@ type ClusterSpec struct {
 	// Without it a server is named <name>-n<i> when Name is given, and by
 	// default otherwise.
 	ServerNames []string `json:"server_names,omitempty" jsonschema:"minItems=1,maxItems=20,maxLength=32,pattern=^[A-Za-z][A-Za-z0-9_-]*$" jsonschema_description:"The servers' names in order, each a letter then letters, digits, _ or -, at most 32 characters"`
+}
+
+// Credential is how the service authenticates to an account of an instance,
+// in the keyed form: exactly one field is set, and its JSON key names the
+// credential's type. Only user_password exists; other types are added as
+// fields beside it, so requests written today keep decoding. It has the shape
+// of a chaos run's credentials.
+type Credential struct {
+	// UserPassword is a user and password.
+	UserPassword *UserPassword `json:"user_password,omitempty" jsonschema_description:"A user and password"`
+}
+
+// UserPassword is a user and password credential.
+type UserPassword struct {
+	User     string `json:"user" jsonschema:"required,minLength=1" jsonschema_description:"The user"`
+	Password string `json:"password" jsonschema_description:"The password, empty for none"`
 }
 
 type ManagedServer struct {
