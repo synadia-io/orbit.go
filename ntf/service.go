@@ -223,14 +223,21 @@ type Service struct {
 	mu        sync.Mutex
 	instances map[string]*instance
 
-	// detachedRequests counts the requests perRequest runs in goroutines of
-	// their own, for the stop, start and reload of a server and for the toxic
-	// endpoints, so Close waits for them before it tears the instances down.
+	// detachedRequests counts the requests run in goroutines of their own,
+	// the stop, start and reload of a server and the toxic endpoints through
+	// perRequest and the creates waiting for JetStream, so Close waits for
+	// them before it tears the instances down.
 	// Add is called only under detachedRequestsMu while
 	// detachedRequestsClosed is false, so no Add races the Wait in Close.
 	detachedRequests       sync.WaitGroup
 	detachedRequestsMu     sync.Mutex
 	detachedRequestsClosed bool
+
+	// closing is closed when Close begins, under detachedRequestsMu as
+	// detachedRequestsClosed is set, so a create waiting for JetStream in a
+	// goroutine of its own gives up rather than holding Close for the rest
+	// of its wait.
+	closing chan struct{}
 }
 
 type instance struct {
@@ -389,6 +396,7 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		advertiseHost: opts.AdvertiseHost,
 		group:         group,
 		instances:     map[string]*instance{},
+		closing:       make(chan struct{}),
 	}
 
 	portRange, err := resolvePortRange(opts.PortRange, ephemeralPortRange, log)
@@ -841,31 +849,38 @@ func (s *Service) startServices(name, group string) error {
 // endpoint's does.
 func (s *Service) perRequest(h micro.HandlerFunc) micro.HandlerFunc {
 	return func(req micro.Request) {
-		s.detachedRequestsMu.Lock()
-		closed := s.detachedRequestsClosed
-		if !closed {
-			s.detachedRequests.Add(1)
-		}
-		s.detachedRequestsMu.Unlock()
-
-		if closed {
-			h(req)
-			return
-		}
-
-		r := &detachedRequest{
-			nc:      s.nc,
-			subject: req.Subject(),
-			reply:   req.Reply(),
-			data:    req.Data(),
-			headers: req.Headers(),
-		}
-
-		go func() {
-			defer s.detachedRequests.Done()
-			h(r)
-		}()
+		s.detach(req, h)
 	}
+}
+
+// detach runs h for req in a goroutine of its own, answering through a
+// detachedRequest, and counts it in detachedRequests so Close waits for it.
+// Once Close has begun it runs h in the caller instead.
+func (s *Service) detach(req micro.Request, h micro.HandlerFunc) {
+	s.detachedRequestsMu.Lock()
+	closed := s.detachedRequestsClosed
+	if !closed {
+		s.detachedRequests.Add(1)
+	}
+	s.detachedRequestsMu.Unlock()
+
+	if closed {
+		h(req)
+		return
+	}
+
+	r := &detachedRequest{
+		nc:      s.nc,
+		subject: req.Subject(),
+		reply:   req.Reply(),
+		data:    req.Data(),
+		headers: req.Headers(),
+	}
+
+	go func() {
+		defer s.detachedRequests.Done()
+		h(r)
+	}()
 }
 
 // detachedRequest is a micro.Request a handler can answer after the micro
@@ -1006,7 +1021,8 @@ func (s *Service) resetWith(reason events.DestroyReason) error {
 
 // Close stops serving and releases everything the service owns: it stops answering
 // requests, waits for the server stop, start and reload requests and the toxic
-// requests still running, tears down every instance (flushing captures while
+// requests still running, ends the JetStream waits of creates still waiting,
+// which answer 024, tears down every instance (flushing captures while
 // the connection is still up), closes the agent provider, and shuts down the
 // embedded server. A connection supplied through Options is left open, as is a
 // directory supplied through Options.Dir.
@@ -1020,8 +1036,12 @@ func (s *Service) Close() error {
 	}
 
 	// Wait for the requests still running in their own goroutines, so none
-	// acts on an instance while it is torn down below.
+	// acts on an instance while it is torn down below. A create waiting for
+	// JetStream gives up once closing is closed.
 	s.detachedRequestsMu.Lock()
+	if !s.detachedRequestsClosed {
+		close(s.closing)
+	}
 	s.detachedRequestsClosed = true
 	s.detachedRequestsMu.Unlock()
 	s.detachedRequests.Wait()

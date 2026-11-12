@@ -142,6 +142,47 @@ Given names, the `<cluster>-n<i>` servers of a named cluster and every node's di
   leafnodes into the same hub account, such as two `n1` servers or two `c1` clusters, keep replacing each other's
   connection and never both stay connected. Name them apart with `name`, `cluster_name` or `server_names`.
 
+### Waiting for JetStream
+
+A create returns once every server has started, before a JetStream cluster has elected its meta leader, so the first
+JetStream requests to a new cluster can fail with `10008` or time out. A create given `wait_jetstream`, a number of
+seconds with fractions honored and at most 300, answers only once JetStream takes requests: every server replies to
+`$SYS.REQ.SERVER.PING.JSZ` with JetStream enabled and names the same meta leader, and the leader lists every other
+server as a current peer that is not offline. A lone server runs JetStream without a meta group and is ready once it
+reports JetStream enabled. Every create endpoint takes it.
+
+The service asks over a system account connection to a server's own client listener rather than any `toxics` or
+`trace` proxy in front of it, so a toxic never cuts it, in rounds every 250ms. It authenticates as the built-in template's `system` user, or with
+`system_credentials`, given in the keyed form a chaos run's credentials use:
+
+```json
+{"servers": 3, "jetstream": true, "wait_jetstream": 30,
+ "system_credentials": {"user_password": {"user": "admin", "password": "s3cret"}}}
+```
+
+An instance with generated `tls` is dialed with its own CA, client certificate and handshake-first setting. A wait is
+refused before anything starts:
+
+- with `011` without `jetstream`;
+- with `002` with a custom `template` or an `accounts` or `system_account` snippet and no `system_credentials`, since
+  either replaces the built-in system user;
+- with `002` with a `tls` snippet, since the service has neither its CA nor a client certificate to dial it with;
+- with `002` for `system_credentials` without `wait_jetstream`;
+- with `001` for a wait above 300 seconds or below 0, or credentials without exactly one complete type.
+
+The instance is published, with its `created` and `ready` events, before the wait starts, so status, list and destroy
+see it while the create waits. The wait runs apart from the create endpoint, so the creates behind it do not wait for
+it as well, and holds no lock. A create still waiting when `wait_jetstream` passes answers `024`, whose description
+names the instance and each server not ready with why: `no reply`, `JetStream not enabled`,
+`replied with error: <description>`, `no meta leader`, `meta leader <name> not confirmed`,
+`sees meta leader <name>, not <name>`, `not current on meta leader <name>`, `offline on meta leader <name>` or
+`not a peer of meta leader <name>`, with the most telling dial failure when no server could be reached: a refusal
+outranks a dial the end of the wait cut short. When every server refuses the system credentials the wait ends at once
+rather than at its timeout, with `024` naming each server as `refused the system credentials` and the refusal. Its
+data is the create response, and the instance is left in place for the caller to inspect or destroy. A destroy or
+reset of the instance during the wait answers `404`, and `Close` ends a wait, a dial or a round in progress included,
+with `024`. A caller sets its request timeout above the wait.
+
 ## Trace capture
 
 `Create*` requests accept `trace` to front a server's client port with a capture proxy that stores every
@@ -295,9 +336,9 @@ into one result. The request and reply are the
 
 | Subject                       | Description                                                                 |
 |-------------------------------|-----------------------------------------------------------------------------|
-| `tester.create.server`        | Creates a single server. Optional `name`, `snippets`, `template`, `trace`, `proxy`, `toxics`. |
-| `tester.create.cluster`       | Creates a cluster of `servers` or `server_names`. Optional `cluster_name`, `snippets`, `template`, `trace`, `proxy`, `toxics`. |
-| `tester.create.super-cluster` | Creates a super-cluster of `clusters` and `servers`, or of a `cluster_list`. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`. |
+| `tester.create.server`        | Creates a single server. Optional `name`, `snippets`, `template`, `trace`, `proxy`, `toxics`, `wait_jetstream`, `system_credentials`. |
+| `tester.create.cluster`       | Creates a cluster of `servers` or `server_names`. Optional `cluster_name`, `snippets`, `template`, `trace`, `proxy`, `toxics`, `wait_jetstream`, `system_credentials`. |
+| `tester.create.super-cluster` | Creates a super-cluster of `clusters` and `servers`, or of a `cluster_list`. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`, `wait_jetstream`, `system_credentials`. |
 | `tester.stop.server`          | Stops a running server by name. Optional `instance_id`.                     |
 | `tester.start.server`         | Starts a previously-stopped server by name. Optional `instance_id`.         |
 | `tester.stop.instance`        | Stops every server in an instance, keeping config and storage.              |

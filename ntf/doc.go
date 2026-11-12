@@ -47,6 +47,17 @@ network rather than an in-memory shortcut. They bind the wildcard address, so on
 developer machine an instance is reachable from the local network for as long as it
 lives.
 
+# Waiting for JetStream
+
+A create returns once every server has started, before a JetStream cluster has
+elected its meta leader. A create request's wait_jetstream, in seconds, makes it
+answer only once every server reports JetStream enabled under one meta leader that
+lists every other server as a current peer, asked over the system account. It uses
+the built-in template's system user, or the request's system_credentials, which a
+custom template or an accounts or system_account snippet requires. A wait that
+times out answers 024 naming each server not ready, with the create response as
+its data, and leaves the instance in place.
+
 # Trace capture
 
 Options.Agents registers network agent factories by name and Options.Agent selects
