@@ -24,8 +24,9 @@ type kindOpt struct {
 
 // WithName names the server of a CreateServer call. A name starts with a
 // letter, holds only letters, digits, _ and -, and is at most 32 characters;
-// the service refuses any other. Without it the server is named
-// <short>-n1, after the instance's short ID.
+// the service refuses any other. Without it the server is named n1 (or
+// <short>-n1, after the instance's short ID, by services from before default
+// names dropped it).
 //
 // Server names are unique within an instance but not across instances; see
 // Manager.StopInstanceServer for operating on a name that more than one
@@ -42,8 +43,9 @@ func WithName(name string) CreateOption {
 
 // WithClusterName names the cluster of a CreateCluster call. It follows the
 // name rule of WithName and is at most 28 characters. Without it the cluster is
-// named C_<short>. A server of a named cluster that WithServerNames does not
-// name is <cluster>-n<i>.
+// named c1 and its servers n<i> (C_<short> and <short>-n<i> by services from
+// before default names dropped the short ID). A server of a named cluster that
+// WithServerNames does not name is <cluster>-n<i>.
 //
 // It applies to CreateCluster only: any other create returns
 // ErrInvalidCreateOption; name the clusters of a super-cluster with
@@ -88,9 +90,10 @@ func WithServerNames(names ...string) CreateOption {
 // Client super-cluster helpers) must both be zero, or the create returns
 // ErrInvalidCreateOption; the request carries the list alone.
 //
-// An entry without a name keeps the default name of its position,
-// SC_<short>_<c>, and its unnamed servers are <short>-c<c>_s<i>; the unnamed
-// servers of a named cluster are <cluster>-n<i>.
+// An entry without a name keeps the default name of its position, c<c>, and
+// the unnamed servers of any cluster are <cluster>-n<i>. Services from before
+// default names dropped the short ID name an unnamed entry SC_<short>_<c> and
+// its unnamed servers <short>-c<c>_s<i>.
 //
 // It applies to CreateSuperCluster only: any other create returns
 // ErrInvalidCreateOption. Without entries it returns ErrInvalidCreateOption too.

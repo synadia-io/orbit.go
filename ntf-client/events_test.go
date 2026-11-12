@@ -112,11 +112,11 @@ func TestEventsFollowAfterStatus(t *testing.T) {
 	}
 
 	srv := inst.Servers[0]
-	_, err = m.StopServer(ctx, srv.Name)
+	_, err = m.StopInstanceServer(ctx, inst.ID, srv.Name)
 	if err != nil {
 		t.Fatalf("stop server: %v", err)
 	}
-	_, err = m.StartServer(ctx, srv.Name)
+	_, err = m.StartInstanceServer(ctx, inst.ID, srv.Name)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}
@@ -172,11 +172,11 @@ func TestEventsReplayAfterDestroy(t *testing.T) {
 	}()
 
 	srv := inst.Servers[0]
-	_, err = m.StopServer(ctx, srv.Name)
+	_, err = m.StopInstanceServer(ctx, inst.ID, srv.Name)
 	if err != nil {
 		t.Fatalf("stop server: %v", err)
 	}
-	_, err = m.StartServer(ctx, srv.Name)
+	_, err = m.StartInstanceServer(ctx, inst.ID, srv.Name)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestEventsNewOnly(t *testing.T) {
 	}
 
 	srv := inst.Servers[0]
-	_, err = m.StopServer(ctx, srv.Name)
+	_, err = m.StopInstanceServer(ctx, inst.ID, srv.Name)
 	if err != nil {
 		t.Fatalf("stop server: %v", err)
 	}
