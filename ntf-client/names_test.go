@@ -17,7 +17,8 @@ import (
 // so a Manager connected there talks to it alone and never to the real
 // service. respond decides each answer from the subject and the decoded
 // request: an empty code answers reply, any other code refuses the request
-// with code and desc. Every request is recorded.
+// with code and desc, carrying reply as the refusal's data when it is not nil.
+// Every request is recorded.
 type fakeService struct {
 	mu       sync.Mutex
 	subjects []string
@@ -71,7 +72,8 @@ func startFakeService(t *testing.T, respond func(subject string, req map[string]
 		if code != "" {
 			resp.Header.Set("Nats-Service-Error", desc)
 			resp.Header.Set("Nats-Service-Error-Code", code)
-		} else {
+		}
+		if code == "" || reply != nil {
 			data, merr := json.Marshal(reply)
 			if merr != nil {
 				t.Errorf("fake: encode reply: %v", merr)

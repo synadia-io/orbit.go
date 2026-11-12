@@ -95,7 +95,8 @@ func withDefaultTimeout(ctx context.Context, timeout time.Duration) (context.Con
 // request sends req as JSON to subject and decodes the reply into resp. A nil req
 // sends an empty payload. A Nats-Service-Error header on the reply is returned as
 // a *serviceError, which matches ErrService, and ErrInstanceNotFound for code
-// 404 or ErrServerNameAmbiguous for code 023.
+// 404, ErrServerNameAmbiguous for code 023 or ErrJetStreamNotReady for code
+// 024, and carries the reply's data.
 func (m *Manager) request(ctx context.Context, subject string, timeout time.Duration, req any, resp any) error {
 	var payload []byte
 	if req != nil {
@@ -115,7 +116,7 @@ func (m *Manager) request(ctx context.Context, subject string, timeout time.Dura
 	}
 	e := msg.Header.Get("Nats-Service-Error")
 	if e != "" {
-		return &serviceError{subject: subject, code: msg.Header.Get("Nats-Service-Error-Code"), desc: e}
+		return &serviceError{subject: subject, code: msg.Header.Get("Nats-Service-Error-Code"), desc: e, data: msg.Data}
 	}
 
 	err = json.Unmarshal(msg.Data, resp)
@@ -127,12 +128,14 @@ func (m *Manager) request(ctx context.Context, subject string, timeout time.Dura
 
 // serviceError is a refusal from the management service: the subject refused,
 // and the code and description the service answered with. It matches ErrService
-// under errors.Is, ErrInstanceNotFound for code 404, and ErrServerNameAmbiguous
-// for code 023.
+// under errors.Is, ErrInstanceNotFound for code 404, ErrServerNameAmbiguous
+// for code 023, and ErrJetStreamNotReady for code 024. data is the refusal's
+// payload, which for 024 is the create response of the instance left in place.
 type serviceError struct {
 	subject string
 	code    string
 	desc    string
+	data    []byte
 }
 
 // sentinel returns the sentinel the code adds to ErrService, or nil.
@@ -146,6 +149,9 @@ func (e *serviceError) sentinel() error {
 		// A stop, start, update or reload of a name more than one server
 		// holds.
 		return ErrServerNameAmbiguous
+	case "024":
+		// A create whose JetStream wait ended with JetStream not ready.
+		return ErrJetStreamNotReady
 	}
 	return nil
 }
@@ -176,6 +182,10 @@ func refusesInstanceID(err error) bool {
 
 // CreateServer creates a single server. WithName names it. A create option that
 // applies to another kind of instance returns ErrInvalidCreateOption.
+//
+// With WithJetStreamWait, a wait that ends with JetStream not ready returns an
+// error matching ErrJetStreamNotReady together with the instance the service
+// left in place, which the caller must destroy.
 func (m *Manager) CreateServer(ctx context.Context, js bool, opts ...CreateOption) (*Instance, error) {
 	co := resolveCreateOptions(opts)
 	err := co.checkKind(kindServer)
@@ -183,15 +193,17 @@ func (m *Manager) CreateServer(ctx context.Context, js bool, opts ...CreateOptio
 		return nil, err
 	}
 
-	return m.create(ctx, "tester.create.server", api.CreateServerRequest{
-		Name:        co.name,
-		JetStream:   js,
-		Description: co.description,
-		Snippets:    co.snippets,
-		Template:    co.template,
-		TLS:         co.tls,
-		Trace:       co.trace,
-		Toxics:      co.toxics,
+	return m.create(ctx, "tester.create.server", co.createRequestTimeout(), api.CreateServerRequest{
+		Name:              co.name,
+		JetStream:         js,
+		Description:       co.description,
+		Snippets:          co.snippets,
+		Template:          co.template,
+		TLS:               co.tls,
+		Trace:             co.trace,
+		Toxics:            co.toxics,
+		WaitJetStream:     co.waitSeconds(),
+		SystemCredentials: co.systemCredentials,
 	})
 }
 
@@ -199,6 +211,10 @@ func (m *Manager) CreateServer(ctx context.Context, js bool, opts ...CreateOptio
 // cluster and WithServerNames its servers; with WithServerNames, servers may be
 // zero, and a non-zero count must equal the number of names. A create option
 // that applies to another kind of instance returns ErrInvalidCreateOption.
+//
+// With WithJetStreamWait, a wait that ends with JetStream not ready returns an
+// error matching ErrJetStreamNotReady together with the instance the service
+// left in place, which the caller must destroy.
 func (m *Manager) CreateCluster(ctx context.Context, servers int, js bool, opts ...CreateOption) (*Instance, error) {
 	co := resolveCreateOptions(opts)
 	err := co.checkKind(kindCluster)
@@ -209,17 +225,19 @@ func (m *Manager) CreateCluster(ctx context.Context, servers int, js bool, opts 
 		return nil, fmt.Errorf("%w: WithServerNames needs at least one name", ErrInvalidCreateOption)
 	}
 
-	return m.create(ctx, "tester.create.cluster", api.CreateClusterRequest{
-		JetStream:   js,
-		Servers:     servers,
-		ClusterName: co.clusterName,
-		ServerNames: co.serverNames,
-		Description: co.description,
-		Snippets:    co.snippets,
-		Template:    co.template,
-		TLS:         co.tls,
-		Trace:       co.trace,
-		Toxics:      co.toxics,
+	return m.create(ctx, "tester.create.cluster", co.createRequestTimeout(), api.CreateClusterRequest{
+		JetStream:         js,
+		Servers:           servers,
+		ClusterName:       co.clusterName,
+		ServerNames:       co.serverNames,
+		Description:       co.description,
+		Snippets:          co.snippets,
+		Template:          co.template,
+		TLS:               co.tls,
+		Trace:             co.trace,
+		Toxics:            co.toxics,
+		WaitJetStream:     co.waitSeconds(),
+		SystemCredentials: co.systemCredentials,
 	})
 }
 
@@ -228,6 +246,10 @@ func (m *Manager) CreateCluster(ctx context.Context, servers int, js bool, opts 
 // size and server names; clusters and servers must then both be zero, or it
 // returns ErrInvalidCreateOption. A create option that applies to another kind
 // of instance returns ErrInvalidCreateOption too.
+//
+// With WithJetStreamWait, a wait that ends with JetStream not ready returns an
+// error matching ErrJetStreamNotReady together with the instance the service
+// left in place, which the caller must destroy.
 func (m *Manager) CreateSuperCluster(ctx context.Context, clusters int, servers int, js bool, opts ...CreateOption) (*Instance, error) {
 	co := resolveCreateOptions(opts)
 	err := co.checkKind(kindSuperCluster)
@@ -241,27 +263,55 @@ func (m *Manager) CreateSuperCluster(ctx context.Context, clusters int, servers 
 		return nil, fmt.Errorf("%w: with WithClusters the clusters and servers arguments must be zero, got %d and %d", ErrInvalidCreateOption, clusters, servers)
 	}
 
-	return m.create(ctx, "tester.create.super-cluster", api.CreateSuperClusterRequest{
-		JetStream:   js,
-		Clusters:    clusters,
-		Servers:     servers,
-		ClusterList: co.clusterList,
-		Description: co.description,
-		Snippets:    co.snippets,
-		Template:    co.template,
-		TLS:         co.tls,
-		Trace:       co.trace,
-		Toxics:      co.toxics,
+	return m.create(ctx, "tester.create.super-cluster", co.createRequestTimeout(), api.CreateSuperClusterRequest{
+		JetStream:         js,
+		Clusters:          clusters,
+		Servers:           servers,
+		ClusterList:       co.clusterList,
+		Description:       co.description,
+		Snippets:          co.snippets,
+		Template:          co.template,
+		TLS:               co.tls,
+		Trace:             co.trace,
+		Toxics:            co.toxics,
+		WaitJetStream:     co.waitSeconds(),
+		SystemCredentials: co.systemCredentials,
 	})
 }
 
-func (m *Manager) create(ctx context.Context, subject string, req any) (*Instance, error) {
+// create sends a create request to subject and returns the instance it made.
+// A JetStream wait that ended unready returns the instance the service left in
+// place, taken from the refusal's data, alongside the error.
+func (m *Manager) create(ctx context.Context, subject string, timeout time.Duration, req any) (*Instance, error) {
 	resp := api.CreateResponse{}
-	err := m.request(ctx, subject, createTimeout, req, &resp)
+	err := m.request(ctx, subject, timeout, req, &resp)
 	if err != nil {
-		return nil, err
+		return m.instanceLeftInPlace(err), err
 	}
 
+	return m.newInstance(resp), nil
+}
+
+// instanceLeftInPlace returns the instance a create refused with err left in
+// place: the instance in the data of a 024 refusal, whose JetStream wait ended
+// unready. It returns nil for any other error, or data that names no instance.
+func (m *Manager) instanceLeftInPlace(err error) *Instance {
+	var se *serviceError
+	if !errors.As(err, &se) || se.code != "024" || len(se.data) == 0 {
+		return nil
+	}
+
+	left := api.CreateResponse{}
+	uerr := json.Unmarshal(se.data, &left)
+	if uerr != nil || left.ID == "" {
+		return nil
+	}
+	return m.newInstance(left)
+}
+
+// newInstance returns the Instance a create response describes, with each
+// server's URL and TraceURL set to dial it at the service's address.
+func (m *Manager) newInstance(resp api.CreateResponse) *Instance {
 	for _, srv := range resp.Servers {
 		srv.URL = fmt.Sprintf("nats://%s:%d", m.address, srv.Port)
 		tp, ok := srv.Ports["trace"]
@@ -278,7 +328,7 @@ func (m *Manager) create(ctx context.Context, subject string, req any) (*Instanc
 		TLS:         resp.TLS,
 		Links:       resp.Links,
 		m:           m,
-	}, nil
+	}
 }
 
 // List returns a lightweight summary of every instance currently held by the

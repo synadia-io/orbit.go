@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -82,6 +83,10 @@ type createOptions struct {
 	tls            *api.TLSOptions
 	trace          bool
 	toxics         bool
+
+	// The JetStream wait, from WithJetStreamWait and WithSystemCredentials.
+	jetStreamWait     time.Duration
+	systemCredentials *api.Credential
 
 	// Names, from WithName, WithClusterName, WithServerNames and
 	// WithClusters. kindOpts records which of them were given, so a create
@@ -615,38 +620,59 @@ func (c *Client) withSuperCluster(t testing.TB, clusters int, servers int, js bo
 }
 
 // CreateSuperCluster creates a super cluster. See Manager.CreateSuperCluster for
-// WithClusters.
+// WithClusters. A create whose WithJetStreamWait ends with JetStream not ready
+// destroys the instance the service left in place and fails the test.
 func (c *Client) CreateSuperCluster(t testing.TB, clusters int, servers int, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
 	inst, err := c.m.CreateSuperCluster(context.Background(), clusters, servers, js, withTestDescription(t, opts)...)
 	if err != nil {
-		t.Fatalf("could not create super-cluster: %v", err)
+		failCreate(t, "super-cluster", inst, err)
 	}
 	return inst
 }
 
 // CreateCluster creates a cluster. See Manager.CreateCluster for
-// WithClusterName and WithServerNames.
+// WithClusterName and WithServerNames. A create whose WithJetStreamWait ends
+// with JetStream not ready destroys the instance the service left in place and
+// fails the test.
 func (c *Client) CreateCluster(t testing.TB, servers int, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
 	inst, err := c.m.CreateCluster(context.Background(), servers, js, withTestDescription(t, opts)...)
 	if err != nil {
-		t.Fatalf("could not create cluster: %v", err)
+		failCreate(t, "cluster", inst, err)
 	}
 	return inst
 }
 
-// CreateServer creates a server. See Manager.CreateServer for WithName.
+// CreateServer creates a server. See Manager.CreateServer for WithName. A
+// create whose WithJetStreamWait ends with JetStream not ready destroys the
+// instance the service left in place and fails the test.
 func (c *Client) CreateServer(t testing.TB, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
 	inst, err := c.m.CreateServer(context.Background(), js, withTestDescription(t, opts)...)
 	if err != nil {
-		t.Fatalf("could not create server: %v", err)
+		failCreate(t, "server", inst, err)
 	}
 	return inst
+}
+
+// failCreate fails t with err, the error of a create of kind. It first
+// destroys inst, the instance a create whose JetStream wait ended unready left
+// in place, when there is one, since the test never gets to. An instance
+// already gone, destroyed while the wait ended, is not an error.
+func failCreate(t testing.TB, kind string, inst *Instance, err error) {
+	t.Helper()
+
+	if inst != nil {
+		_, derr := inst.m.Destroy(context.Background(), inst.ID)
+		if derr != nil && !errors.Is(derr, ErrInstanceNotFound) {
+			t.Errorf("could not destroy instance %s left by the failed create: %v", inst.ID, derr)
+		}
+	}
+	t.Fatalf("could not create %s: %v", kind, err)
 }
 
 // List returns a lightweight summary of every instance currently held by the

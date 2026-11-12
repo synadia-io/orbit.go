@@ -32,6 +32,16 @@ var (
 	// ErrService.
 	ErrServerNameAmbiguous = errors.New("server name is held by more than one server")
 
+	// ErrJetStreamNotReady is returned when a create given WithJetStreamWait
+	// ends with JetStream not ready on every server, with error code 024: the
+	// wait passed, every server refused the system credentials, or the
+	// service closed. It is returned wrapped together with ErrService, and the
+	// error text carries the service's reason, naming each server not ready.
+	// The service leaves the instance in place, and the create returns it
+	// alongside the error, when the service's answer names it, so the caller
+	// can inspect or destroy it.
+	ErrJetStreamNotReady = errors.New("JetStream did not become ready")
+
 	// ErrInvalidCreateOption is returned, before any request is sent, when a
 	// create option does not apply to the kind of instance being created,
 	// WithServerNames or WithClusters is given empty, or WithClusters is given
