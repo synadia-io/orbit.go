@@ -1,7 +1,7 @@
 === c1_s1/config.cfg
 
 
-server_name: "<SHORT>-c1_s1"
+server_name: "c1-n1"
 port: <PORT1>
 
 client_advertise: "localhost:<PORT1>"
@@ -20,7 +20,7 @@ jetstream {
 
 
 cluster {
-	name: "SC_<SHORT>_1"
+	name: "c1"
 	port: <PORT2>
 	routes: [
 
@@ -34,17 +34,17 @@ cluster {
 
 
 gateway {
-	name: "SC_<SHORT>_1"
+	name: "c1"
 	port: <PORT4>
 	gateways: [
 
-		{ name: "SC_<SHORT>_1", urls: [
+		{ name: "c1", urls: [
 		"nats://localhost:<PORT4>"
 
 		"nats://localhost:<PORT5>"
 ]}
 
-		{ name: "SC_<SHORT>_2", urls: [
+		{ name: "c2", urls: [
 		"nats://localhost:<PORT6>"
 
 		"nats://localhost:<PORT7>"
@@ -120,7 +120,7 @@ websocket {
 === c1_s2/config.cfg
 
 
-server_name: "<SHORT>-c1_s2"
+server_name: "c1-n2"
 port: <PORT11>
 
 client_advertise: "localhost:<PORT11>"
@@ -139,7 +139,7 @@ jetstream {
 
 
 cluster {
-	name: "SC_<SHORT>_1"
+	name: "c1"
 	port: <PORT3>
 	routes: [
 
@@ -153,17 +153,17 @@ cluster {
 
 
 gateway {
-	name: "SC_<SHORT>_1"
+	name: "c1"
 	port: <PORT5>
 	gateways: [
 
-		{ name: "SC_<SHORT>_1", urls: [
+		{ name: "c1", urls: [
 		"nats://localhost:<PORT4>"
 
 		"nats://localhost:<PORT5>"
 ]}
 
-		{ name: "SC_<SHORT>_2", urls: [
+		{ name: "c2", urls: [
 		"nats://localhost:<PORT6>"
 
 		"nats://localhost:<PORT7>"
@@ -239,7 +239,7 @@ websocket {
 === c2_s1/config.cfg
 
 
-server_name: "<SHORT>-c2_s1"
+server_name: "c2-n1"
 port: <PORT15>
 
 client_advertise: "localhost:<PORT15>"
@@ -258,7 +258,7 @@ jetstream {
 
 
 cluster {
-	name: "SC_<SHORT>_2"
+	name: "c2"
 	port: <PORT16>
 	routes: [
 
@@ -272,17 +272,17 @@ cluster {
 
 
 gateway {
-	name: "SC_<SHORT>_2"
+	name: "c2"
 	port: <PORT6>
 	gateways: [
 
-		{ name: "SC_<SHORT>_1", urls: [
+		{ name: "c1", urls: [
 		"nats://localhost:<PORT4>"
 
 		"nats://localhost:<PORT5>"
 ]}
 
-		{ name: "SC_<SHORT>_2", urls: [
+		{ name: "c2", urls: [
 		"nats://localhost:<PORT6>"
 
 		"nats://localhost:<PORT7>"
@@ -358,7 +358,7 @@ websocket {
 === c2_s2/config.cfg
 
 
-server_name: "<SHORT>-c2_s2"
+server_name: "c2-n2"
 port: <PORT21>
 
 client_advertise: "localhost:<PORT21>"
@@ -377,7 +377,7 @@ jetstream {
 
 
 cluster {
-	name: "SC_<SHORT>_2"
+	name: "c2"
 	port: <PORT17>
 	routes: [
 
@@ -391,17 +391,17 @@ cluster {
 
 
 gateway {
-	name: "SC_<SHORT>_2"
+	name: "c2"
 	port: <PORT7>
 	gateways: [
 
-		{ name: "SC_<SHORT>_1", urls: [
+		{ name: "c1", urls: [
 		"nats://localhost:<PORT4>"
 
 		"nats://localhost:<PORT5>"
 ]}
 
-		{ name: "SC_<SHORT>_2", urls: [
+		{ name: "c2", urls: [
 		"nats://localhost:<PORT6>"
 
 		"nats://localhost:<PORT7>"

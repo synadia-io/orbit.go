@@ -342,7 +342,6 @@ func emptyDir(t *testing.T, dir string) {
 // temporary directory behind.
 func TestToxicsConfigRefusal(t *testing.T) {
 	id := nuid.Next()
-	short := shortID(id)
 	tlsSnippet := map[string]string{"tls": "tls {\n\tcert_file: \"/certs/server.crt\"\n}\n"}
 	routeTLS := func(node, block string) string {
 		return fmt.Sprintf("%s: node %s enables TLS in its %s block", errRouteTLS, node, block)
@@ -359,19 +358,19 @@ func TestToxicsConfigRefusal(t *testing.T) {
 			name: "cluster tls from the template",
 			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: toxicsTLSTemplate(routeTLSBlock), Toxics: true},
 			code: "019",
-			want: routeTLS(short+"-n1", "cluster"),
+			want: routeTLS("n1", "cluster"),
 		},
 		{
 			name: "gateway tls from a snippet",
 			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: toxicsTLSTemplate(""), Snippets: tlsSnippet, Toxics: true},
 			code: "019",
-			want: routeTLS(short+"-c1_s1", "gateway"),
+			want: routeTLS("c1-n1", "gateway"),
 		},
 		{
 			name: "cluster tls from an inline include",
 			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: toxicsTLSTemplate(inlineTLSInclude), Snippets: tlsSnippet, Toxics: true},
 			code: "019",
-			want: routeTLS(short+"-n1", "cluster"),
+			want: routeTLS("n1", "cluster"),
 		},
 		{
 			name: "cluster after a brace that ends an include",
@@ -383,7 +382,7 @@ func TestToxicsConfigRefusal(t *testing.T) {
 				Toxics:       true,
 			},
 			code: "019",
-			want: routeTLS(short+"-n1", "cluster"),
+			want: routeTLS("n1", "cluster"),
 		},
 		{
 			name: "tls after a brace inside an included snippet",
@@ -395,49 +394,49 @@ func TestToxicsConfigRefusal(t *testing.T) {
 				Toxics:       true,
 			},
 			code: "019",
-			want: routeTLS(short+"-n1", "cluster"),
+			want: routeTLS("n1", "cluster"),
 		},
 		{
 			name: "gateway entry tls",
 			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: gatewayEntryTLSTemplate(t), Toxics: true},
 			code: "019",
-			want: fmt.Sprintf("%s: node %s-c1_s1 enables TLS in its gateway entry SC_%s_2", errRouteTLS, short, short),
+			want: fmt.Sprintf("%s: node c1-n1 enables TLS in its gateway entry c2", errRouteTLS),
 		},
 		{
 			name: "other gateway name",
 			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: gatewayOtherNameTemplate(t), Toxics: true},
 			code: "007",
-			want: fmt.Sprintf(`%s: node %s-c1_s1 has gateway name "elsewhere", want "SC_%s_1"`, errGatewayName, short, short),
+			want: fmt.Sprintf(`%s: node c1-n1 has gateway name "elsewhere", want "c1"`, errGatewayName),
 		},
 		{
 			name: "no gateway name",
 			spec: instanceSpec{Kind: "super-cluster", Servers: 2, Clusters: 2, MainTemplate: gatewayNoNameTemplate(t), Toxics: true},
 			code: "007",
-			want: fmt.Sprintf(`%s: node %s-c1_s1 has no gateway name, want "SC_%s_1"`, errGatewayName, short, short),
+			want: fmt.Sprintf(`%s: node c1-n1 has no gateway name, want "c1"`, errGatewayName),
 		},
 		{
 			name: "renamed server",
 			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: serverNameTemplate(t, renamedServerLine), Toxics: true},
 			code: "007",
-			want: fmt.Sprintf(`%s: node %s-n2 sets server_name "renamed", want "%s-n2"`, errServerName, short, short),
+			want: fmt.Sprintf(`%s: node n2 sets server_name "renamed", want "n2"`, errServerName),
 		},
 		{
 			name: "server_name in mixed case from a snippet",
 			spec: instanceSpec{Kind: "server", Servers: 1, MainTemplate: serverNameTemplate(t, ""), Snippets: map[string]string{"top": "Server_Name: elsewhere\n"}, Toxics: true},
 			code: "007",
-			want: fmt.Sprintf(`%s: node %s-n1 sets server_name "elsewhere", want "%s-n1"`, errServerName, short, short),
+			want: fmt.Sprintf(`%s: node n1 sets server_name "elsewhere", want "n1"`, errServerName),
 		},
 		{
 			name: "no server_name",
 			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: serverNameTemplate(t, ""), Toxics: true},
 			code: "007",
-			want: fmt.Sprintf(`%s: node %s-n1 sets no server_name, want "%s-n1"`, errServerName, short, short),
+			want: fmt.Sprintf(`%s: node n1 sets no server_name, want "n1"`, errServerName),
 		},
 		{
 			name: "unparseable config",
 			spec: instanceSpec{Kind: "cluster", Servers: 2, MainTemplate: serverConfigTemplate + "\nbroken {\n", Toxics: true},
 			code: "007",
-			want: fmt.Sprintf("%s: node %s-n1: ", errConfigParse, short),
+			want: fmt.Sprintf("%s: node n1: ", errConfigParse),
 		},
 		{
 			name: "valid config with includes and client tls",
@@ -1076,9 +1075,9 @@ func TestToxicsGatewayRefusals(t *testing.T) {
 		code     string
 		want     []string
 	}{
-		{"gateway entry tls", gatewayEntryTLSTemplate(t), "019", []string{errRouteTLS.Error(), "enables TLS in its gateway entry SC_"}},
-		{"other gateway name", gatewayOtherNameTemplate(t), "007", []string{errGatewayName.Error(), `has gateway name "elsewhere", want "SC_`}},
-		{"no gateway name", gatewayNoNameTemplate(t), "007", []string{errGatewayName.Error(), `has no gateway name, want "SC_`}},
+		{"gateway entry tls", gatewayEntryTLSTemplate(t), "019", []string{errRouteTLS.Error(), "node c1-n1 enables TLS in its gateway entry c2"}},
+		{"other gateway name", gatewayOtherNameTemplate(t), "007", []string{errGatewayName.Error(), `node c1-n1 has gateway name "elsewhere", want "c1"`}},
+		{"no gateway name", gatewayNoNameTemplate(t), "007", []string{errGatewayName.Error(), `node c1-n1 has no gateway name, want "c1"`}},
 	}
 
 	for _, tt := range tests {
@@ -1287,7 +1286,7 @@ func TestToxicsRenamedServerIsRefused(t *testing.T) {
 	if code != "007" {
 		t.Errorf("create error code = %q, want 007", code)
 	}
-	if !strings.HasPrefix(msg, errServerName.Error()+": node ") || !strings.Contains(msg, `-n2 sets server_name "renamed", want "`) {
+	if msg != errServerName.Error()+`: node n2 sets server_name "renamed", want "n2"` {
 		t.Errorf("create error %q does not explain the refusal", msg)
 	}
 	if provider.startCount() != 0 {

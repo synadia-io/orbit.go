@@ -211,6 +211,10 @@ func (b *inProcessBackend) Provision(_ context.Context, plan *backend.InstancePl
 
 	nodes := make([]backend.Node, 0, len(plan.Nodes))
 
+	// Server names repeat across instances, so every line about a node names
+	// its instance too.
+	log := b.svc.log.With("instance", plan.ID)
+
 	for _, n := range plan.Nodes {
 		var held []*net.TCPListener
 
@@ -236,7 +240,7 @@ func (b *inProcessBackend) Provision(_ context.Context, plan *backend.InstancePl
 
 		dir := filepath.Join(instDir, n.Dir)
 
-		srv, cfgPath, err := runServerWithConfig(b.svc.log, n.Config, dir, held)
+		srv, cfgPath, err := runServerWithConfig(log, n.Config, dir, held)
 		if err != nil {
 			b.mu.Lock()
 			torn = rec.torn
@@ -248,7 +252,7 @@ func (b *inProcessBackend) Provision(_ context.Context, plan *backend.InstancePl
 			return fail(&inProcessError{Code: "003", Message: fmt.Sprintf("Server creation failed: %v", err), Err: err})
 		}
 
-		node := &inProcessNode{name: n.Name, addrs: b.addresses(n, srv), identity: nodeIdentity(n), instDir: instDir, cfgPath: cfgPath, log: b.svc.log, srv: srv}
+		node := &inProcessNode{name: n.Name, addrs: addresses(log, n, srv), identity: nodeIdentity(n), instDir: instDir, cfgPath: cfgPath, log: log, srv: srv}
 
 		b.mu.Lock()
 		torn = rec.torn
@@ -273,7 +277,7 @@ func (b *inProcessBackend) Provision(_ context.Context, plan *backend.InstancePl
 // addresses returns the addresses of node n, which runs as srv. Every listener
 // is reached on its planned port, apart from the client listener, whose port is
 // read from srv, since a custom template can set its own.
-func (b *inProcessBackend) addresses(n *backend.NodePlan, srv *server.Server) []backend.Address {
+func addresses(log *slog.Logger, n *backend.NodePlan, srv *server.Server) []backend.Address {
 	addrs := make([]backend.Address, 0, len(n.Listeners))
 
 	for _, l := range n.Listeners {
@@ -282,7 +286,7 @@ func (b *inProcessBackend) addresses(n *backend.NodePlan, srv *server.Server) []
 			var err error
 			port, err = clientPortOf(srv)
 			if err != nil {
-				b.svc.log.Warn("Could not parse client port", "server", n.Name, "err", err)
+				log.Warn("Could not parse client port", "server", n.Name, "err", err)
 			}
 		}
 
@@ -399,7 +403,7 @@ func (b *inProcessBackend) stopNodes(nodes []*inProcessNode) {
 
 		srv.Shutdown()
 		srv.WaitForShutdown()
-		b.svc.log.Info("Stopped server", "server", srv.Name())
+		n.log.Info("Stopped server", "server", srv.Name())
 	}
 }
 

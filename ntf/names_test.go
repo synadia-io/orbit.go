@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -334,17 +333,14 @@ func TestCreateNamedRefusals(t *testing.T) {
 		{"server name of 33 characters", "tester.create.super-cluster", `{"cluster_list":[{"servers":2},{"server_names":["` + long + `"]}]}`, "001", "Invalid request: cluster_list.1.server_names.0: maxLength: got 33, want 32"},
 		{"cluster name of 29 characters", "tester.create.cluster", `{"servers":2,"cluster_name":"` + strings.Repeat("e", 29) + `"}`, "001", "Invalid request: cluster_name: maxLength: got 29, want 28"},
 		{"duplicate cluster name", "tester.create.super-cluster", `{"cluster_list":[{"name":"lon","servers":2},{"name":"lon","servers":2}]}`, "002", `Invalid request: names must be unique, "lon" names both cluster lon and cluster lon`},
-		{"duplicate server name", "tester.create.cluster", `{"server_names":["a","a"]}`, "002", `Invalid request: names must be unique, "a" names both server 1 of cluster C_<SHORT> and server 2 of cluster C_<SHORT>`},
+		{"duplicate server name", "tester.create.cluster", `{"server_names":["a","a"]}`, "002", `Invalid request: names must be unique, "a" names both server 1 of cluster c1 and server 2 of cluster c1`},
 		{"server named like a cluster", "tester.create.super-cluster", `{"cluster_list":[{"name":"lon","servers":2},{"name":"nyc","server_names":["lon"]}]}`, "002", `Invalid request: names must be unique, "lon" names both cluster lon and server 1 of cluster nyc`},
 		{"given name clashing with a derived one", "tester.create.super-cluster", `{"cluster_list":[{"name":"lon","servers":2},{"name":"nyc","server_names":["lon-n1"]}]}`, "002", `Invalid request: names must be unique, "lon-n1" names both server 1 of cluster lon and server 1 of cluster nyc`},
 	}
 
-	shortName := regexp.MustCompile(`C_[A-Za-z0-9]{8}`)
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			code, desc := rawServiceError(t, svc.nc, tt.subject, []byte(tt.body))
-			desc = shortName.ReplaceAllString(desc, "C_<SHORT>")
 			if code != tt.code {
 				t.Errorf("code = %q (%s), want %q", code, desc, tt.code)
 			}

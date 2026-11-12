@@ -1,7 +1,7 @@
 === n1/config.cfg
 
 
-server_name: "<SHORT>-n1"
+server_name: "n1"
 port: <PORT1>
 
 client_advertise: "localhost:<PORT2>"
@@ -14,7 +14,7 @@ log_file: "<INSTANCE_DIR>/n1/server.log"
 
 
 cluster {
-	name: "C_<SHORT>"
+	name: "c1"
 	port: <PORT3>
 	advertise: "127.0.0.1:<PORT4>"
 	routes: [
@@ -75,7 +75,7 @@ tls {
 === n2/config.cfg
 
 
-server_name: "<SHORT>-n2"
+server_name: "n2"
 port: <PORT7>
 
 client_advertise: "localhost:<PORT8>"
@@ -88,7 +88,7 @@ log_file: "<INSTANCE_DIR>/n2/server.log"
 
 
 cluster {
-	name: "C_<SHORT>"
+	name: "c1"
 	port: <PORT9>
 	advertise: "127.0.0.1:<PORT4>"
 	routes: [
@@ -149,7 +149,7 @@ tls {
 === n3/config.cfg
 
 
-server_name: "<SHORT>-n3"
+server_name: "n3"
 port: <PORT12>
 
 client_advertise: "localhost:<PORT13>"
@@ -162,7 +162,7 @@ log_file: "<INSTANCE_DIR>/n3/server.log"
 
 
 cluster {
-	name: "C_<SHORT>"
+	name: "c1"
 	port: <PORT14>
 	advertise: "127.0.0.1:<PORT4>"
 	routes: [

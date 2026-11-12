@@ -36,7 +36,7 @@ gateway {
 	advertise: "127.0.0.1:<PORT4>"
 	gateways: [
 
-		{ name: "SC_<SHORT>_3", urls: [
+		{ name: "c3", urls: [
 		"nats://127.0.0.1:<PORT8>"
 ]}
 
@@ -91,7 +91,7 @@ accounts {
 	$SYS { users = [ { user: "system", pass: "password" } ] }
 }
 === c1_s1/snippets/top.conf
-# lon-n1 is server 1 of 3 in lon, cluster 1 of [lon nyc SC_<SHORT>_3]
+# lon-n1 is server 1 of 3 in lon, cluster 1 of [lon nyc c3]
 
 === c1_s2/config.cfg
 
@@ -131,7 +131,7 @@ gateway {
 	advertise: "127.0.0.1:<PORT4>"
 	gateways: [
 
-		{ name: "SC_<SHORT>_3", urls: [
+		{ name: "c3", urls: [
 		"nats://127.0.0.1:<PORT8>"
 ]}
 
@@ -186,7 +186,7 @@ accounts {
 	$SYS { users = [ { user: "system", pass: "password" } ] }
 }
 === c1_s2/snippets/top.conf
-# lon-n2 is server 2 of 3 in lon, cluster 1 of [lon nyc SC_<SHORT>_3]
+# lon-n2 is server 2 of 3 in lon, cluster 1 of [lon nyc c3]
 
 === c1_s3/config.cfg
 
@@ -226,7 +226,7 @@ gateway {
 	advertise: "127.0.0.1:<PORT4>"
 	gateways: [
 
-		{ name: "SC_<SHORT>_3", urls: [
+		{ name: "c3", urls: [
 		"nats://127.0.0.1:<PORT8>"
 ]}
 
@@ -281,7 +281,7 @@ accounts {
 	$SYS { users = [ { user: "system", pass: "password" } ] }
 }
 === c1_s3/snippets/top.conf
-# lon-n3 is server 3 of 3 in lon, cluster 1 of [lon nyc SC_<SHORT>_3]
+# lon-n3 is server 3 of 3 in lon, cluster 1 of [lon nyc c3]
 
 === c2_s1/config.cfg
 
@@ -319,7 +319,7 @@ gateway {
 	advertise: "127.0.0.1:<PORT4>"
 	gateways: [
 
-		{ name: "SC_<SHORT>_3", urls: [
+		{ name: "c3", urls: [
 		"nats://127.0.0.1:<PORT28>"
 ]}
 
@@ -374,7 +374,7 @@ accounts {
 	$SYS { users = [ { user: "system", pass: "password" } ] }
 }
 === c2_s1/snippets/top.conf
-# ny-a is server 1 of 2 in nyc, cluster 2 of [lon nyc SC_<SHORT>_3]
+# ny-a is server 1 of 2 in nyc, cluster 2 of [lon nyc c3]
 
 === c2_s2/config.cfg
 
@@ -412,7 +412,7 @@ gateway {
 	advertise: "127.0.0.1:<PORT4>"
 	gateways: [
 
-		{ name: "SC_<SHORT>_3", urls: [
+		{ name: "c3", urls: [
 		"nats://127.0.0.1:<PORT28>"
 ]}
 
@@ -467,12 +467,12 @@ accounts {
 	$SYS { users = [ { user: "system", pass: "password" } ] }
 }
 === c2_s2/snippets/top.conf
-# ny-b is server 2 of 2 in nyc, cluster 2 of [lon nyc SC_<SHORT>_3]
+# ny-b is server 2 of 2 in nyc, cluster 2 of [lon nyc c3]
 
 === c3_s1/config.cfg
 
 include "snippets/top.conf"
-server_name: "<SHORT>-c3_s1"
+server_name: "c3-n1"
 port: <PORT37>
 
 client_advertise: "localhost:<PORT38>"
@@ -485,7 +485,7 @@ log_file: "<INSTANCE_DIR>/c3_s1/server.log"
 
 
 cluster {
-	name: "SC_<SHORT>_3"
+	name: "c3"
 	port: <PORT39>
 	advertise: "127.0.0.1:<PORT4>"
 	routes: [
@@ -498,12 +498,12 @@ cluster {
 
 
 gateway {
-	name: "SC_<SHORT>_3"
+	name: "c3"
 	port: <PORT40>
 	advertise: "127.0.0.1:<PORT4>"
 	gateways: [
 
-		{ name: "SC_<SHORT>_3", urls: [
+		{ name: "c3", urls: [
 		"nats://localhost:<PORT40>"
 ]}
 
@@ -558,5 +558,5 @@ accounts {
 	$SYS { users = [ { user: "system", pass: "password" } ] }
 }
 === c3_s1/snippets/top.conf
-# <SHORT>-c3_s1 is server 1 of 1 in SC_<SHORT>_3, cluster 3 of [lon nyc SC_<SHORT>_3]
+# c3-n1 is server 1 of 1 in c3, cluster 3 of [lon nyc c3]
 

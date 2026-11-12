@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1173,7 +1174,7 @@ func TestListReportsClusterName(t *testing.T) {
 	mustRequest(t, ms.nc, "tester.create.super-cluster", api.CreateSuperClusterRequest{Clusters: 2, Servers: 2}, &super)
 
 	want := map[string]string{
-		cluster.ID: "C_" + shortID(cluster.ID),
+		cluster.ID: "c1",
 		single.ID:  "",
 		super.ID:   "",
 	}
@@ -1430,7 +1431,7 @@ func TestCreateFailsWhenPortStaysTaken(t *testing.T) {
 	if reserved != 0 {
 		t.Errorf("%d ports still reserved after the failed create", reserved)
 	}
-	if !strings.Contains(logs.String(), "level=ERROR msg=\"Server reported a fatal error\" server=") {
+	if !regexp.MustCompile(`level=ERROR msg="Server reported a fatal error" instance=\S+ server=n1 `).MatchString(logs.String()) {
 		t.Errorf("service log does not report the fatal error:\n%s", logs.String())
 	}
 
@@ -1643,6 +1644,67 @@ func TestServerRequestsWithNameInTwoInstances(t *testing.T) {
 	if code != "001" || msg != "Server not found" {
 		t.Errorf("stop of a name another instance holds: %q %q, want 001 Server not found", code, msg)
 	}
+}
+
+// TestDefaultNamedClustersInTwoInstances proves two clusters created at once
+// with the default names both hold cluster c1 of servers n1 and n2, that a
+// bare n1 is refused as ambiguous naming both instances, and that a stop of n1
+// with instance_id stops that instance's n1 alone.
+func TestDefaultNamedClustersInTwoInstances(t *testing.T) {
+	ms := startTestService(t)
+
+	var a, b api.CreateResponse
+	mustRequest(t, ms.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2}, &a)
+	mustRequest(t, ms.nc, "tester.create.cluster", api.CreateClusterRequest{Servers: 2}, &b)
+
+	for _, inst := range []api.CreateResponse{a, b} {
+		var names []string
+		for _, srv := range inst.Servers {
+			names = append(names, srv.Cluster+"/"+srv.Name)
+		}
+		if !slices.Equal(names, []string{"c1/n1", "c1/n2"}) {
+			t.Fatalf("instance %s servers %v, want c1/n1 and c1/n2", inst.ID, names)
+		}
+	}
+
+	code, msg := serviceError(t, ms.nc, "tester.stop.server", api.StopServerRequest{Name: "n1"})
+	if code != "023" {
+		t.Errorf("stop of a bare n1: code %q (%s), want 023", code, msg)
+	}
+	if !strings.Contains(msg, a.ID) || !strings.Contains(msg, b.ID) {
+		t.Errorf("stop of a bare n1: message %q does not name both %s and %s", msg, a.ID, b.ID)
+	}
+
+	running := func(want map[string]map[string]bool) {
+		t.Helper()
+		for id, servers := range want {
+			for name, up := range servers {
+				if got := serverRunning(t, ms.nc, id, name); got != up {
+					t.Errorf("server %s of %s running = %t, want %t", name, id, got, up)
+				}
+			}
+		}
+	}
+
+	var stopped api.StopServerResponse
+	mustRequest(t, ms.nc, "tester.stop.server", api.StopServerRequest{Name: "n1", InstanceID: a.ID}, &stopped)
+	if !stopped.Shutdown {
+		t.Fatalf("stop of n1 in %s reported no shutdown", a.ID)
+	}
+	running(map[string]map[string]bool{
+		a.ID: {"n1": false, "n2": true},
+		b.ID: {"n1": true, "n2": true},
+	})
+
+	stopped = api.StopServerResponse{}
+	mustRequest(t, ms.nc, "tester.stop.server", api.StopServerRequest{Name: "n1", InstanceID: b.ID}, &stopped)
+	if !stopped.Shutdown {
+		t.Fatalf("stop of n1 in %s reported no shutdown", b.ID)
+	}
+	running(map[string]map[string]bool{
+		a.ID: {"n1": false, "n2": true},
+		b.ID: {"n1": false, "n2": true},
+	})
 }
 
 // renamedNode reports name as its server name in Status and passes every other

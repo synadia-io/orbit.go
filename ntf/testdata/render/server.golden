@@ -1,7 +1,7 @@
 === n1/config.cfg
 
 
-server_name: "<SHORT>-n1"
+server_name: "n1"
 port: <PORT1>
 
 client_advertise: "localhost:<PORT1>"

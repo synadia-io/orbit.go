@@ -65,7 +65,7 @@ func TestInProcessPlacementListenerAddress(t *testing.T) {
 	names := []string{"client", "cluster", "websocket"}
 	var ports []int
 	for _, name := range names {
-		node := shortID(inst.ID) + "-n1"
+		node := "n1"
 		l, err := p.ListenerAddress(node, name)
 		if err != nil {
 			t.Fatalf("ListenerAddress %s: %v", name, err)
@@ -111,7 +111,7 @@ func TestInProcessPlacementReleasesOnTeardown(t *testing.T) {
 	inst := s.newInstance("server", "")
 	p := placeInstance(t, s, inst)
 
-	node := shortID(inst.ID) + "-n1"
+	node := "n1"
 	l, err := p.ListenerAddress(node, "client")
 	if err != nil {
 		t.Fatalf("ListenerAddress: %v", err)
@@ -169,7 +169,7 @@ func TestInProcessPlacementDirectories(t *testing.T) {
 		"n3":    filepath.Join(root, "n3"),
 		"c1_s1": filepath.Join(root, "c1_s1"),
 		"c2_s3": filepath.Join(root, "c2_s3"),
-		// A dir that happens to start like a node name keeps its prefix.
+		// A dir holding the short id keeps it whole.
 		shortID(inst.ID) + "-n1": filepath.Join(root, shortID(inst.ID)+"-n1"),
 	}
 	for dir, want := range cases {
