@@ -9,7 +9,7 @@ require (
 	github.com/nats-io/nats.go v1.54.0
 	github.com/nats-io/nuid v1.0.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 )
 
 require (

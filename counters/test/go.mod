@@ -21,6 +21,6 @@ require (
 	github.com/synadia-io/orbit.go/jetstreamext v0.3.2 // indirect
 	github.com/synadia-io/orbit.go/natsext v0.1.3 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 )
