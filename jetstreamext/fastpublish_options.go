@@ -52,8 +52,7 @@ func WithFastPublisherContinueOnGap(continueOnGap bool) FastPublisherOpt {
 
 // WithFastPublisherErrorHandler sets the error handler for async errors.
 // The handler is called for flow ack errors, gap detection, and other async errors.
-// Note: The handler is called while holding an internal lock, so it should be fast
-// and non-blocking to avoid impacting performance.
+// See FastPublishErrHandler for the constraints on the handler.
 func WithFastPublisherErrorHandler(handler FastPublishErrHandler) FastPublisherOpt {
 	return fastPublisherOptFunc(func(opts *fastPublisherOpts) error {
 		opts.errHandler = handler

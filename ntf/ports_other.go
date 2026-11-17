@@ -41,7 +41,7 @@ func ephemeralPortRange() (int, int, error) {
 
 	fields := strings.Fields(string(b))
 	if len(fields) < 2 {
-		return 0, 0, fmt.Errorf("%s does not hold a range: %q", linuxPortRangeFile, b)
+		return 0, 0, fmt.Errorf("%s does not contain a port range: %q", linuxPortRangeFile, b)
 	}
 
 	low, err := strconv.Atoi(fields[0])

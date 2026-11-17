@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/start_instance_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.start_instance_response",
+      "description": "The type id of the response"
+    },
+    "servers": {
+      "items": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The server's name"
+          },
+          "running": {
+            "type": "boolean",
+            "description": "Whether the server is running after the operation"
+          },
+          "error": {
+            "type": "string",
+            "description": "Why the server could not be stopped or started, empty on success"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "description": "The state of each server after the start"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.start_instance_response"
+}

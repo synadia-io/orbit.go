@@ -36,11 +36,15 @@ Set `Conn` to host the service on a connection you already have. `Close` leaves 
 | `Logger`        | _(discard)_       | Receives a line per request and per managed server transition.                       |
 | `Name`          | `test-management` | The Micro service name.                                                              |
 | `Group`         | `tester`          | Subject group every endpoint hangs off. Changing it moves every subject.             |
-| `NewCapturer`   | _(nil)_           | Supplies [trace capture](#trace-capture). Without one, `trace` or `proxy` requests are refused. |
+| `EventsMaxAge`  | `24h`             | How long the events stream keeps an event.                                           |
+| `EventsMaxBytes`| 1 GiB             | Size past which the events stream discards its oldest events.                        |
+| `Agents`        | _(nil)_           | Network agent factories to register by name, for [trace capture](#trace-capture).    |
+| `Agent`         | _(empty)_         | The registered agent to use. Without one, `trace` or `proxy` requests are refused.   |
 
-`EmbeddedOptions` carries `Port` (zero and `-1` both bind an OS-chosen port), `ServerName`, and `Log`, which writes
-the embedded server's own log to stdout. Managed servers are unaffected by `Log`: they always log to a file under
-their instance directory.
+`EmbeddedOptions` carries `Port` (zero and `-1` both bind an OS-chosen port that is clear on the loopback addresses),
+`ServerName`, `StoreDir`, the JetStream store directory, which defaults to `management` under `Dir`, and `Log`, which
+writes the embedded server's own log to stderr. Managed servers are unaffected by `Log`: they always log to a file
+under their instance directory.
 
 | Method           | Description                                                      |
 |------------------|------------------------------------------------------------------|
@@ -53,8 +57,8 @@ their instance directory.
 | `Close`          | Stop serving and release everything the service owns.            |
 
 `New` unwinds whatever it started if any step fails, so a non-nil error leaves nothing running. `Close` stops
-answering requests, tears down every instance while the connection is still up, closes the capturer, and shuts
-down the embedded server.
+answering requests, tears down every instance while the connection is still up, closes the agent provider, and
+shuts down the embedded server.
 
 ## Managed servers
 
@@ -68,57 +72,301 @@ and `template` replaces the whole body. `snippets` is a `{key: body}` map keyed 
 `websocket`, `mqtt` or `leafnode` is present, a TCP port under the same name is reserved and surfaces on
 `ManagedServer.ports[<name>]`.
 
-Server names are prefixed with the instance's short id so the same `n1` / `c1_s1` style names do not collide
-between concurrent instances.
+### Names and sizes
+
+By default a name says where a server or cluster sits in its instance and carries no id, so the same default names
+repeat across instances: a server is `n1`, a cluster `c1` with servers `n1` to `n<N>`, and the clusters of a
+super-cluster `c1` to `c<N>` with servers `<cluster>-n<i>`, such as `c2-n3`. `.ServerName` and `.ClusterName` are
+therefore unique within an instance only; a template or snippet that needs a value unique across the service, such as
+a path outside the server's directory, uses `.InstanceID` or `.ShortID`. A create can give names instead:
+
+- `tester.create.server` takes `name`.
+- `tester.create.cluster` takes `cluster_name` and `server_names`, the servers' names in order. `servers` may be left
+  out when `server_names` is given, and must agree with it when both are.
+- `tester.create.super-cluster` takes `cluster_list`, a list of `{name, servers, server_names}` in cluster order, in
+  place of the `clusters` and `servers` counts. A request gives either both counts or `cluster_list`, and is refused
+  with `002` for both, for neither, and for one count without the other. Within an entry `name` is optional,
+  `servers` may be left out when `server_names` is given and must agree with it when both are, and each cluster has
+  its own size, from 1 to 20 servers. A super-cluster
+  may hold clusters of one server: they plan, join by gateway and run JetStream like any other.
+
+Every given name starts with a letter and holds only letters, digits, `_` and `-`, at most 32 characters; a cluster
+name is at most 28, so `<cluster>-n20` still fits. The schemas refuse a name that breaks the rule with `001`. A server
+of a named cluster that is not named itself is `<cluster>-n<i>`, and an unnamed cluster in a `cluster_list` keeps the
+default name of its position, `c<c>`, with servers `c<c>-n<i>`. The default names are filled in first and the whole
+set is then checked: every name is unique within the instance, and no server shares a cluster's name, since a toxic
+selector looks a name up as a server before a cluster. A clash, between given names or with a default one, is refused
+with `002` naming both holders: a second cluster named `c1` beside an unnamed first cluster, or a server named `c1`
+in a cluster left with its default name, is refused like any other. Names are not unique across instances; see `023`
+below.
+
+A given name is the server's or cluster's identity everywhere: its rendered `server_name`, the cluster and gateway
+`name`, the names of its links, the topology the agent is handed, shaping's `server`, events' `node`, status and list.
+A node's directory follows its position, `n<i>` or `c<c>_s<i>`, and never its name. `.ClusterSize` in the template
+environment is the size of the node's own cluster.
+
+`tester.stop.server`, `tester.start.server`, `tester.update.server` and `tester.reload.server` find their server by
+the `name` it reports, and take an optional `instance_id`. With `instance_id` only that instance is searched, and an
+unknown instance is refused with `404`. Without it every instance is searched. A name no server holds is refused
+with `001`. A name more than one server holds, in one instance or across several, is refused with `023`, whose
+description names the instances holding it, rather than one of them being picked. `023` is stable. A client that
+knows the instance sends `instance_id`, and against a service from before it, which refuses the field with `001`
+naming `instance_id`, sends the bare name instead; ntf-client does this. Two servers of one instance can share a name, through a custom `template`
+without `toxics`, and are refused with `023` with `instance_id` too.
+
+#### Release note: default names repeat across instances
+
+Default names no longer carry the instance's short id:
+
+| Kind          | Before                                        | Now                         |
+|---------------|-----------------------------------------------|-----------------------------|
+| Server        | `<short>-n1`                                  | `n1`                        |
+| Cluster       | `C_<short>`, servers `<short>-n<i>`           | `c1`, servers `n<i>`        |
+| Super-cluster | `SC_<short>_<c>`, servers `<short>-c<c>_s<i>` | `c<c>`, servers `c<c>-n<i>` |
+
+Given names, the `<cluster>-n<i>` servers of a named cluster and every node's directory are unchanged.
+
+- Any two default-named instances alive at once now share names, so a bare-name `tester.stop.server`,
+  `tester.start.server`, `tester.update.server` or `tester.reload.server` that used to find one server is refused
+  with `023`. Clients that send `instance_id` are unaffected; a client that sends the bare name alone is refused
+  whenever another instance holds the same name.
+- A template or snippet that relied on `.ServerName` or `.ClusterName` being unique across the service uses
+  `.InstanceID` or `.ShortID` instead.
+- nats-server refuses a leafnode connection between two clusters of the same name: the accepting side answers
+  `remote leafnode has same cluster name` and the soliciting side waits 30 seconds before it tries again. Two
+  default-named cluster instances are both `c1`, and the clusters of two default-named super-clusters are `c1`, `c2`
+  and so on in both, so a test that joins them by leafnode names at least one side apart, with `cluster_name` for a
+  cluster or `cluster_list` for a super-cluster. The two ends of one leafnode connection may share server names.
+- nats-server also takes a second leafnode from a remote with the same server name, cluster name and account as an
+  existing one for a reconnect of it, and closes the existing one. Two default-named instances that solicit
+  leafnodes into the same hub account, such as two `n1` servers or two `c1` clusters, keep replacing each other's
+  connection and never both stay connected. Name them apart with `name`, `cluster_name` or `server_names`.
+
+### Waiting for JetStream
+
+A create returns once every server has started, before a JetStream cluster has elected its meta leader, so the first
+JetStream requests to a new cluster can fail with `10008` or time out. A create given `wait_jetstream`, a number of
+seconds with fractions honored and at most 300, answers only once JetStream takes requests: every server replies to
+`$SYS.REQ.SERVER.PING.JSZ` with JetStream enabled and names the same meta leader, and the leader lists every other
+server as a current peer that is not offline. A lone server runs JetStream without a meta group and is ready once it
+reports JetStream enabled. Every create endpoint takes it.
+
+The service asks over a system account connection to a server's own client listener rather than any `toxics` or
+`trace` proxy in front of it, so a toxic never cuts it, in rounds every 250ms. It authenticates as the built-in template's `system` user, or with
+`system_credentials`, given in the keyed form a chaos run's credentials use:
+
+```json
+{"servers": 3, "jetstream": true, "wait_jetstream": 30,
+ "system_credentials": {"user_password": {"user": "admin", "password": "s3cret"}}}
+```
+
+An instance with generated `tls` is dialed with its own CA, client certificate and handshake-first setting. A wait is
+refused before anything starts:
+
+- with `011` without `jetstream`;
+- with `002` with a custom `template` or an `accounts` or `system_account` snippet and no `system_credentials`, since
+  either replaces the built-in system user;
+- with `002` with a `tls` snippet, since the service has neither its CA nor a client certificate to dial it with;
+- with `002` for `system_credentials` without `wait_jetstream`;
+- with `001` for a wait above 300 seconds or below 0, or credentials without exactly one complete type.
+
+The instance is published, with its `created` and `ready` events, before the wait starts, so status, list and destroy
+see it while the create waits. The wait runs apart from the create endpoint, so the creates behind it do not wait for
+it as well, and holds no lock. A create still waiting when `wait_jetstream` passes answers `024`, whose description
+names the instance and each server not ready with why: `no reply`, `JetStream not enabled`,
+`replied with error: <description>`, `no meta leader`, `meta leader <name> not confirmed`,
+`sees meta leader <name>, not <name>`, `not current on meta leader <name>`, `offline on meta leader <name>` or
+`not a peer of meta leader <name>`, with the most telling dial failure when no server could be reached: a refusal
+outranks a dial the end of the wait cut short. When every server refuses the system credentials the wait ends at once
+rather than at its timeout, with `024` naming each server as `refused the system credentials` and the refusal. Its
+data is the create response, and the instance is left in place for the caller to inspect or destroy. A destroy or
+reset of the instance during the wait answers `404`, and `Close` ends a wait, a dial or a round in progress included,
+with `024`. A caller sets its request timeout above the wait.
 
 ## Trace capture
 
 `Create*` requests accept `trace` to front a server's client port with a capture proxy that stores every
 connection's capture, and `proxy` to front it with the same proxy and store nothing, for shaping without captures.
-`trace` implies `proxy`. The service does not implement capture itself: `Options.NewCapturer` supplies it, and
-without one those requests are refused with error code `014`. Only the first node of a cluster or super-cluster is
-fronted, and combining either flag with generated TLS is rejected because the proxy forwards plaintext.
+`trace` implies `proxy`. The service does not implement capture itself: a network agent, defined in package
+`agent`, does. `Options.Agents` registers agent factories by name and `Options.Agent` selects one; with none
+selected those requests are refused with error code `014`, and with `018` when the selected agent does not declare
+the `capture` capability. Every node is fronted by a capture proxy of its own, on a trace port from the service's
+range that its `ports["trace"]` reports; the first node's is the instance's trace URL for callers that dial one.
+Combining either flag with generated TLS is rejected with `013` because the proxy forwards plaintext.
 
 ```go
-type Capturer interface {
-    Capture(ctx context.Context, req CaptureRequest) (CaptureProxy, error)
+type Factory func(ctx context.Context, opts Options) (Provider, error)
+
+type Provider interface {
+    Capabilities() []Capability
+    Start(ctx context.Context, spec Spec) (Agent, error)
     Close() error
 }
 ```
 
-`NewCapturer` is called once at the end of `New` with the `*Service` already usable, so an implementation can
-reach the management connection, the embedded server and the instance directory. Keep it cheap and do the
-expensive setup on the first `Capture`, so a service that never captures never pays for it.
+`Capabilities` declares what the provider's agents do: `capture`, `shaping` and `toxics`, the `Capability*`
+constants. Status reports the selected agent's registered name as `agent` and its capabilities as
+`agent_capabilities`, beside the backend's `backend` and `capabilities`, and omits both when no agent is selected.
 
-`CaptureRequest` names the instance and server being fronted, the backend address to forward to, the host to
-listen on (the node's `client_advertise`, which must name a local interface), a temp directory the service
-creates under the instance, and `Store`, which is true for `trace` and false for `proxy` alone; the capturer keeps
-captures only when it is true. The `CaptureProxy` that comes back reports the port clients reach instead of the
-managed server's own, and is stopped by the service on teardown.
+`New` calls the selected factory once, after the management connection and embedded server exist and before the
+endpoints start. Its `Options` carry the service directory, `Preserve`, the logger, the management connection and
+the embedded server, which is nil when the service runs on a supplied connection.
+
+An agent serves an instance. `Start` runs before the instance's servers start, with a `Spec` naming the instance,
+the host to listen on (the node's `client_advertise`, which must name a local interface), and `Store`, which is
+true for `trace` and false for `proxy` alone; the agent keeps captures only when it is true. `Spec.CaptureProxies`
+holds each node's trace port, which placement reserves with `ProxyAddress` kind `trace`; the agent binds it when the
+node is fronted, and a node with no entry gets a port the OS chooses. Once the servers run, the service fronts every
+node through `ClientEdge.Front`, which an agent declaring `capture` implements, with the node's name, its live
+client endpoint and `Capture` set, and gets back the endpoint clients reach instead of the managed server's own.
+The `Agent` answers the `tester.shape.*` endpoints and is stopped once by the service on teardown and when a create
+fails. A `Start` or `Front` that could not bind returns an error wrapping `agent.ErrListen`, and the create runs
+again with fresh ports. The agent owns any scratch space it needs.
+
+A shaping set applies to every node's capture proxy, or, with `server` set to a server's name, to that node's alone;
+a server that is not captured is refused with `017`. A set's id is unique across the instance, and setting it again
+moves it to the nodes the new set names. `tester.shape.report` returns one report per set with the firings of every
+node merged in time order and `servers`, the number of firings on each node the set applies to.
+
+## Link proxies
+
+`Create*` requests accept `toxics` to put an agent proxy on every route, every gateway between clusters and
+every node's client listener, so links can be faulted. The agent must declare the `toxics` capability: with no agent
+selected the request is refused with `014`, and with `018` when the agent does not declare it. `Spec.Links` hands
+the agent its route and gateway proxies, each with the endpoint it listens on and the peer listener it forwards to,
+`Spec.ClientProxies` the endpoint of each node's client proxy, whose upstream is the live client endpoint once
+the node runs, and `Spec.Nodes` every node with its cluster, which toxic selectors resolve against. The service
+fronts every node through `ClientEdge.Front`, which binds that node's client proxy: with `Capture` false the
+agent returns the client proxy's endpoint, and on every node of a traced or proxied instance the capture proxy
+forwards to the client proxy, so its chain is client, capture, client proxy, server.
+
+The configs dial the proxies: `.Routes` lists the route proxy for each peer, and `.Gateways` lists, for each other
+cluster, the proxies the node's cluster shares to that cluster's nodes. Three template variables, empty without
+`toxics`, carry the rest:
+
+| Variable            | Rendered by the built-in template as                                                 |
+|---------------------|--------------------------------------------------------------------------------------|
+| `.ClientAdvertise`  | `client_advertise`: the `host:port` of the node's client proxy.                      |
+| `.ClusterAdvertise` | `advertise` in the `cluster` block: a dead `host:port` that refuses every dial.      |
+| `.GatewayAdvertise` | `advertise` in the `gateway` block: the same dead address.                           |
+
+The dead address keeps gossip on the proxies. In-process every node advertises the same dead address, so nats-server
+takes a gossiped route to it for a route to itself and never dials it; on a backend where that is not so, a peer that
+dials it is refused and drops it. A custom `template` must reference `.ClientAdvertise`, and in a cluster `.Routes`
+and `.ClusterAdvertise`, and in a super-cluster `.Gateways` and `.GatewayAdvertise` as well, or the create, and an
+update of one of its servers, is refused with `007` naming what is missing. A config that enables TLS on routes or
+gateways is refused with `019`, on create and on update, since the gateway proxies read a plain CONNECT; generated
+TLS on client ports is allowed. A `tls` inside one entry of the `gateway` block's `gateways` list is refused the same
+way, naming the entry. In a super-cluster the `gateway` block's `name` must be the node's cluster name, the only
+gateway name its proxies admit, or the create, and an update, is refused with `007` naming the node and the name it
+found or that it found none. `toxics` requires each node to set `server_name` to its node name, the name toxic
+selectors and the agent's gateway cut know it by and the name status reports for a running server. A config that sets
+another `server_name`, or sets none, is refused with `007`, on create and on update, naming the node, the name it must
+set and any other name it sets; a custom `template` without `toxics` may still name its servers as it likes. These
+checks run before a create starts anything or an update writes anything, and parse each node's config with its
+includes as nats-server reads them, and a config that does not parse is refused with `007`, on create and on update,
+naming the node and the parse error.
+
+A server's `port` reports its client proxy, and the create response and status list every proxy under `links`, each
+with its `name` (`route:<node>-><node>`, `gateway:<cluster>-><node>` or `client:<node>`), `kind`, `from`, `to`, the
+`proxy` address it is dialed on (for a client proxy, on the advertise host when one is set) and the `upstream` it
+forwards to.
+
+### Faulting links
+
+`tester.toxic.add`, `remove`, `clear` and `report` fault the links of an instance created with `toxics`. The service
+forwards each to the agent's `agent.Toxics` interface, which an agent declaring the `toxics` capability implements,
+and the agent works out the proxies. `add` takes a `toxic`: a `name` unique on the instance, a `selector`, a `type`,
+the `attributes` of that type and a `toxicity`. `remove` takes a `name`, `clear` removes every toxic, and `report`
+lists every link with the toxics on it, and every toxic with the `links` its selector resolved to and `since` when
+it is in place. Status lists the same toxics under `toxics`. Each change publishes a `toxic_action` event carrying the
+toxic, one per toxic `added`, `removed` or `cleared`. Callers' toxics never remove or change what the agent keeps on
+its proxies for itself, the gate of a gateway proxy and the cut stages, though cuts act through them.
+
+A selector names what the caller means rather than a proxy: a `kind` (`route`, `gateway` or `client`; empty selects
+every kind), `from` and `to` as a node or a cluster, and a `direction`: `to` for the data flowing from `from` toward
+`to`, and on a client link toward the server, `from` for the reverse, and `both`, the default. `node` alone selects
+every link of one node, both ways, and cannot be combined with `from` or `to`; a `direction` of `to` or `from` needs
+`from` or `to`. On a route the data from A to B is the upstream of the A to B proxy and the downstream of the B to A
+proxy, since either side may dial a pooled connection. On a gateway it is the upstream of A's proxies to B, since
+messages travel on the sender's connection only; the downstream carries interest. Gateway proxies are shared by every
+node of their source cluster, so a gateway toxic whose `from` is a node acts on its cluster's proxies.
+
+`type` is toxiproxy's `latency`, `bandwidth`, `slow_close`, `timeout`, `reset_peer`, `slicer` or `limit_data`, with
+toxiproxy's attribute names and units, or `cut` or `lossy`. A cut is a blackhole: the proxies keep accepting dials,
+data is dropped both ways, and connections go silent until the servers' ping timers close them, as in a partition.
+Data already inside a later toxic, such as a latency toxic's buffer, is still delivered after a cut starts. A cut that
+names a node also silences that node's connections through the gateway proxies its cluster shares, existing and new,
+so a cut of `{"node": "<node>"}` unplugs the node. A cut always acts both ways, and removing it closes the connections
+that dropped data while it was in place. `lossy` emulates packet loss as TCP delivers it, as stalls rather than lost
+bytes: the stream is cut into 1460-byte segments, each lost with chance `loss`, above 0 and below 1, and a lost
+segment stalls the stream for `rto` ms, 200 by default, doubling with each lost retransmission up to `max_rto` ms,
+3200 by default, while later data waits behind it. Data that arrives after the stream was idle for 50ms starts a
+segment of its own, as a write after a pause goes in a packet of its own. Its attributes are the agent's own, not toxiproxy's. No byte is
+lost while it is in place; removing it while the stream after it accepts nothing for more than 5s drops the data it
+held, as toxiproxy does when it removes a toxic. `toxicity` is the chance that a toxic acts, 1 by default:
+toxiproxy rolls it for each stream of each connection, and again whenever the stream's chain is rebuilt by adding or
+removing another toxic. `lossy` rolls it once for each stream of each connection and keeps it across rebuilds. A cut
+cuts every connection and accepts no toxicity other than 1.
+
+The toxic calls are refused with `001` without an `instance_id`, `014` when no agent is selected, `018` when the agent
+does not declare `toxics`, `404` for an unknown instance, and `020` for an instance created without `toxics`. A toxic
+with an unknown attribute or one out of range is refused with `001`. Both `001` refusals carry an
+`Invalid request:` description naming what failed, such as `Invalid request: toxic.attributes.rate: minimum: got 0, want 1`.
+A toxic the agent refuses for what it asks, such as a name in use or unknown, a selector that matches no link or names
+an unknown node or cluster, or a one-way cut, is refused with `021` naming the toxic and the field. Any other failure
+of the agent answers `022`.
+
+## Clocks
+
+Events from different components are lined up by their timestamps, so a distributed deployment of ntf must run NTP
+on every host. `tester.clock` confirms that rather than replacing it. It reports the service host as the reference,
+each instance's agent as sharing the service's clock since it runs in the service's process, and, for each subject
+in the request's `extra`, that participant's `offset` from the service host with its `round_trip` and an error
+`bound` of half the round trip, or the `error` if it does not answer. The reply holds no threshold; the caller
+judges it.
+
+A component joins by answering clock requests on its own Micro service: it adds `events.ClockHandler` as the
+endpoint named `clock` under a group no other component or replica uses, and callers list that endpoint's
+subject in `extra`. A subject answered by several processes reaches one of them per request, mixing their clocks
+into one result. The request and reply are the
+`io.synadia.ntf.clock.v1.request` and `io.synadia.ntf.clock.v1.reply` types in the `events` package.
 
 ## API
 
 | Subject                       | Description                                                                 |
 |-------------------------------|-----------------------------------------------------------------------------|
-| `tester.create.server`        | Creates a single server. Optional `snippets`, `template`, `trace`, `proxy`. |
-| `tester.create.cluster`       | Creates a cluster. Optional `snippets`, `template`, `trace`, `proxy`.       |
-| `tester.create.super-cluster` | Creates a super-cluster. Optional `snippets`, `template`, `trace`, `proxy`. |
-| `tester.stop.server`          | Stops a running server by name (names are globally unique).                 |
-| `tester.start.server`         | Starts a previously-stopped server by name.                                 |
+| `tester.create.server`        | Creates a single server. Optional `name`, `snippets`, `template`, `trace`, `proxy`, `toxics`, `wait_jetstream`, `system_credentials`. |
+| `tester.create.cluster`       | Creates a cluster of `servers` or `server_names`. Optional `cluster_name`, `snippets`, `template`, `trace`, `proxy`, `toxics`, `wait_jetstream`, `system_credentials`. |
+| `tester.create.super-cluster` | Creates a super-cluster of `clusters` and `servers`, or of a `cluster_list`. Optional `snippets`, `template`, `trace`, `proxy`, `toxics`, `wait_jetstream`, `system_credentials`. |
+| `tester.stop.server`          | Stops a running server by name. Optional `instance_id`.                     |
+| `tester.start.server`         | Starts a previously-stopped server by name. Optional `instance_id`.         |
 | `tester.stop.instance`        | Stops every server in an instance, keeping config and storage.              |
 | `tester.start.instance`       | Revives a previously-stopped instance.                                      |
-| `tester.update.server`        | Renders a new on-disk config for a server. Optional `snippets`, `template`. |
-| `tester.reload.server`        | Signals a running server to re-read its on-disk config.                     |
-| `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxy of an instance with one. |
+| `tester.update.server`        | Renders a new on-disk config for a server. Optional `instance_id`, `snippets`, `template`. |
+| `tester.reload.server`        | Signals a running server to re-read its on-disk config. Optional `instance_id`. |
+| `tester.shape.set`            | Adds or replaces a traffic shaping set on the proxies of an instance with them, or on one `server`'s. |
 | `tester.shape.clear`          | Removes one shaping set by id, or every set when `set` is empty.            |
 | `tester.shape.report`         | Reports the rule firings of one shaping set, or of every set.               |
-| `tester.status`               | Status of every instance and its `shaping_sets`; optional `instance_id`.    |
-| `tester.list`                 | Lightweight summary of every instance (id, kind, servers count).            |
+| `tester.toxic.add`            | Adds a named toxic to the links a selector names, on an instance with `toxics`. |
+| `tester.toxic.remove`         | Removes one toxic by `name`.                                                |
+| `tester.toxic.clear`          | Removes every toxic of an instance.                                         |
+| `tester.toxic.report`         | Lists every link with its toxics, and every toxic with its links.          |
+| `tester.status`               | Status of every instance, its `shaping_sets`, `links` and `toxics`; optional `instance_id`. |
+| `tester.list`                 | Lightweight summary of every instance: id, description, kind, cluster, server count, created time, and the `jetstream`, `trace`, `proxy` and `toxics` it was created with. |
 | `tester.destroy`              | Tears down a single instance by `instance_id`.                              |
 | `tester.reset`                | Tears down **every** instance — CI-style global wipe.                       |
+| `tester.clock`                | Reports each participant's clock against the service host's. Optional `extra` clock subjects. |
+| `ntf.events.tester.<id>.instance.*` | Published by the service when an instance is `created` or `destroyed`. |
+| `ntf.events.tester.<id>.node.*` | Published by the service when a node is `ready`, `stopped`, `started`, `updated` or `reloaded`. |
+| `ntf.events.tester.<id>.shaping.*` | Published by the agent when a shaping set is `applied` or `cleared`, with its `server` when it has one, or a rule `fired`, with the `server_name` it fired on. |
+| `ntf.events.tester.<id>.capture.stored` | Published by the agent when a connection's capture is stored. |
+| `ntf.events.tester.<id>.toxic.*` | Published by the agent when a toxic is `added` or `removed`, and once per toxic when they are `cleared`. |
+| `ntf.events.tester.<id>.chaos.*` | Published by a chaos engine when a run is `started`, `paused`, `resumed`, `stopped` or `finished`, an action is `applied`, reports a `step`, is `reverted`, or fails as `apply_failed` or `revert_failed`, and a quiet window is `opened` or `closed`. |
 
 The subjects above assume the default `Group`. The Go types for these requests and responses live in the `api`
-package.
+package, and the events in the `events` package. The service keeps its group's events in the stream
+`NTF_EVENTS_TESTER`.
 
 ## What embedding this grants
 
@@ -130,5 +378,10 @@ template, and captured traces contain the CONNECT frames of every connection, cr
 destroy any instance; there is no tenancy, quota or rate limit.
 
 Treat running a `Service` as granting code execution on its host. On a shared server, put it in a dedicated
-account and scope subject permissions to its group. `Group` namespaces the endpoints but not Micro's own `$SRV`
-discovery subjects, so two services on one connection still collide there.
+account and scope subject permissions to its group. The service also needs `ntf.events.<group>.>` for its events
+and `$JS.API.>` for their stream. `Group` namespaces the endpoints but not Micro's own `$SRV` discovery subjects, so
+two services on one connection still collide there. On an unauthenticated server any client can publish forged
+events or delete the events stream.
+
+`ntf-server serve` also hosts a chaos service beside it, which answers on `chaos.>`. A client that can publish
+there can stop, reload and fault any instance through it, so scope `chaos.>` as you scope the group.

@@ -20,8 +20,10 @@ func TestCreateServer(t *testing.T) {
 	})
 
 	client.WithJetStreamServer(t, func(t testing.TB, nc *nats.Conn, inst *Instance) {
+		// n1, or <short>-n1 on a service from before default names dropped
+		// the short ID.
 		srv := inst.Servers[0]
-		if !strings.HasSuffix(srv.Name, "-n1") {
+		if srv.Name != "n1" && srv.Name != inst.ID[len(inst.ID)-8:]+"-n1" {
 			t.Fatalf("name not correct: %q", srv.Name)
 		}
 
@@ -58,7 +60,9 @@ func TestCreateCluster(t *testing.T) {
 
 // TestConcurrentCreateClusters issues 3 create.cluster requests in parallel
 // against the same management service and verifies the resulting instances are
-// fully isolated: distinct IDs, cluster names, server names, and client ports.
+// fully isolated: distinct IDs and client ports, and server names unique within
+// each instance. Default names repeat across instances, so cluster and server
+// names may be shared between them.
 func TestConcurrentCreateClusters(t *testing.T) {
 	client := New(t, testServerURL())
 	t.Cleanup(func() {
@@ -78,8 +82,6 @@ func TestConcurrentCreateClusters(t *testing.T) {
 	wg.Wait()
 
 	ids := map[string]bool{}
-	clusterNames := map[string]bool{}
-	serverNames := map[string]bool{}
 	ports := map[int]bool{}
 
 	for i, inst := range results {
@@ -94,13 +96,13 @@ func TestConcurrentCreateClusters(t *testing.T) {
 		if len(inst.Servers) != 3 {
 			t.Fatalf("cluster %d: expected 3 servers, got %d", i, len(inst.Servers))
 		}
+		serverNames := map[string]bool{}
 		for _, srv := range inst.Servers {
 			if srv.Cluster == "" {
 				t.Fatalf("cluster %d: server %q missing cluster name", i, srv.Name)
 			}
-			clusterNames[srv.Cluster] = true
 			if serverNames[srv.Name] {
-				t.Fatalf("duplicate server name across instances: %q", srv.Name)
+				t.Fatalf("cluster %d: duplicate server name within the instance: %q", i, srv.Name)
 			}
 			serverNames[srv.Name] = true
 			if ports[srv.Port] {
@@ -108,10 +110,6 @@ func TestConcurrentCreateClusters(t *testing.T) {
 			}
 			ports[srv.Port] = true
 		}
-	}
-
-	if len(clusterNames) != n {
-		t.Fatalf("expected %d distinct cluster names, got %d (%v)", n, len(clusterNames), clusterNames)
 	}
 
 	listed := client.List(t)
@@ -127,8 +125,8 @@ func TestConcurrentCreateClusters(t *testing.T) {
 // TestParallelClusters runs multiple subtests in parallel, each creating its
 // own cluster, exercising it, and tearing it down via inst.Destroy. The outer
 // test verifies that the three clusters were genuinely independent — distinct
-// instance IDs, distinct cluster names, disjoint port sets — and not three
-// views of one cluster.
+// instance IDs and disjoint port sets — and not three views of one cluster.
+// Default cluster names repeat across instances, so they are not compared.
 func TestParallelClusters(t *testing.T) {
 	client := New(t, testServerURL())
 	t.Cleanup(func() { client.Reset(t) })
@@ -136,9 +134,8 @@ func TestParallelClusters(t *testing.T) {
 	const n = 3
 
 	type observation struct {
-		id          string
-		clusterName string
-		ports       []int
+		id    string
+		ports []int
 	}
 
 	var (
@@ -173,7 +170,7 @@ func TestParallelClusters(t *testing.T) {
 				}
 
 				mu.Lock()
-				observations[i] = observation{id: inst.ID, clusterName: cName, ports: ports}
+				observations[i] = observation{id: inst.ID, ports: ports}
 				mu.Unlock()
 			})
 		})
@@ -182,7 +179,6 @@ func TestParallelClusters(t *testing.T) {
 	// After all subtests finish, assert global isolation across them.
 	t.Cleanup(func() {
 		ids := map[string]bool{}
-		clusterNames := map[string]bool{}
 		ports := map[int]bool{}
 		for _, obs := range observations {
 			if obs.id == "" {
@@ -193,10 +189,6 @@ func TestParallelClusters(t *testing.T) {
 				t.Fatalf("duplicate instance ID across subtests: %q", obs.id)
 			}
 			ids[obs.id] = true
-			if clusterNames[obs.clusterName] {
-				t.Fatalf("duplicate cluster name across subtests: %q", obs.clusterName)
-			}
-			clusterNames[obs.clusterName] = true
 			for _, p := range obs.ports {
 				if ports[p] {
 					t.Fatalf("duplicate port across subtests: %d", p)

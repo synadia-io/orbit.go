@@ -2,8 +2,10 @@ package ntf
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +93,120 @@ func TestShapingRoundTrip(t *testing.T) {
 	}
 	if len(inst.Status(t).ShapingSets) != 0 {
 		t.Fatalf("status shaping sets after clear = %v, want none", inst.Status(t).ShapingSets)
+	}
+}
+
+// firstDemoMessage connects to url as name, publishes one then two on demo and
+// returns the first message its subscription receives.
+func firstDemoMessage(t *testing.T, url string, name string) string {
+	t.Helper()
+
+	nc, err := nats.Connect(url, nats.Name(name))
+	if err != nil {
+		t.Fatalf("connect via %s: %v", url, err)
+	}
+	defer nc.Close()
+
+	sub, err := nc.SubscribeSync("demo")
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	for _, body := range []string{"one", "two"} {
+		err = nc.Publish("demo", []byte(body))
+		if err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+	err = nc.Flush()
+	if err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	msg, err := sub.NextMsg(2 * time.Second)
+	if err != nil {
+		t.Fatalf("next msg: %v", err)
+	}
+
+	return string(msg.Data)
+}
+
+// TestShapingOneServer pins a set naming one server of a traced cluster: it
+// drops on that server's capture proxy alone, its report counts the firing on
+// that server, and a set naming a server the instance does not have is refused.
+func TestShapingOneServer(t *testing.T) {
+	client := New(t, testServerURL())
+	defer client.Close(t)
+
+	inst := client.CreateCluster(t, 3, false, WithTraceCapture())
+	defer inst.Destroy(t)
+
+	const name = "ntf-client/shaping/one-server"
+	shaped := inst.Servers[2]
+	set := api.ShapingSet{
+		ID:             "drop-first-demo-on-one",
+		ConnectionName: "^" + name + "$",
+		Server:         shaped.Name,
+		Rules: []api.ShapingRule{{
+			ID: "drop-demo",
+			Match: api.ShapingMatch{
+				Direction: "from_server",
+				Verb:      []string{"MSG"},
+				Subject:   &api.SubjectMatch{Exact: "demo"},
+			},
+			Action: api.ShapingAction{Kind: api.ShapingDrop},
+			Limit:  1,
+		}},
+	}
+	inst.SetShaping(t, set)
+
+	got := firstDemoMessage(t, inst.Servers[0].TraceURL, name)
+	if got != "one" {
+		t.Errorf("first message through %s = %q, want one: the set applies on %s alone", inst.Servers[0].Name, got, shaped.Name)
+	}
+	got = firstDemoMessage(t, shaped.TraceURL, name)
+	if got != "two" {
+		t.Errorf("first message through %s = %q, want two: the set should have dropped one", shaped.Name, got)
+	}
+
+	report := inst.ShapingReport(t, set.ID)
+	if len(report.Sets) != 1 {
+		t.Fatalf("report sets = %+v, want only %s", report.Sets, set.ID)
+	}
+	servers := report.Sets[0].Servers
+	if len(report.Sets[0].Firings) != 1 {
+		t.Errorf("report firings = %+v, want one", report.Sets[0].Firings)
+	}
+	if len(servers) != 1 {
+		t.Errorf("report servers = %v, want %s alone", servers, shaped.Name)
+	}
+	if servers[shaped.Name] != 1 {
+		t.Errorf("report servers = %v, want one firing on %s", servers, shaped.Name)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	set.ID = "elsewhere"
+	set.Server = "no-such-server"
+	_, err := client.m.SetShaping(ctx, inst.ID, set)
+	if !errors.Is(err, ErrService) {
+		t.Errorf("set shaping on an unknown server: err = %v, want ErrService", err)
+	}
+
+	// The refusal is the shaping error, 017, naming the server.
+	payload, err := json.Marshal(api.ShapeSetRequest{InstanceID: inst.ID, Set: set})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	msg, err := client.nc.Request("tester.shape.set", payload, 10*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	code := msg.Header.Get("Nats-Service-Error-Code")
+	if code != "017" {
+		t.Errorf("set shaping on an unknown server answered %q, want 017", code)
+	}
+	text := msg.Header.Get("Nats-Service-Error")
+	if !strings.Contains(text, "no-such-server") {
+		t.Errorf("refusal %q does not name the server", text)
 	}
 }
 

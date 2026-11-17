@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/start_server_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.start_server_response",
+      "description": "The type id of the response"
+    },
+    "started": {
+      "type": "boolean",
+      "description": "Whether the server started"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.start_server_response"
+}

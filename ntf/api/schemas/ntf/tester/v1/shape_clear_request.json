@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/shape_clear_request.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.shape_clear_request",
+      "description": "The type id of the request"
+    },
+    "instance_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The instance to remove the sets from"
+    },
+    "set": {
+      "type": "string",
+      "description": "The id of the set to remove, every set when empty"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "instance_id"
+  ],
+  "title": "io.synadia.ntf.tester.v1.shape_clear_request"
+}

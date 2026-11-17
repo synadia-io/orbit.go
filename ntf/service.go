@@ -15,6 +15,7 @@ package ntf
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,13 +24,21 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nats.go/micro"
 	"github.com/nats-io/nuid"
+
+	"github.com/synadia-io/orbit.go/ntf/agent"
+	"github.com/synadia-io/orbit.go/ntf/api"
+	"github.com/synadia-io/orbit.go/ntf/backend"
+	"github.com/synadia-io/orbit.go/ntf/events"
+	"github.com/synadia-io/orbit.go/ntf/schema/validate"
 )
 
 const (
@@ -49,10 +58,19 @@ const (
 	// connections when the context carries no earlier deadline.
 	readyTimeout = 10 * time.Second
 
+	// embeddedStartAttempts is how many ports the embedded server tries when the
+	// port chosen for it is taken before it binds it.
+	embeddedStartAttempts = 3
+
 	// defaultPortLow and defaultPortHigh bound the managed server port range when
 	// Options.PortRange is not set.
 	defaultPortLow  = 20000
 	defaultPortHigh = 40000
+
+	// defaultEventsMaxAge and defaultEventsMaxBytes bound the events stream
+	// when Options.EventsMaxAge and Options.EventsMaxBytes are not set.
+	defaultEventsMaxAge   = 24 * time.Hour
+	defaultEventsMaxBytes = 1 << 30
 )
 
 // Options configures a Service. The zero value is usable: it starts an embedded
@@ -101,23 +119,54 @@ type Options struct {
 
 	// Group is the subject group every endpoint hangs off. Empty uses
 	// DefaultGroup. Changing it moves every subject, and clients that expect
-	// the default will not find the service.
+	// the default will not find the service. It also names the events stream,
+	// so New fails on a group that is not a single lowercase subject token
+	// valid in a stream name, as events.ValidateGroup checks.
 	Group string
 
-	// NewCapturer supplies trace capture. Nil refuses requests that ask for it.
-	NewCapturer NewCapturerFunc
+	// EventsMaxAge is how long the events stream keeps an event before
+	// discarding it. Zero keeps events for 24 hours.
+	EventsMaxAge time.Duration
+
+	// EventsMaxBytes is the size past which the events stream discards its
+	// oldest events. Zero keeps up to 1 GiB.
+	EventsMaxBytes int64
+
+	// Backends are backend factories to register, keyed by name, beside the
+	// built-in "inprocess" backend. New fails on an empty name or on
+	// "inprocess".
+	Backends map[string]backend.Factory
+
+	// Backend names the registered backend that runs managed servers. Empty
+	// uses "inprocess". New fails on a name that is not registered.
+	Backend string
+
+	// Agents are network agent factories to register, keyed by name. New
+	// fails on an empty name. There is no built-in agent.
+	Agents map[string]agent.Factory
+
+	// Agent names the registered agent that fronts managed servers for trace
+	// capture and shaping. Empty selects none, and requests that ask for trace
+	// capture are refused. New fails on a name that is not registered.
+	Agent string
 }
 
 // EmbeddedOptions configures the management server started when Options.Conn is nil.
 type EmbeddedOptions struct {
-	// Port to listen on. Zero and -1 both bind an OS-chosen port, which is what
-	// a test suite wants; read the result back with ClientURL or Port.
+	// Port to listen on. Zero and -1 both bind an OS-chosen port that is clear on
+	// the loopback addresses, which is what a test suite wants; read the result
+	// back with ClientURL or Port.
 	Port int
 
 	// ServerName names the embedded server. Empty uses DefaultServerName.
 	ServerName string
 
-	// Log writes the embedded server's own log to stdout. Managed servers are
+	// StoreDir is the embedded server's JetStream store directory, which
+	// holds the events stream. Empty uses the management directory under
+	// Options.Dir.
+	StoreDir string
+
+	// Log writes the embedded server's own log to stderr. Managed servers are
 	// unaffected: they always log to a file under their instance directory.
 	Log bool
 }
@@ -137,9 +186,14 @@ type Service struct {
 	// ownConn reports whether Close may close nc.
 	ownConn bool
 
-	micro    micro.Service
-	log      *slog.Logger
-	capturer Capturer
+	micro micro.Service
+	log   *slog.Logger
+
+	// agents starts the network agents of instances created with trace
+	// capture, nil when no agent is selected.
+	agents agent.Provider
+	// agentName is the name agents was registered under. Status reports it.
+	agentName string
 
 	dir string
 	// ownDir reports whether Close may remove dir.
@@ -150,30 +204,132 @@ type Service struct {
 	// ports hands out every port a managed server listens on.
 	ports *portAllocator
 
+	// backend runs the managed servers of every instance.
+	backend backend.Backend
+	// backendName is the name backend was registered under. Status reports it.
+	backendName string
+
+	// group is the subject group of the endpoints and the events.
+	group string
+
+	// js stores the service's events in the stream named stream, with an
+	// ack. Nil when the service publishes its events live only.
+	js     jetstream.JetStream
+	stream string
+
+	// agentEvents is the publisher handed to the agent.
+	agentEvents *agentPublisher
+
 	mu        sync.Mutex
 	instances map[string]*instance
+
+	// detachedRequests counts the requests run in goroutines of their own,
+	// the stop, start and reload of a server and the toxic endpoints through
+	// perRequest and the creates waiting for JetStream, so Close waits for
+	// them before it tears the instances down.
+	// Add is called only under detachedRequestsMu while
+	// detachedRequestsClosed is false, so no Add races the Wait in Close.
+	detachedRequests       sync.WaitGroup
+	detachedRequestsMu     sync.Mutex
+	detachedRequestsClosed bool
+
+	// closing is closed when Close begins, under detachedRequestsMu as
+	// detachedRequestsClosed is set, so a create waiting for JetStream in a
+	// goroutine of its own gives up rather than holding Close for the rest
+	// of its wait.
+	closing chan struct{}
 }
 
 type instance struct {
 	ID          string
 	Kind        string
 	Description string
-	Cluster     string
-	RootDir     string
-	Servers     []*managedServer
-	Created     time.Time
+	// Cluster is the cluster name of a cluster instance, from its plan, set
+	// once planning succeeds. Guarded by Service.mu.
+	Cluster string
+	RootDir string
+	Servers []*managedServer
+	Created time.Time
 
 	// ports lists every port reserved for the instance's servers. They stay
 	// reserved while a server is stopped, so it restarts on the same ports, and
 	// return to the range when the instance is torn down. Guarded by Service.mu.
 	ports []int
+
+	// plan is the plan the instance was created from, set once its nodes are
+	// provisioned and before they are published. It holds no TLS material and
+	// no contents of any file or config. Guarded by Service.mu.
+	plan *instancePlan
+
+	// links are the proxied links of an instance created with toxics, as its
+	// create response lists them, set with Servers and never changed after.
+	// Nil for any other instance. Guarded by Service.mu.
+	links []api.Link
+
+	// agent is the instance's network agent, set with Servers when its create
+	// started one, for trace, proxy or toxics, and never changed after. A
+	// teardown stops it once, before the servers go, so in-flight captures
+	// flush. Nil for any other instance. Guarded by Service.mu.
+	agent agent.Agent
+
+	// options are the options the instance was created with, as the list
+	// response and the created event report them. With trace or proxy, agent
+	// fronts every server's client port with a capture proxy, so the shaping
+	// calls act on it. Set with agent and never changed after. Guarded by
+	// Service.mu.
+	options createOptions
+
+	// events is the instance's event lock. A create holds it from making its
+	// servers visible until created and ready are published, and a teardown
+	// from stopping the agents until destroyed is published, so no node event
+	// lands before created or after destroyed. A node handler holds it only
+	// around its publish; its node's cfgMu orders that node's events. It is
+	// taken before Service.mu, never while holding it.
+	events sync.Mutex
+
+	// announced reports whether the created event was published, so a
+	// teardown records destroyed only for an instance it announced. Guarded
+	// by events.
+	announced bool
+
+	// sourceSeq is the source_seq of the last event the service published for
+	// the instance. Guarded by events.
+	sourceSeq uint64
+
+	// eventsSeq is the highest stream sequence acked for the service's events
+	// of the instance, 0 for none. Guarded by Service.mu.
+	eventsSeq uint64
+}
+
+// createOptions are the jetstream, trace, proxy and toxics options of the
+// create request an instance was created from. Since trace implies the proxy,
+// proxy is set only for an instance created with a proxy and no trace, so at
+// most one of trace and proxy is set.
+type createOptions struct {
+	jetstream bool
+	trace     bool
+	proxy     bool
+	toxics    bool
+}
+
+// specOptions returns the create options of spec.
+func specOptions(spec instanceSpec) createOptions {
+	return createOptions{
+		jetstream: spec.JetStream,
+		trace:     spec.Proxy && spec.StoreCaptures,
+		proxy:     spec.Proxy && !spec.StoreCaptures,
+		toxics:    spec.Toxics,
+	}
 }
 
 type managedServer struct {
-	srv        *server.Server
-	rootDir    string
-	configPath string
-	ports      map[string]int
+	// backendNode is the server as the backend runs it.
+	backendNode backend.Node
+
+	// rootDir is the server's directory under its placement. Only tests read
+	// it.
+	rootDir string
+	ports   map[string]int
 
 	// instanceID names the owning instance, so a handler holding only this
 	// server can ask whether that instance is still registered. A start that
@@ -181,42 +337,42 @@ type managedServer struct {
 	// to an instance nobody will ever tear down.
 	instanceID string
 
-	// clientPort is the server's reserved client listen port, captured at create
-	// time. Unlike the live server's address it survives a stop, so status can
-	// report the client port even for a stopped node.
+	// clientPort is the server's reserved client listen port, or its client
+	// proxy's port when its instance was created with toxics, captured at
+	// create time. Unlike the live server's address it survives a stop, so
+	// status can report the client port even for a stopped node.
 	clientPort int
 
 	// advertiseHost is the resolved client_advertise host for this server,
 	// captured at create time. Immutable for the life of the server (an update
 	// never changes it), so status can read it lock-free rather than racing the
-	// td pointer swap in updateServer. Empty when the node advertises nothing.
+	// node plan swap in updateServer. Empty when the node advertises nothing.
 	advertiseHost string
 
-	// td is the render environment captured at create time. Used by
-	// updateServer to re-render the snippets and main template when staging
-	// a new config.
-	td *templateData
+	// node is this server's node in its instance's plan. updateServer renders
+	// the snippets and main template from its template data and its managed TLS
+	// settings when staging a new config. The TLS settings pointer is shared by
+	// every node of the instance, so a node plan is never mutated: updateServer
+	// swaps in a changed copy on success. Guarded by cfgMu.
+	node *nodePlan
 
-	// tlsFiles holds the generated-TLS material paths and rendered tls{} knobs
-	// (verify, handshake_first, timeout) for this server. nil when the server
-	// was not created with generated TLS. The pointer is shared across an
-	// instance's nodes at create time; updateServer copy-on-writes a fresh copy
-	// for the single targeted server when changing its timeout.
-	tlsFiles *tlsInstanceFiles
+	// toxics reports whether the server's instance was created with toxics,
+	// so an update checks a custom template, and the config it renders, for
+	// the proxies. Immutable for the life of the server.
+	toxics bool
 
-	// traceProxy is the capture proxy fronting this server's client port, set when
-	// the server was created with trace capture enabled. nil otherwise. Stopped
-	// (flushing in-flight captures) before the server is shut down on teardown.
-	traceProxy CaptureProxy
-
-	// cfgMu guards the server's config (configPath and its snippet
-	// files). Held by update, reload and start operations.
+	// cfgMu guards the server's config (its config path and its snippet
+	// files). Held by update, reload, start and stop operations. Requests for
+	// different servers run at once, so cfgMu is what keeps the stop, start
+	// and reload requests of one server apart.
 	cfgMu sync.Mutex
 }
 
 // New starts the management service and, unless Options.Conn is set, the embedded
 // server that hosts it. It unwinds everything it started if any step fails, so a
-// non-nil error leaves nothing running.
+// non-nil error leaves nothing running. On a caller's connection the events
+// stream it created or updated stays, since other services may share it, and a
+// later New reuses it.
 //
 // ctx limits startup only; the service runs until Close.
 func New(ctx context.Context, opts Options) (*Service, error) {
@@ -225,11 +381,22 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		log = slog.New(slog.DiscardHandler)
 	}
 
+	group := opts.Group
+	if group == "" {
+		group = DefaultGroup
+	}
+	err := events.ValidateGroup(group)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Service{
 		log:           log,
 		preserve:      opts.Preserve,
 		advertiseHost: opts.AdvertiseHost,
+		group:         group,
 		instances:     map[string]*instance{},
+		closing:       make(chan struct{}),
 	}
 
 	portRange, err := resolvePortRange(opts.PortRange, ephemeralPortRange, log)
@@ -237,6 +404,48 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		return nil, err
 	}
 	s.ports = newPortAllocator(portRange)
+
+	factories := map[string]backend.Factory{
+		inProcessBackendName: func(context.Context, backend.Options) (backend.Backend, error) {
+			return newInProcessBackend(s), nil
+		},
+	}
+	for name, factory := range opts.Backends {
+		if name == "" {
+			return nil, fmt.Errorf("%w: empty name", ErrBackendName)
+		}
+		_, exists := factories[name]
+		if exists {
+			return nil, fmt.Errorf("%w: %q is already registered", ErrBackendName, name)
+		}
+		factories[name] = factory
+	}
+
+	backendName := opts.Backend
+	if backendName == "" {
+		backendName = inProcessBackendName
+	}
+	factory, ok := factories[backendName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q, registered: %s", ErrUnknownBackend, backendName, strings.Join(slices.Sorted(maps.Keys(factories)), ", "))
+	}
+
+	for name, f := range opts.Agents {
+		if name == "" {
+			return nil, fmt.Errorf("%w: empty name", ErrAgentName)
+		}
+		if f == nil {
+			return nil, fmt.Errorf("%w: %q has a nil factory", ErrAgentName, name)
+		}
+	}
+
+	var agentFactory agent.Factory
+	if opts.Agent != "" {
+		agentFactory, ok = opts.Agents[opts.Agent]
+		if !ok {
+			return nil, fmt.Errorf("%w: %q, registered: %s", ErrUnknownAgent, opts.Agent, strings.Join(slices.Sorted(maps.Keys(opts.Agents)), ", "))
+		}
+	}
 
 	// Anything started below is registered here so a later failure can undo it
 	// in reverse order.
@@ -259,6 +468,14 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		unwind = append(unwind, func() { os.RemoveAll(dir) })
 	}
 
+	be, err := factory(ctx, backend.Options{Dir: s.dir, Preserve: s.preserve, Logger: log})
+	if err != nil {
+		return fail(fmt.Errorf("could not create the %q backend: %w", backendName, err))
+	}
+	s.backend = be
+	s.backendName = backendName
+	unwind = append(unwind, func() { be.Close() })
+
 	switch {
 	case opts.Conn != nil:
 		s.nc = opts.Conn
@@ -276,17 +493,35 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 
 		nc, err := nats.Connect("", nats.InProcessServer(srv))
 		if err != nil {
-			return fail(fmt.Errorf("could not connect to the management server: %w", err))
+			return fail(fmt.Errorf("could not connect to the management service: %w", err))
 		}
 		s.nc = nc
 		s.ownConn = true
 		unwind = append(unwind, nc.Close)
 	}
 
-	group := opts.Group
-	if group == "" {
-		group = DefaultGroup
+	// The stream exists before the endpoints go live, so no event is lost.
+	err = s.startEvents(ctx, opts)
+	if err != nil {
+		return fail(err)
 	}
+	s.agentEvents = newAgentPublisher(s.nc, s.group)
+
+	// The agent is built before the endpoints go live, so no request finds the
+	// service without it.
+	if agentFactory != nil {
+		provider, err := agentFactory(ctx, agent.Options{Dir: s.dir, Preserve: s.preserve, Logger: log, Conn: s.nc, Server: s.srv, Events: s.agentEvents})
+		if err != nil {
+			return fail(fmt.Errorf("could not create the %q agent: %w", opts.Agent, err))
+		}
+		if provider == nil {
+			return fail(fmt.Errorf("could not create the %q agent: the factory returned no provider", opts.Agent))
+		}
+		s.agents = provider
+		s.agentName = opts.Agent
+		unwind = append(unwind, func() { provider.Close() })
+	}
+
 	name := opts.Name
 	if name == "" {
 		name = DefaultName
@@ -297,46 +532,78 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 	}
 	unwind = append(unwind, func() { s.micro.Stop() })
 
-	if opts.NewCapturer != nil {
-		capturer, err := opts.NewCapturer(ctx, s)
-		if err != nil {
-			return fail(fmt.Errorf("could not create the trace capturer: %w", err))
-		}
-		s.capturer = capturer
-	}
-
 	return s, nil
 }
 
 // startEmbedded starts the management server and waits for it to accept connections.
 func (s *Service) startEmbedded(ctx context.Context, opts EmbeddedOptions) (*server.Server, error) {
+	// nats-server spells an OS-chosen port -1 and reads 0 as "use 4222". A test
+	// suite wants a free port far more often than it wants 4222, so both mean
+	// OS-chosen here and a fixed port has to be asked for.
+	if opts.Port != 0 && opts.Port != server.RANDOM_PORT {
+		return s.runEmbedded(ctx, opts, opts.Port)
+	}
+
+	// The port is chosen here and given to the server as a fixed one, since the OS
+	// can pick a port another process holds on a loopback address, where a client
+	// of ClientURL would reach that process. Another process can still take the
+	// port before the server binds it. A wildcard listener fails the bind and
+	// another port is drawn. On macOS a listener on 127.0.0.1 does not, and a client
+	// reaches it as before.
+	var err error
+	for range embeddedStartAttempts {
+		var port int
+		port, err = s.ports.chooseOSPort(drawOSPort)
+		if err != nil {
+			return nil, err
+		}
+
+		var srv *server.Server
+		srv, err = s.runEmbedded(ctx, opts, port)
+		if !errors.Is(err, ErrServerListen) {
+			return srv, err
+		}
+
+		s.log.Warn("Management service could not listen on its chosen port", "port", port, "err", err)
+	}
+
+	return nil, err
+}
+
+// runEmbedded starts the management server on port and waits for it to accept
+// connections. Its logger is guarded as a managed server's is, so a port it cannot
+// bind fails with ErrServerListen at once rather than exiting the process or going
+// unnoticed until the wait runs out.
+func (s *Service) runEmbedded(ctx context.Context, opts EmbeddedOptions, port int) (*server.Server, error) {
 	name := opts.ServerName
 	if name == "" {
 		name = DefaultServerName
 	}
 
-	// nats-server spells an OS-chosen port -1 and reads 0 as "use 4222". A test
-	// suite wants a free port far more often than it wants 4222, so both mean
-	// OS-chosen here and a fixed port has to be asked for.
-	port := opts.Port
-	if port == 0 {
-		port = server.RANDOM_PORT
+	storeDir := opts.StoreDir
+	if storeDir == "" {
+		storeDir = filepath.Join(s.dir, "management")
 	}
 
-	srv, err := server.NewServer(&server.Options{
+	serverOpts := &server.Options{
 		ServerName: name,
 		Port:       port,
-		StoreDir:   filepath.Join(s.dir, "management"),
+		StoreDir:   storeDir,
 		NoSigs:     true,
 		NoLog:      !opts.Log,
-	})
+	}
+
+	srv, err := server.NewServer(serverOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	if opts.Log {
-		srv.ConfigureLogger()
+	guard := guardServerLogger(srv, serverOpts, s.log)
+
+	if beforeEmbeddedStart != nil {
+		beforeEmbeddedStart(port)
 	}
+
 	srv.Start()
 
 	wait := readyTimeout
@@ -344,17 +611,95 @@ func (s *Service) startEmbedded(ctx context.Context, opts EmbeddedOptions) (*ser
 	if ok {
 		wait = time.Until(deadline)
 	}
-	if !srv.ReadyForConnections(wait) {
+
+	err = waitForStart(srv, guard, wait)
+	if err != nil {
 		srv.Shutdown()
 		srv.WaitForShutdown()
-		return nil, fmt.Errorf("management server not ready for connections after %v", wait)
+		return nil, fmt.Errorf("management service failed to start: %w", err)
+	}
+
+	// JetStream is enabled once the server is up rather than in Start, which on
+	// failure stops the server. Its store is the jetstream directory under
+	// storeDir.
+	err = srv.EnableJetStream(&server.JetStreamConfig{StoreDir: storeDir})
+	if err != nil {
+		srv.Shutdown()
+		srv.WaitForShutdown()
+		return nil, fmt.Errorf("could not enable JetStream for the management service in %s: %w", storeDir, err)
 	}
 
 	return srv, nil
 }
 
+// startEvents creates or updates the events stream of the service's group. A
+// failure fails New on the embedded server. On a caller's connection, where
+// JetStream may be missing or the stream may not be allowed, it logs a warning
+// and leaves the service publishing its events live only.
+func (s *Service) startEvents(ctx context.Context, opts Options) error {
+	maxAge := opts.EventsMaxAge
+	if maxAge == 0 {
+		maxAge = defaultEventsMaxAge
+	}
+	maxBytes := opts.EventsMaxBytes
+	if maxBytes == 0 {
+		maxBytes = defaultEventsMaxBytes
+	}
+
+	cfg := jetstream.StreamConfig{
+		Name:     events.StreamName(s.group),
+		Subjects: []string{events.StreamSubject(s.group)},
+		Storage:  jetstream.FileStorage,
+		Discard:  jetstream.DiscardOld,
+		MaxAge:   maxAge,
+		MaxBytes: maxBytes,
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, readyTimeout)
+	defer cancel()
+
+	js, err := jetstream.New(s.nc)
+	if err == nil {
+		_, err = js.CreateOrUpdateStream(ctx, cfg)
+	}
+	if err != nil {
+		if s.srv != nil {
+			return fmt.Errorf("could not create the events stream %s: %w", cfg.Name, err)
+		}
+		s.log.Warn("Publishing events live only, could not create the events stream", "stream", cfg.Name, "err", err)
+		return nil
+	}
+
+	s.js = js
+	s.stream = cfg.Name
+
+	return nil
+}
+
 func (s *Service) startServices(name, group string) error {
 	var err error
+
+	requestTypes := make(map[string]string, len(api.Endpoints))
+	for _, ep := range api.Endpoints {
+		requestTypes[ep.Name] = ep.RequestType
+	}
+	requestSchemas, err := validate.Compile(requestTypes, api.Schema)
+	if err != nil {
+		return err
+	}
+	schemas, err := endpointSchemas()
+	if err != nil {
+		return err
+	}
+
+	// check wraps the handler of the endpoint name, as api.Endpoints names it,
+	// so its request is validated before the handler runs, and notes the
+	// endpoint so every endpoint is known to be validated once all are added.
+	checked := map[string]bool{}
+	check := func(name string, h micro.HandlerFunc) micro.HandlerFunc {
+		checked[name] = true
+		return validate.Handler(requestSchemas[name], h)
+	}
 
 	s.micro, err = micro.AddService(s.nc, micro.Config{
 		Name:    name,
@@ -367,86 +712,257 @@ func (s *Service) startServices(name, group string) error {
 	srv := s.micro.AddGroup(group)
 
 	create := srv.AddGroup("create")
-	err = create.AddEndpoint("server", micro.HandlerFunc(s.createServer))
+	err = create.AddEndpoint("server", check("create.server", s.createServer))
 	if err != nil {
 		return err
 	}
-	err = create.AddEndpoint("cluster", micro.HandlerFunc(s.createCluster))
+	err = create.AddEndpoint("cluster", check("create.cluster", s.createCluster))
 	if err != nil {
 		return err
 	}
-	err = create.AddEndpoint("super-cluster", micro.HandlerFunc(s.createSuperCluster))
+	err = create.AddEndpoint("super-cluster", check("create.super-cluster", s.createSuperCluster))
 	if err != nil {
 		return err
 	}
 
 	stop := srv.AddGroup("stop")
-	err = stop.AddEndpoint("server", micro.HandlerFunc(s.stopServer))
+	err = stop.AddEndpoint("server", check("stop.server", s.perRequest(s.stopServer)))
 	if err != nil {
 		return err
 	}
-	err = stop.AddEndpoint("instance", micro.HandlerFunc(s.stopInstance))
+	err = stop.AddEndpoint("instance", check("stop.instance", s.stopInstance))
 	if err != nil {
 		return err
 	}
 
 	start := srv.AddGroup("start")
-	err = start.AddEndpoint("server", micro.HandlerFunc(s.startServer))
+	err = start.AddEndpoint("server", check("start.server", s.perRequest(s.startServer)))
 	if err != nil {
 		return err
 	}
-	err = start.AddEndpoint("instance", micro.HandlerFunc(s.startInstance))
+	err = start.AddEndpoint("instance", check("start.instance", s.startInstance))
 	if err != nil {
 		return err
 	}
 
 	update := srv.AddGroup("update")
-	err = update.AddEndpoint("server", micro.HandlerFunc(s.updateServer))
+	err = update.AddEndpoint("server", check("update.server", s.updateServer))
 	if err != nil {
 		return err
 	}
 
 	reload := srv.AddGroup("reload")
-	err = reload.AddEndpoint("server", micro.HandlerFunc(s.reloadServer))
+	err = reload.AddEndpoint("server", check("reload.server", s.perRequest(s.reloadServer)))
 	if err != nil {
 		return err
 	}
 
 	shape := srv.AddGroup("shape")
-	err = shape.AddEndpoint("set", micro.HandlerFunc(s.shapeSet))
+	err = shape.AddEndpoint("set", check("shape.set", s.shapeSet))
 	if err != nil {
 		return err
 	}
-	err = shape.AddEndpoint("clear", micro.HandlerFunc(s.shapeClear))
+	err = shape.AddEndpoint("clear", check("shape.clear", s.shapeClear))
 	if err != nil {
 		return err
 	}
-	err = shape.AddEndpoint("report", micro.HandlerFunc(s.shapeReport))
+	err = shape.AddEndpoint("report", check("shape.report", s.shapeReport))
 	if err != nil {
 		return err
 	}
-
-	err = srv.AddEndpoint("status", micro.HandlerFunc(s.status))
-	if err != nil {
-		return err
-	}
-
-	err = srv.AddEndpoint("reset", micro.HandlerFunc(s.reset))
+	err = shape.AddEndpoint("list", check("shape.list", s.shapeList))
 	if err != nil {
 		return err
 	}
 
-	err = srv.AddEndpoint("destroy", micro.HandlerFunc(s.destroy))
+	toxic := srv.AddGroup("toxic")
+	err = toxic.AddEndpoint("add", check("toxic.add", s.perRequest(s.toxicAdd)))
+	if err != nil {
+		return err
+	}
+	err = toxic.AddEndpoint("remove", check("toxic.remove", s.perRequest(s.toxicRemove)))
+	if err != nil {
+		return err
+	}
+	err = toxic.AddEndpoint("clear", check("toxic.clear", s.perRequest(s.toxicClear)))
+	if err != nil {
+		return err
+	}
+	err = toxic.AddEndpoint("report", check("toxic.report", s.perRequest(s.toxicReport)))
 	if err != nil {
 		return err
 	}
 
-	err = srv.AddEndpoint("list", micro.HandlerFunc(s.list))
+	err = srv.AddEndpoint("status", check("status", s.status))
 	if err != nil {
 		return err
+	}
+
+	err = srv.AddEndpoint("reset", check("reset", s.reset))
+	if err != nil {
+		return err
+	}
+
+	err = srv.AddEndpoint("destroy", check("destroy", s.destroy))
+	if err != nil {
+		return err
+	}
+
+	err = srv.AddEndpoint("list", check("list", s.list))
+	if err != nil {
+		return err
+	}
+
+	err = srv.AddEndpoint("clock", check("clock", s.clock))
+	if err != nil {
+		return err
+	}
+
+	err = srv.AddEndpoint("schema", check("schema", schemaHandler(schemas)))
+	if err != nil {
+		return err
+	}
+
+	for _, ep := range api.Endpoints {
+		if !checked[ep.Name] {
+			return fmt.Errorf("endpoint %s is not added with request validation", ep.Name)
+		}
 	}
 
 	return nil
+}
+
+// perRequest returns the handler of an endpoint whose requests each act on one
+// node or one instance: stop.server, start.server, reload.server and the
+// toxic endpoints. A micro endpoint handles one request at a time, so a
+// request for one node or instance would otherwise wait behind a slow request
+// for another, and a stop or a toxic add queued that way could run after the
+// request undoing it had already answered. perRequest runs h for each request
+// in a goroutine of its own instead. The node's cfgMu keeps the requests for
+// one node apart. The toxic requests for one instance may reach its agent at
+// once and in any order, which agent.Toxics allows: its agents accept
+// concurrent calls.
+//
+// The goroutine answers through a detachedRequest, since the micro service
+// reads its own request once the handler returns. Once Close has begun, a
+// request still drained from the endpoint runs in the handler, as every other
+// endpoint's does.
+func (s *Service) perRequest(h micro.HandlerFunc) micro.HandlerFunc {
+	return func(req micro.Request) {
+		s.detach(req, h)
+	}
+}
+
+// detach runs h for req in a goroutine of its own, answering through a
+// detachedRequest, and counts it in detachedRequests so Close waits for it.
+// Once Close has begun it runs h in the caller instead.
+func (s *Service) detach(req micro.Request, h micro.HandlerFunc) {
+	s.detachedRequestsMu.Lock()
+	closed := s.detachedRequestsClosed
+	if !closed {
+		s.detachedRequests.Add(1)
+	}
+	s.detachedRequestsMu.Unlock()
+
+	if closed {
+		h(req)
+		return
+	}
+
+	r := &detachedRequest{
+		nc:      s.nc,
+		subject: req.Subject(),
+		reply:   req.Reply(),
+		data:    req.Data(),
+		headers: req.Headers(),
+	}
+
+	go func() {
+		defer s.detachedRequests.Done()
+		h(r)
+	}()
+}
+
+// detachedRequest is a micro.Request a handler can answer after the micro
+// handler returned. It publishes its answer on the management connection
+// itself, with the headers micro sets, and returns the errors micro's own
+// request returns. It leaves the micro service's request alone, so the
+// service's stats do not count its errors, and report a processing time near
+// zero, since micro times only the start of the goroutine.
+type detachedRequest struct {
+	nc      *nats.Conn
+	subject string
+	reply   string
+	data    []byte
+	headers micro.Headers
+}
+
+var _ micro.Request = (*detachedRequest)(nil)
+
+func (r *detachedRequest) Respond(data []byte, opts ...micro.RespondOpt) error {
+	msg := &nats.Msg{Data: data}
+	for _, opt := range opts {
+		opt(msg)
+	}
+
+	// micro formats the cause with %s, so only ErrRespond matches errors.Is.
+	err := r.publish(msg)
+	if err != nil {
+		return fmt.Errorf("%w: %s", micro.ErrRespond, err)
+	}
+
+	return nil
+}
+
+func (r *detachedRequest) RespondJSON(v any, opts ...micro.RespondOpt) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return micro.ErrMarshalResponse
+	}
+
+	return r.Respond(data, opts...)
+}
+
+func (r *detachedRequest) Error(code, description string, data []byte, opts ...micro.RespondOpt) error {
+	if code == "" {
+		return fmt.Errorf("%w: error code", micro.ErrArgRequired)
+	}
+	if description == "" {
+		return fmt.Errorf("%w: description", micro.ErrArgRequired)
+	}
+
+	msg := &nats.Msg{
+		Header: nats.Header{
+			micro.ErrorHeader:     []string{description},
+			micro.ErrorCodeHeader: []string{code},
+		},
+	}
+	for _, opt := range opts {
+		opt(msg)
+	}
+	msg.Data = data
+
+	return r.publish(msg)
+}
+
+func (r *detachedRequest) Data() []byte { return r.data }
+
+func (r *detachedRequest) Headers() micro.Headers { return r.headers }
+
+func (r *detachedRequest) Subject() string { return r.subject }
+
+func (r *detachedRequest) Reply() string { return r.reply }
+
+// publish sends msg to the request's reply subject, returning the publish
+// error as it is: Respond wraps it and Error does not, as micro's request does.
+func (r *detachedRequest) publish(msg *nats.Msg) error {
+	if r.reply == "" {
+		return nats.ErrMsgNoReply
+	}
+
+	msg.Subject = r.reply
+
+	return r.nc.PublishMsg(msg)
 }
 
 // ManagementConn is the connection the service answers requests on. It belongs to
@@ -485,23 +1001,31 @@ func (s *Service) Dir() string { return s.dir }
 
 // Reset tears down every instance and keeps serving.
 func (s *Service) Reset() error {
+	return s.resetWith(events.ReasonReset)
+}
+
+// resetWith tears down every instance, recording reason in the destroyed event
+// of each instance that was announced.
+func (s *Service) resetWith(reason events.DestroyReason) error {
 	s.mu.Lock()
 	all := slices.Collect(maps.Values(s.instances))
 	s.instances = map[string]*instance{}
 	s.mu.Unlock()
 
 	for _, inst := range all {
-		s.tearDownInstance(inst)
+		s.tearDownInstance(inst, reason)
 	}
 
 	return nil
 }
 
 // Close stops serving and releases everything the service owns: it stops answering
-// requests, tears down every instance (flushing captures while the connection is
-// still up), closes the capturer, and shuts down the embedded server. A connection
-// supplied through Options is left open, as is a directory supplied through
-// Options.Dir.
+// requests, waits for the server stop, start and reload requests and the toxic
+// requests still running, ends the JetStream waits of creates still waiting,
+// which answer 024, tears down every instance (flushing captures while
+// the connection is still up), closes the agent provider, and shuts down the
+// embedded server. A connection supplied through Options is left open, as is a
+// directory supplied through Options.Dir.
 func (s *Service) Close() error {
 	var errs []error
 
@@ -511,13 +1035,32 @@ func (s *Service) Close() error {
 		}
 	}
 
-	if err := s.Reset(); err != nil {
+	// Wait for the requests still running in their own goroutines, so none
+	// acts on an instance while it is torn down below. A create waiting for
+	// JetStream gives up once closing is closed.
+	s.detachedRequestsMu.Lock()
+	if !s.detachedRequestsClosed {
+		close(s.closing)
+	}
+	s.detachedRequestsClosed = true
+	s.detachedRequestsMu.Unlock()
+	s.detachedRequests.Wait()
+
+	// The connection and JetStream are still up, so the destroyed events are
+	// stored.
+	if err := s.resetWith(events.ReasonClose); err != nil {
 		errs = append(errs, err)
 	}
 
-	if s.capturer != nil {
-		if err := s.capturer.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("could not close the trace capturer: %w", err))
+	err := s.backend.Close()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("could not close the backend: %w", err))
+	}
+
+	if s.agents != nil {
+		err := s.agents.Close()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("could not close the agent provider: %w", err))
 		}
 	}
 
@@ -559,57 +1102,50 @@ func (s *Service) newInstance(kind, description string) *instance {
 	return inst
 }
 
-// dropInstance removes a partially-built instance after a create failure.
-// Shuts down whatever servers managed to start, removes the rootDir if not preserving.
-func (s *Service) dropInstance(id string) {
+// dropInstance removes a partially-built instance after a create failure and
+// tears it down. It tears it down even when a concurrent destroy or reset has
+// already removed it, since the create may have placed or started more since
+// that teardown. The create never announced the instance, so it records no
+// event.
+func (s *Service) dropInstance(inst *instance) {
 	s.mu.Lock()
-	inst, ok := s.instances[id]
-	if ok {
-		delete(s.instances, id)
-	}
+	delete(s.instances, inst.ID)
 	s.mu.Unlock()
 
-	if !ok {
-		return
-	}
-
-	s.tearDownInstance(inst)
+	s.tearDownInstance(inst, events.ReasonDestroy)
 }
 
-func (s *Service) tearDownInstance(inst *instance) {
-	for _, ms := range inst.Servers {
-		// Stop the capture proxy first, while the connection the capturer stores
-		// through is still up, so in-flight captures flush before the backend
-		// server goes away.
-		if ms.traceProxy != nil {
-			ms.traceProxy.Stop()
-		}
-		if ms.srv != nil {
-			ms.srv.Shutdown()
-			ms.srv.WaitForShutdown()
-			s.log.Info("Stopped server", "server", ms.srv.Name())
-		}
-	}
+// tearDownInstance stops the agent and the backend of inst, then records its
+// destroyed event with reason if it was announced. It holds the instance's
+// event lock throughout, so the event follows every event of the instance.
+func (s *Service) tearDownInstance(inst *instance, reason events.DestroyReason) {
+	inst.events.Lock()
+	defer inst.events.Unlock()
 
 	s.mu.Lock()
-	ports := inst.ports
-	inst.ports = nil
+	netAgent := inst.agent
 	s.mu.Unlock()
-	s.ports.release(ports...)
 
-	if inst.RootDir == "" {
+	// Stop the agent first, while the connection it may store through is
+	// still up, so in-flight captures flush before the backend servers go away.
+	if netAgent != nil {
+		err := netAgent.Stop(context.Background())
+		if err != nil {
+			s.log.Error("Failed to stop agent", "instance", inst.ID, "err", err)
+		}
+	}
+
+	err := s.backend.Teardown(context.Background(), inst.ID)
+	if err != nil {
+		s.log.Error("Failed to tear down instance", "instance", inst.ID, "err", err)
+	}
+
+	if !inst.announced {
 		return
 	}
 
-	if s.preserve {
-		s.log.Info("Preserving instance", "instance", inst.ID, "dir", inst.RootDir)
-		return
-	}
-
-	s.log.Info("Removing instance dir", "instance", inst.ID, "dir", inst.RootDir)
-	if err := os.RemoveAll(inst.RootDir); err != nil {
-		s.log.Error("Failed to remove instance dir", "instance", inst.ID, "err", err)
-	}
+	s.publishEvent(inst, &events.InstanceAction{Action: events.InstanceDestroyed, Description: inst.Description, Reason: reason})
+	inst.announced = false
 }
 
 // shortID returns a short, name-safe identifier derived from a nuid. A nuid is

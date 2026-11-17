@@ -31,10 +31,14 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/nats-io/nats-server/v2/conf"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go/micro"
 
+	"github.com/synadia-io/orbit.go/ntf/agent"
 	"github.com/synadia-io/orbit.go/ntf/api"
+	"github.com/synadia-io/orbit.go/ntf/backend"
+	"github.com/synadia-io/orbit.go/ntf/events"
 )
 
 // Sanity limits on how much a single request may ask for. A super-cluster
@@ -134,7 +138,9 @@ var serverConfigTemplate = `
 {{ if .Snippets.top }}include "{{ .Snippets.top }}"{{ end }}
 server_name: "{{ .ServerName }}"
 port: {{ .ClientPort }}
-{{ if .AdvertiseHost }}
+{{ if .ClientAdvertise }}
+client_advertise: "{{ .ClientAdvertise }}"
+{{ else if .AdvertiseHost }}
 client_advertise: "{{ hostport .AdvertiseHost .ClientPort }}"
 {{ end }}
 {{ if .LogFile }}
@@ -153,6 +159,9 @@ jetstream {
 cluster {
 	name: "{{ .ClusterName }}"
 	port: {{ .ClusterPort }}
+{{- if .ClusterAdvertise }}
+	advertise: "{{ .ClusterAdvertise }}"
+{{- end }}
 	routes: [
 {{ range .Routes }}
 "nats://{{ . }}"
@@ -165,6 +174,9 @@ cluster {
 gateway {
 	name: "{{ .ClusterName }}"
 	port: {{ .GatewayPort }}
+{{- if .GatewayAdvertise }}
+	advertise: "{{ .GatewayAdvertise }}"
+{{- end }}
 	gateways: [
 {{ range $cluster, $urls := .Gateways }}
 		{ name: "{{ $cluster }}", urls: [
@@ -233,140 +245,6 @@ func renderConfig(td *templateData, mainTemplate string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// serverPlan bundles the per-server inputs each create handler computes
-// (allocated ports, server directory, optional cluster/gateway wiring) so the
-// three handlers can hand off to populateTemplateData uniformly.
-type serverPlan struct {
-	name          string
-	serverDir     string
-	serverIndex   int
-	clusterIndex  int
-	clientPort    int
-	advertiseHost string
-	jetStream     bool
-
-	clusterName string
-	clusterPort int
-	routes      []string
-	clusterSize int
-
-	clusters    []string
-	gatewayPort int
-	gateways    map[string][]string
-
-	listenerPorts map[string]int
-
-	tlsInclude string
-	tlsFiles   *tlsInstanceFiles
-}
-
-// populateTemplateData builds the template env for one server. Cluster and
-// gateway fields stay at their zero values for non-cluster / non-super-cluster
-// instances.
-func populateTemplateData(inst *instance, plan serverPlan) *templateData {
-	td := defaultTemplateData()
-
-	td.ServerName = plan.name
-	td.ShortID = shortID(inst.ID)
-	td.InstanceID = inst.ID
-	td.ServerIndex = plan.serverIndex
-	td.ServerDir = plan.serverDir
-	td.StoreDir = plan.serverDir
-	td.LogFile = filepath.Join(plan.serverDir, "server.log")
-	td.Host = "localhost"
-	td.AdvertiseHost = plan.advertiseHost
-	td.ClientPort = plan.clientPort
-	td.JetStream = plan.jetStream
-
-	td.Description = inst.Description
-	td.Kind = inst.Kind
-
-	if plan.clusterName != "" {
-		td.ClusterName = plan.clusterName
-		td.ClusterIndex = plan.clusterIndex
-		td.ClusterPort = plan.clusterPort
-		td.Routes = plan.routes
-		td.ClusterSize = plan.clusterSize
-	}
-
-	if plan.gatewayPort != 0 {
-		td.GatewayPort = plan.gatewayPort
-		td.Gateways = plan.gateways
-		td.Clusters = plan.clusters
-	}
-
-	maps.Copy(td.Ports, plan.listenerPorts)
-
-	td.TLSInclude = plan.tlsInclude
-	if plan.tlsFiles != nil {
-		td.TLS = &templateTLS{
-			CAFile:   plan.tlsFiles.caPath,
-			CertFile: plan.tlsFiles.serverCert,
-			KeyFile:  plan.tlsFiles.serverKey,
-		}
-	}
-
-	return td
-}
-
-// reserveListenerPorts reserves one TCP port per caller-declared listener
-// name for inst. The returned listeners stay open; the caller must add them to
-// its heldListeners slice so the close-on-handover race fix still applies.
-func (s *Service) reserveListenerPorts(inst *instance, names []string) (map[string]int, []*net.TCPListener, error) {
-	if len(names) == 0 {
-		return nil, nil, nil
-	}
-	ports := map[string]int{}
-	held := make([]*net.TCPListener, 0, len(names))
-	for _, name := range names {
-		if name == "" {
-			closeListeners(held)
-			return nil, nil, fmt.Errorf("listener name must not be empty")
-		}
-		if _, dup := ports[name]; dup {
-			closeListeners(held)
-			return nil, nil, fmt.Errorf("duplicate listener name %q", name)
-		}
-		p, ln, err := s.reservePort(inst)
-		if err != nil {
-			closeListeners(held)
-			return nil, nil, fmt.Errorf("listener %q: %w", name, err)
-		}
-		ports[name] = p
-		held = append(held, ln)
-	}
-	return ports, held, nil
-}
-
-// renderAndWriteSnippets renders each user-supplied snippet body through
-// text/template against td, writes the result to <snippetsDir>/<name>.conf
-// (mode 0600), and sets td.Snippets[name] to the path used inside the main
-// template's include directive — relative to the rendered config file's
-// directory, since the NATS conf parser always joins includes onto the
-// config-file dir (filepath.Join in conf/parse.go strips the leading slash
-// from absolute paths). The config file lands in <serverDir> and snippets
-// live at <serverDir>/snippets/<name>.conf, so the include path is
-// snippets/<name>.conf.
-func renderAndWriteSnippets(td *templateData, snippets map[string]string, snippetsDir string) error {
-	snippetsBase := filepath.Base(snippetsDir)
-	for name, body := range snippets {
-		out := bytes.NewBuffer(nil)
-		t, err := template.New("snippet-" + name).Parse(body)
-		if err != nil {
-			return fmt.Errorf("snippet %q parse: %w", name, err)
-		}
-		if err := t.Execute(out, td); err != nil {
-			return fmt.Errorf("snippet %q render: %w", name, err)
-		}
-		path := filepath.Join(snippetsDir, name+".conf")
-		if err := os.WriteFile(path, out.Bytes(), 0600); err != nil {
-			return fmt.Errorf("snippet %q write: %w", name, err)
-		}
-		td.Snippets[name] = filepath.Join(snippetsBase, name+".conf")
-	}
-	return nil
-}
-
 // closeListeners safely closes any still-open listeners and clears the slice.
 // Used both right before binding the server (handing the port over) and on
 // rollback paths.
@@ -411,6 +289,202 @@ func validateTLSRequest(opts *api.TLSOptions, snippets map[string]string, custom
 		return fmt.Errorf("WithTemplate must reference {{.TLSInclude}} when WithGeneratedTLS is set")
 	}
 	return nil
+}
+
+// toxicsTemplateRefs are the template variables that carry the proxies of an
+// instance created with toxics, by kind of instance. A custom template must
+// reference each, or the instance's traffic goes around the proxies.
+var toxicsTemplateRefs = map[string][]string{
+	"server":        {".ClientAdvertise"},
+	"cluster":       {".Routes", ".ClusterAdvertise", ".ClientAdvertise"},
+	"super-cluster": {".Routes", ".ClusterAdvertise", ".ClientAdvertise", ".Gateways", ".GatewayAdvertise"},
+}
+
+// validateToxicsTemplate refuses customTemplate, the custom template of an
+// instance of the given kind created with toxics, unless its text references
+// every variable of toxicsTemplateRefs, naming those it lacks. An empty
+// customTemplate is the built-in template, which references them all.
+func validateToxicsTemplate(kind, customTemplate string) error {
+	if customTemplate == "" {
+		return nil
+	}
+
+	var missing []string
+	for _, ref := range toxicsTemplateRefs[kind] {
+		if !strings.Contains(customTemplate, ref) {
+			missing = append(missing, ref)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("WithTemplate must reference %s when toxics is set", strings.Join(missing, ", "))
+}
+
+// toxicsRefusal returns the response code and message a create of an
+// instance of the given kind with toxics is refused with, or two empty
+// strings when it is not refused: 014 when no agent is selected, 018 when the
+// agent does not declare the toxics capability, and 007 for a custom template
+// that does not reference the variables that carry the proxies. What the
+// service supports is checked before the request's template.
+func (s *Service) toxicsRefusal(kind, customTemplate string) (string, string) {
+	if s.agents == nil {
+		return "014", "toxics is not configured on this service"
+	}
+
+	if !s.agentDeclares(agent.CapabilityToxics) {
+		return "018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityToxics)
+	}
+
+	err := validateToxicsTemplate(kind, customTemplate)
+	if err != nil {
+		return "007", err.Error()
+	}
+
+	return "", ""
+}
+
+// toxicsConfigRefusal returns the response code and message a create or
+// update of an instance created with toxics is refused with for node n's
+// rendered config, or two empty strings when it is not refused: 007 for a
+// config that does not parse, 019 for one that enables TLS on routes or
+// gateways, 007 for a gateway not named for its cluster, 007 for a
+// server_name other than the node's name, and failCode when the config could
+// not be checked. dir is where readNodeConfig makes its temporary directory.
+func toxicsConfigRefusal(dir string, n *nodePlan, failCode string) (string, string) {
+	cfg, err := readNodeConfig(dir, n)
+	if errors.Is(err, errConfigParse) {
+		return "007", err.Error()
+	}
+	if err != nil {
+		return failCode, err.Error()
+	}
+
+	err = checkRouteTLS(n, cfg)
+	if err != nil {
+		return "019", err.Error()
+	}
+
+	err = checkGatewayName(n, cfg)
+	if err != nil {
+		return "007", err.Error()
+	}
+
+	err = checkServerName(n, cfg)
+	if err != nil {
+		return "007", err.Error()
+	}
+
+	return "", ""
+}
+
+// readNodeConfig parses node n's rendered config as the server reads it from
+// disk. It writes the config, every file of n and, when n has managed TLS
+// settings, its managed TLS snippet into a new temporary directory under dir,
+// laid out as in the instance directory, so every include resolves as it does
+// for the server, then parses the config with conf.ParseFile, which reads
+// includes but loads no certificate, and removes the directory. The managed
+// TLS snippet is written whenever n has one, since a revision that does not
+// rewrite it leaves the one on disk. Only n's own files are written, so on
+// update a config that includes a file left on disk by an earlier revision or
+// another node does not parse here and is refused, although the server would
+// load it.
+//
+// A config that does not parse, and a node directory or file path that would
+// leave the temporary directory, is an error wrapping errConfigParse that
+// names the node. Any other error means the config could not be checked.
+func readNodeConfig(dir string, n *nodePlan) (cfg map[string]any, err error) {
+	files := n.Files
+	if n.TLS != nil {
+		files = append([]backend.File{managedTLSFile(n)}, n.Files...)
+	}
+
+	if !filepath.IsLocal(n.Dir) {
+		return nil, fmt.Errorf("%w: node %s: directory %s is outside the instance directory", errConfigParse, n.Name, n.Dir)
+	}
+	for _, f := range files {
+		if !filepath.IsLocal(f.Path) {
+			return nil, fmt.Errorf("%w: node %s: file %s is outside the instance directory", errConfigParse, n.Name, f.Path)
+		}
+	}
+
+	err = os.MkdirAll(dir, 0700)
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+
+	tmp, err := os.MkdirTemp(dir, "config-check-")
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	defer func() {
+		rmErr := os.RemoveAll(tmp)
+		if rmErr != nil && err == nil {
+			cfg = nil
+			err = fmt.Errorf("node %s config check: %w", n.Name, rmErr)
+		}
+	}()
+
+	for _, f := range files {
+		path := filepath.Join(tmp, f.Path)
+		err = os.MkdirAll(filepath.Dir(path), 0700)
+		if err != nil {
+			return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+		}
+		err = os.WriteFile(path, f.Data, 0600)
+		if err != nil {
+			return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+		}
+	}
+
+	nodeDir := filepath.Join(tmp, n.Dir)
+	err = os.MkdirAll(nodeDir, 0700)
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	// The in-process backend writes the config under a random *.cfg name in
+	// the node's directory, so this does too, clear of the node's files.
+	cfgFile, err := os.CreateTemp(nodeDir, "*.cfg")
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	_, err = cfgFile.Write(n.Config)
+	closeErr := cfgFile.Close()
+	if err != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("node %s config check: %w", n.Name, closeErr)
+	}
+
+	// A parse error names files by their path in the temporary directory,
+	// which is gone once this returns, so the message names them in the
+	// instance directory instead.
+	cfg, err = conf.ParseFile(cfgFile.Name())
+	if err != nil {
+		scrubbed := strings.ReplaceAll(err.Error(), tmp, nodeInstanceDir(n))
+		return nil, fmt.Errorf("%w: node %s: %s", errConfigParse, n.Name, scrubbed)
+	}
+
+	return cfg, nil
+}
+
+// nodeInstanceDir returns the instance directory node n's files are written
+// under, taken from the node directory its template data names, or "." when
+// that does not end in n.Dir.
+func nodeInstanceDir(n *nodePlan) string {
+	if n.TemplateData == nil {
+		return "."
+	}
+
+	suffix := string(filepath.Separator) + filepath.Clean(n.Dir)
+	serverDir := filepath.Clean(n.TemplateData.ServerDir)
+	if !strings.HasSuffix(serverDir, suffix) {
+		return "."
+	}
+
+	return strings.TrimSuffix(serverDir, suffix)
 }
 
 // tlsInstanceFiles holds on-disk paths for the shared TLS artifacts written
@@ -468,107 +542,16 @@ func effectiveSANs(requested []string, advertiseHost string) []string {
 	return sans
 }
 
-// setupInstanceTLS generates cert material, writes the shared CA + server
-// cert + server key under <inst.RootDir>/tls/, and returns the on-disk paths
-// (used by per-server managed snippets) plus the api.TLSMaterial that goes
-// into the create response. advertiseHost is the host the servers advertise to
-// clients (the resolved --advertise value); it is added to the server cert SANs
-// so cross-server TLS discovery to the advertised address verifies. Because it
-// derives from the service-wide --advertise flag, every instance minted while
-// that flag is set carries the host in its SANs.
-func (s *Service) setupInstanceTLS(inst *instance, opts *api.TLSOptions, advertiseHost string) (*tlsInstanceFiles, *api.TLSMaterial, error) {
-	mutual := opts.Mode != api.TLSModeServer
-
-	sans := effectiveSANs(opts.SANs, advertiseHost)
-	s.log.Info("Issuing TLS server cert", "instance", inst.ID, "sans", sans)
-
-	mat, err := generateTLSMaterial(sans, mutual)
-	if err != nil {
-		return nil, nil, fmt.Errorf("tls material: %w", err)
-	}
-
-	tlsDir := filepath.Join(inst.RootDir, "tls")
-	if err := os.MkdirAll(tlsDir, 0700); err != nil {
-		return nil, nil, fmt.Errorf("tls dir: %w", err)
-	}
-
-	files := &tlsInstanceFiles{
-		caPath:         filepath.Join(tlsDir, "ca.pem"),
-		serverCert:     filepath.Join(tlsDir, "server.crt"),
-		serverKey:      filepath.Join(tlsDir, "server.key"),
-		mutual:         mutual,
-		handshakeFirst: opts.HandshakeFirst,
-		timeoutSeconds: opts.Timeout,
-	}
-
-	if err := os.WriteFile(files.caPath, mat.CAPEM, 0644); err != nil {
-		return nil, nil, fmt.Errorf("write ca: %w", err)
-	}
-	if err := os.WriteFile(files.serverCert, mat.ServerCertPEM, 0644); err != nil {
-		return nil, nil, fmt.Errorf("write server cert: %w", err)
-	}
-	if err := os.WriteFile(files.serverKey, mat.ServerKeyPEM, 0600); err != nil {
-		return nil, nil, fmt.Errorf("write server key: %w", err)
-	}
-
-	apiMat := &api.TLSMaterial{CAPEM: string(mat.CAPEM)}
-	if mutual {
-		apiMat.ClientCertPEM = string(mat.ClientCertPEM)
-		apiMat.ClientKeyPEM = string(mat.ClientKeyPEM)
-	}
-
-	return files, apiMat, nil
-}
-
-// writeServerTLSSnippet renders the per-server managed TLS snippet — a tls{}
-// block with absolute cert paths — into the server's snippets dir. Returns the
-// path relative to <serverDir>, matching the convention used by
-// renderAndWriteSnippets for the user-supplied slots. Absolute cert paths
-// sidestep any ambiguity about how the NATS conf parser resolves relative paths
-// inside an included file. client_advertise is owned by the main template
-// (driven by --advertise), so the managed snippet does not emit it.
-func writeServerTLSSnippet(snippetsDir string, files *tlsInstanceFiles) (string, error) {
-	verify := "false"
-	if files.mutual {
-		verify = "true"
-	}
-	handshakeFirst := ""
-	if files.handshakeFirst {
-		handshakeFirst = "\n    handshake_first: true"
-	}
-	// timeoutSeconds <= 0 means "unset": fall back to the managed default of 2
-	// seconds (also nats-server's own default). NaN/Inf can't reach here — the
-	// JSON decoder rejects them before the request is handled.
-	secs := files.timeoutSeconds
-	if secs <= 0 {
-		secs = 2
-	}
-	timeout := strconv.FormatFloat(secs, 'f', -1, 64)
-	body := fmt.Sprintf(`tls {
-    cert_file: "%s"
-    key_file:  "%s"
-    ca_file:   "%s"
-    verify:    %s
-    timeout:   %s%s
-}
-`, files.serverCert, files.serverKey, files.caPath, verify, timeout, handshakeFirst)
-
-	path := filepath.Join(snippetsDir, "_tls_managed.conf")
-	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
-		return "", err
-	}
-	return filepath.Join(filepath.Base(snippetsDir), "_tls_managed.conf"), nil
-}
-
-// createAttempts is how many times a create runs when one of its servers could not
-// bind a port. The service reserves every port and hands it over just before the
-// server binds it; another program can take the port in that gap, and a retry with
-// freshly reserved ports gets past it.
+// createAttempts is how many times a create runs when one of its servers or its
+// agent could not bind a port. The service reserves every port and hands it over
+// just before the server binds it; another program can take the port in that gap,
+// and a retry with freshly reserved ports gets past it.
 const createAttempts = 3
 
 // createAttempt runs one attempt at a create request. It answers req itself,
-// unless a server could not listen and final is false: it then rolls back
-// everything the attempt started and returns true to have the create run again.
+// unless a server or the agent could not listen and final is false: it then rolls
+// back everything the attempt started and returns true to have the create run
+// again.
 type createAttempt func(req micro.Request, final bool) (retry bool)
 
 // retryCreate runs create until it answers req, at most createAttempts times.
@@ -580,15 +563,19 @@ func retryCreate(req micro.Request, create createAttempt) {
 	}
 }
 
-// retryAfter reports whether a create attempt that failed to start a server with
-// err should run again: only a server that could not listen, and not on the final
-// attempt. The caller must have rolled the attempt back.
+// retryAfter reports whether a create attempt that failed to start a server or the
+// agent with err should run again: only a server or an agent that could not
+// listen, and not on the final attempt. The caller must have rolled the attempt
+// back.
 func (s *Service) retryAfter(err error, final bool, instanceID string) bool {
-	if final || !errors.Is(err, ErrServerListen) {
+	if final {
+		return false
+	}
+	if !errors.Is(err, ErrServerListen) && !errors.Is(err, agent.ErrListen) {
 		return false
 	}
 
-	s.log.Warn("Retrying create with fresh ports after a server could not listen", "instance", instanceID, "err", err)
+	s.log.Warn("Retrying create with fresh ports after a server or the agent could not listen", "instance", instanceID, "err", err)
 
 	return true
 }
@@ -608,6 +595,14 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 
 	s.log.Debug("Create server", "request", creq)
 
+	if creq.Name != "" {
+		err := checkGivenServerName("name", creq.Name)
+		if err != nil {
+			req.Error("002", "Invalid request: "+err.Error(), nil)
+			return
+		}
+	}
+
 	if err := validateSnippetKeys(creq.Snippets); err != nil {
 		req.Error("007", err.Error(), nil)
 		return
@@ -615,6 +610,12 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 
 	if err := validateJetStreamSnippet(creq.Snippets, creq.JetStream); err != nil {
 		req.Error("011", err.Error(), nil)
+		return
+	}
+
+	wait, refusal := newJetStreamWait(creq.WaitJetStream, creq.SystemCredentials, creq.JetStream, creq.Snippets, creq.Template)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
 		return
 	}
 
@@ -637,205 +638,519 @@ func (s *Service) createServerAttempt(req micro.Request, final bool) (retry bool
 		return
 	}
 
-	if proxied && s.capturer == nil {
+	if proxied && s.agents == nil {
 		req.Error("014", "trace capture is not configured on this service", nil)
 		return
 	}
 
+	if proxied && !s.agentDeclares(agent.CapabilityCapture) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityCapture), nil)
+		return
+	}
+
+	if creq.Toxics {
+		code, msg := s.toxicsRefusal("server", creq.Template)
+		if code != "" {
+			req.Error(code, msg, nil)
+			return
+		}
+	}
+
 	inst := s.newInstance("server", creq.Description)
-	short := shortID(inst.ID)
 
-	// Listeners reserved for the lifetime of this create call. Closed right
-	// before server.Start() so that concurrent create calls cannot race onto
-	// the same ports.
-	var heldListeners []*net.TCPListener
-	rollback := func() {
-		closeListeners(heldListeners)
-		s.dropInstance(inst.ID)
+	spec := instanceSpec{
+		Kind:          "server",
+		Servers:       1,
+		ServerName:    creq.Name,
+		JetStream:     creq.JetStream,
+		Description:   creq.Description,
+		Snippets:      creq.Snippets,
+		MainTemplate:  mainTemplate,
+		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
+		Proxy:         proxied,
+		StoreCaptures: creq.Trace,
+		Toxics:        creq.Toxics,
+		JetStreamWait: wait,
 	}
+	setSpecTLS(&spec, creq.TLS)
 
-	if err := os.MkdirAll(inst.RootDir, 0700); err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Failed to create instance dir: %v", err), nil)
+	return s.createFromSpec(req, final, inst, spec)
+}
+
+// setSpecTLS copies a create request's TLS options into spec. A nil opts leaves
+// generated TLS off. An empty mode means mutual TLS.
+func setSpecTLS(spec *instanceSpec, opts *api.TLSOptions) {
+	if opts == nil {
 		return
 	}
 
-	advertiseHost := effectiveAdvertiseHost(s.advertiseHost, creq.TLS)
+	spec.TLS = true
+	spec.TLSMutual = opts.Mode != api.TLSModeServer
+	spec.TLSSANs = opts.SANs
+	spec.TLSHandshakeFirst = opts.HandshakeFirst
+	spec.TLSTimeout = opts.Timeout
+}
 
-	var tlsFiles *tlsInstanceFiles
-	var tlsResp *api.TLSMaterial
-	if creq.TLS != nil {
-		var err error
-		tlsFiles, tlsResp, err = s.setupInstanceTLS(inst, creq.TLS, advertiseHost)
-		if err != nil {
-			rollback()
-			req.Error("008", fmt.Sprintf("TLS setup failed: %v", err), nil)
-			return
+// createFromSpec runs the part of a create attempt every kind of instance
+// shares, once the request is validated and inst is registered. It asks the
+// backend for a placement, plans inst from spec against it, starts the agent
+// when the instance needs one, provisions the plan, fronts every node of an
+// instance with trace, proxy or toxics with the agent, publishes the nodes and
+// answers req with the create response.
+//
+// It answers req itself, unless a node or the agent could not listen and final
+// is false: it then stops the agent, tears down everything the attempt started
+// and returns true to have the create run again, which plans the instance again
+// from the spec with a fresh placement.
+func (s *Service) createFromSpec(req micro.Request, final bool, inst *instance, spec instanceSpec) (retry bool) {
+	if spec.TLS {
+		s.log.Info("Issuing TLS server cert", "instance", inst.ID, "sans", effectiveSANs(spec.TLSSANs, spec.AdvertiseHost))
+	}
+
+	ctx := context.Background()
+
+	place, err := s.backend.Placement(ctx, inst.ID)
+	if err != nil {
+		s.dropInstance(inst)
+		code, msg := backendErrorResponse(err)
+		req.Error(code, msg, nil)
+		return false
+	}
+
+	plan, err := planInstance(spec, inst.ID, place, s.backend.DefaultVersion())
+	if err != nil {
+		s.dropInstance(inst)
+		req.Error(planErrorCode(err), err.Error(), nil)
+		return false
+	}
+
+	// A cluster instance lists its cluster under the name the planner gave it.
+	// list reads it under s.mu.
+	if spec.Kind == "cluster" {
+		s.mu.Lock()
+		inst.Cluster = plan.Clusters[0]
+		s.mu.Unlock()
+	}
+
+	// The proxies of toxics read a plain CONNECT, so routes and gateways must
+	// not use TLS, the gateway gate admits only a gateway named for its
+	// cluster, and toxic selectors name each server by its node name, so its
+	// server_name must be that name. A config these checks cannot read is
+	// refused. The checks run before anything starts, so a refusal has only
+	// the instance to drop.
+	if spec.Toxics {
+		for _, n := range plan.nodes {
+			code, msg := toxicsConfigRefusal(s.dir, n, "002")
+			if code != "" {
+				s.dropInstance(inst)
+				req.Error(code, msg, nil)
+				return false
+			}
 		}
 	}
 
-	name := short + "-n1"
-	sd := filepath.Join(inst.RootDir, "n1")
-	snippetsDir := filepath.Join(sd, "snippets")
-	if err := os.MkdirAll(snippetsDir, 0700); err != nil {
-		rollback()
-		req.Error("002", "Failed to create server directory", nil)
-		return
-	}
+	// The instance needs an agent when its clients or links go through a
+	// proxy. The agent starts before the servers, so its listeners are up
+	// before they dial them, and the ports of its route and gateway proxies
+	// are handed to it just before it starts. Every failure from here on
+	// stops it.
+	var netAgent agent.Agent
+	if spec.Proxy || spec.Toxics {
+		var names []string
+		for _, p := range plan.proxies {
+			names = append(names, p.Name)
+		}
+		s.releaseProxyHolds(inst.ID, names)
 
-	clientPort, clientLn, err := s.reservePort(inst)
-	if err != nil {
-		rollback()
-		req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-		return
-	}
-	heldListeners = append(heldListeners, clientLn)
-
-	listenerPorts, listenerLns, err := s.reserveListenerPorts(inst, listenersForSnippets(creq.Snippets))
-	if err != nil {
-		rollback()
-		req.Error("006", err.Error(), nil)
-		return
-	}
-	heldListeners = append(heldListeners, listenerLns...)
-
-	var tlsInclude string
-	if tlsFiles != nil {
-		tlsInclude, err = writeServerTLSSnippet(snippetsDir, tlsFiles)
+		netAgent, err = s.startAgent(inst, spec.AdvertiseHost, spec.StoreCaptures, plan)
 		if err != nil {
-			rollback()
-			req.Error("008", fmt.Sprintf("TLS snippet failed: %v", err), nil)
-			return
+			s.dropInstance(inst)
+			if s.retryAfter(err, final, inst.ID) {
+				return true
+			}
+			req.Error("012", fmt.Sprintf("trace setup failed: %v", err), nil)
+			return false
 		}
 	}
 
-	td := populateTemplateData(inst, serverPlan{
-		name:          name,
-		serverDir:     sd,
-		serverIndex:   1,
-		clientPort:    clientPort,
-		advertiseHost: advertiseHost,
-		jetStream:     creq.JetStream,
-		listenerPorts: listenerPorts,
-		tlsInclude:    tlsInclude,
-		tlsFiles:      tlsFiles,
-	})
-
-	if err := renderAndWriteSnippets(td, creq.Snippets, snippetsDir); err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Snippet failure: %v", err), nil)
-		return
-	}
-
-	serverConfig, err := renderConfig(td, mainTemplate)
+	started, err := s.backend.Provision(ctx, &plan.InstancePlan)
 	if err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Template parse failure: %v", err), nil)
-		return
-	}
-
-	srv, cfgPath, err := runServerWithConfig(s.log, serverConfig, sd, heldListeners)
-	heldListeners = nil // listeners are closed inside runServerWithConfig
-	if err != nil {
-		rollback()
+		s.stopAgent(inst, netAgent)
+		s.dropInstance(inst)
 		if s.retryAfter(err, final, inst.ID) {
 			return true
 		}
-		req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
-		return
+		code, msg := backendErrorResponse(err)
+		req.Error(code, msg, nil)
+		return false
 	}
 
-	port, err := clientPortOf(srv)
-	if err != nil {
-		s.log.Warn("Could not parse client port", "server", name, "err", err)
-	}
-
-	ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
-
-	// Front the client port with a capture proxy when requested, before the server is
-	// published so its trace port and proxy are set atomically.
-	if proxied {
-		proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost, creq.Trace)
-		if terr != nil {
-			// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
-			// shut it down here to avoid leaking the started server on trace failure.
-			srv.Shutdown()
-			srv.WaitForShutdown()
-			rollback()
-			req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
-			return
-		}
-		ms.traceProxy = proxy
-		if listenerPorts == nil {
-			listenerPorts = map[string]int{}
-		}
-		listenerPorts["trace"] = tracePort
-		ms.ports = listenerPorts
-	}
-
-	s.mu.Lock()
-	inst.Servers = append(inst.Servers, ms)
-	s.mu.Unlock()
-
-	req.RespondJSON(api.CreateResponse{
+	resp := api.CreateResponse{
+		Type:        api.TypeCreateResponse,
 		ID:          inst.ID,
 		Description: inst.Description,
 		Kind:        inst.Kind,
-		Servers: []*api.ManagedServer{
-			{Name: name, Port: port, Ports: listenerPorts, Advertise: advertiseHost, Running: srv.Running()},
-		},
-		TLS: tlsResp,
+		Servers:     []*api.ManagedServer{},
+		TLS:         plan.TLS,
+	}
+
+	// The route and gateway links, in plan order. Each node's client link
+	// follows once its live client address is known.
+	for _, p := range plan.proxies {
+		resp.Links = append(resp.Links, api.Link{Name: p.Name, Kind: p.Kind, From: p.From, To: p.To, Proxy: p.Listen.String(), Upstream: p.Upstream.String()})
+	}
+
+	// The nodes in start order. Once the plan is kept on the instance, an update
+	// may replace entries of plan.nodes and plan.Nodes under s.mu, so this
+	// function works from its own copy of the slice.
+	nodes := slices.Clone(plan.nodes)
+
+	// Every file is written, every node runs its config and resp holds the TLS
+	// material, so the plan's contents can go before it is kept. The plan is
+	// kept before any node is published, so an update of a published node
+	// always finds it. A published node plan never changes; an update replaces
+	// it.
+	plan.dropContents()
+	for _, n := range nodes {
+		n.dropContents()
+	}
+
+	s.mu.Lock()
+	inst.plan = plan
+	s.mu.Unlock()
+
+	servers := make([]*managedServer, 0, len(nodes))
+	ready := make([]*events.NodeAction, 0, len(nodes))
+	waitNodes := make([]waitNode, 0, len(nodes))
+
+	for i, n := range nodes {
+		node := started[i]
+
+		var client backend.Address
+		for _, a := range node.Addresses() {
+			if a.Name == "client" {
+				client = a
+				break
+			}
+		}
+
+		// The wire view of the node's listener ports. It is a map of its own, so
+		// the trace port added below never reaches the template data update
+		// validates against.
+		var ports map[string]int
+		if len(n.TemplateData.Ports) > 0 {
+			ports = maps.Clone(n.TemplateData.Ports)
+		}
+
+		// With toxics, clients reach the node through its client proxy, whose
+		// port is handed to the agent here, just before the agent call that
+		// binds it. The real client port stays reachable as the link's
+		// upstream.
+		clientPort := client.External.Port
+		if spec.Toxics {
+			name := clientLinkName(n.Name)
+			s.releaseProxyHolds(inst.ID, []string{name})
+
+			proxy := plan.clientProxies[n.Name]
+			clientPort = proxy.Port
+			resp.Links = append(resp.Links, api.Link{Name: name, Kind: "client", To: n.Name, Proxy: n.TemplateData.ClientAdvertise, Upstream: client.Internal.String()})
+		}
+
+		ms := &managedServer{backendNode: node, instanceID: inst.ID, rootDir: filepath.Join(place.InstanceDir(), n.Dir), ports: ports, clientPort: clientPort, advertiseHost: spec.AdvertiseHost, node: n, toxics: spec.Toxics}
+
+		// Front the node's client listener with the agent: with a capture
+		// proxy on the node's own trace port for trace or proxy, and with its
+		// client proxy alone under toxics alone, before the node is published
+		// so its trace port is set atomically. The trace port is handed to the
+		// agent here, just before the agent call that binds it. The live client
+		// address is fronted, since a custom template may set its own client
+		// port.
+		capture := spec.Proxy
+		if capture {
+			s.releaseProxyHolds(inst.ID, []string{traceProxyName(n.Name)})
+		}
+		if capture || spec.Toxics {
+			ep, terr := s.frontClient(inst.ID, netAgent, agent.Front{ServerName: n.Name, Client: client.Internal, Capture: capture})
+			if terr != nil {
+				s.stopAgent(inst, netAgent)
+				s.dropInstance(inst)
+				if s.retryAfter(terr, final, inst.ID) {
+					return true
+				}
+				req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
+				return false
+			}
+			if capture {
+				if ports == nil {
+					ports = map[string]int{}
+				}
+				ports["trace"] = ep.Port
+				ms.ports = ports
+			}
+		}
+
+		servers = append(servers, ms)
+
+		// A node a concurrent teardown has stopped fails its status, and shows
+		// as not running.
+		st, err := node.Status(ctx)
+		serverName := n.Name
+		if err == nil {
+			serverName = st.ServerName
+		}
+		ready = append(ready, &events.NodeAction{Action: events.NodeReady, Node: n.Name, ServerName: serverName})
+		// The JetStream wait dials the node's Internal client address, which
+		// the in-process backend serves on loopback in the service's own host,
+		// and which bypasses any client proxy. A backend whose Internal address
+		// the service cannot reach would need the wait to dial another one.
+		waitNodes = append(waitNodes, waitNode{name: n.Name, serverName: serverName, client: client.Internal})
+		resp.Servers = append(resp.Servers, &api.ManagedServer{
+			Name:      n.Name,
+			Port:      clientPort,
+			Ports:     ports,
+			Cluster:   n.Cluster,
+			Advertise: spec.AdvertiseHost,
+			Running:   err == nil && st.Running,
+		})
+	}
+
+	// Publish every node in one step, and only while the instance is still
+	// registered. A destroy or reset that removed it meanwhile never saw the
+	// agent, so stop it first, then tear down what this create started since.
+	// The agent may have created its scratch directory after that teardown
+	// removed the instance directory, so remove the directory again.
+	//
+	// The event lock is held across publishing the nodes and recording them,
+	// so a node handler or a teardown that finds them records its event after
+	// created and ready.
+	opts := specOptions(spec)
+
+	inst.events.Lock()
+	s.mu.Lock()
+	_, alive := s.instances[inst.ID]
+	if alive {
+		inst.Servers = servers
+		inst.links = resp.Links
+		inst.agent = netAgent
+		inst.options = opts
+	}
+	s.mu.Unlock()
+
+	if alive {
+		s.publishEvent(inst, &events.InstanceAction{
+			Action:      events.InstanceCreated,
+			Kind:        inst.Kind,
+			Backend:     s.backendName,
+			Description: inst.Description,
+			JetStream:   opts.jetstream,
+			Trace:       opts.trace,
+			Proxy:       opts.proxy,
+			Toxics:      opts.toxics,
+		})
+		for _, e := range ready {
+			s.publishEvent(inst, e)
+		}
+		inst.announced = true
+	}
+	inst.events.Unlock()
+
+	if !alive {
+		s.stopAgent(inst, netAgent)
+		s.dropInstance(inst)
+		if !s.preserve {
+			err := os.RemoveAll(inst.RootDir)
+			if err != nil {
+				s.log.Error("Failed to remove instance dir", "instance", inst.ID, "err", err)
+			}
+		}
+		req.Error("404", "Instance not found", nil)
+		return false
+	}
+
+	if spec.JetStreamWait == nil {
+		req.RespondJSON(resp)
+		return false
+	}
+
+	// The wait runs once the instance is published, so a destroy or a status
+	// meanwhile finds it, and in a goroutine of its own, so the creates queued
+	// behind this one do not wait for it as well. It holds no lock while it
+	// waits.
+	dial := waitDial{user: spec.JetStreamWait.user, password: spec.JetStreamWait.password, tls: resp.TLS, handshakeFirst: spec.TLSHandshakeFirst}
+	if resp.TLS != nil {
+		dial.sans = effectiveSANs(spec.TLSSANs, spec.AdvertiseHost)
+	}
+
+	s.detach(req, func(r micro.Request) {
+		s.answerAfterJetStreamWait(r, inst, spec.JetStreamWait, dial, waitNodes, resp)
 	})
 
 	return false
 }
 
-// traceSetupTimeout limits a Capturer's setup for one server, which may include
-// first-use work such as creating the store captures are written to.
+// planErrorCode returns the response code a create answers a planning failure
+// with.
+func planErrorCode(err error) string {
+	var perr *planError
+	if !errors.As(err, &perr) {
+		return "002"
+	}
+
+	switch perr.Kind {
+	case planErrTLSSetup, planErrTLSSnippet:
+		return "008"
+	case planErrPort:
+		return "006"
+	default:
+		return "002"
+	}
+}
+
+// backendErrorResponse returns the response code and message a create answers
+// a backend failure with: those an in-process failure carries, or 003 and the
+// error's message for any other.
+func backendErrorResponse(err error) (string, string) {
+	var berr *inProcessError
+	if errors.As(err, &berr) {
+		return berr.Code, berr.Message
+	}
+
+	return "003", err.Error()
+}
+
+// revisionErrorMessage returns the message an update answers a failure to
+// render a node's next revision with, under code 009: a snippet failure as a
+// snippet render failure, anything else as a config render failure.
+func revisionErrorMessage(err error) string {
+	var perr *planError
+	if !errors.As(err, &perr) {
+		return fmt.Sprintf("config render failed: %v", err)
+	}
+
+	if perr.Kind == planErrSnippet {
+		return fmt.Sprintf("snippet render failed: %v", perr.Err)
+	}
+
+	return fmt.Sprintf("config render failed: %v", perr.Err)
+}
+
+// traceSetupTimeout limits an agent's start, and its fronting of one server, each
+// of which may include first-use work such as creating the store captures are
+// written to.
 const traceSetupTimeout = 30 * time.Second
 
-// startTraceProxy asks the configured Capturer to front a managed server's client
-// port with a capture proxy, and returns the proxy and the port clients reach it on.
+// agentDeclares reports whether the selected agent declares c. It is false when
+// no agent is selected.
+func (s *Service) agentDeclares(c agent.Capability) bool {
+	if s.agents == nil {
+		return false
+	}
+
+	return slices.Contains(s.agents.Capabilities(), c)
+}
+
+// startAgent asks the agent provider to start the agent of inst, before its
+// servers start, and returns the agent.
 //
-// advertiseHost becomes the proxy's listen host, so the advertised trace URL matches
-// the node's client_advertise. It must name a local interface or the capturer fails
-// to listen. Empty binds and advertises 0.0.0.0 (the no-advertise default). store
-// is passed to the capturer as CaptureRequest.Store: true keeps every connection's
-// capture, false forwards and shapes without keeping any. The caller must shut down
-// the backend server on failure: it is not yet tracked by the instance.
-func (s *Service) startTraceProxy(inst *instance, serverName string, clientPort int, advertiseHost string, store bool) (CaptureProxy, int, error) {
-	if s.capturer == nil {
-		return nil, 0, fmt.Errorf("trace capture is not configured on this service")
+// advertiseHost becomes the agent's listen host, so the advertised trace URL
+// matches the node's client_advertise. It must name a local interface or the
+// agent fails to listen. Empty binds all interfaces (the no-advertise default).
+// store is passed to the agent as Spec.Store: true keeps every connection's
+// capture, false forwards and shapes without keeping any. The proxies of plan,
+// which has some only when created with toxics, are passed as Spec.Links and
+// Spec.ClientProxies, and then its nodes as Spec.Nodes. Its trace ports, which
+// it has only when created with trace or proxy, are passed as
+// Spec.CaptureProxies. The caller must tear the instance down on failure.
+func (s *Service) startAgent(inst *instance, advertiseHost string, store bool, plan *instancePlan) (agent.Agent, error) {
+	if s.agents == nil {
+		return nil, fmt.Errorf("trace capture is not configured on this service")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), traceSetupTimeout)
 	defer cancel()
 
-	tmpDir := filepath.Join(inst.RootDir, "traces")
-	if err := os.MkdirAll(tmpDir, 0700); err != nil {
-		return nil, 0, err
+	var nodes []agent.Node
+	if plan.clientProxies != nil {
+		for _, n := range plan.nodes {
+			nodes = append(nodes, agent.Node{Name: n.Name, Cluster: n.Cluster})
+		}
 	}
 
-	proxy, err := s.capturer.Capture(ctx, CaptureRequest{
-		InstanceID: inst.ID,
-		ServerName: serverName,
-		Backend:    fmt.Sprintf("127.0.0.1:%d", clientPort),
-		ListenHost: advertiseHost,
-		TmpDir:     tmpDir,
-		Store:      store,
+	return s.agents.Start(ctx, agent.Spec{
+		InstanceID:     inst.ID,
+		ListenHost:     advertiseHost,
+		Store:          store,
+		Links:          slices.Clone(plan.proxies),
+		ClientProxies:  maps.Clone(plan.clientProxies),
+		CaptureProxies: maps.Clone(plan.captureProxies),
+		Nodes:          nodes,
 	})
-	if err != nil {
-		return nil, 0, err
+}
+
+// proxyHolder is a backend whose placement holds the port of each proxy until
+// the service hands it to the agent. The in-process backend is one.
+type proxyHolder interface {
+	// releaseProxies closes what holds the ports of the named proxies of the
+	// instance instanceID. The ports stay reserved until Teardown.
+	releaseProxies(instanceID string, names []string)
+}
+
+// releaseProxyHolds hands the ports of the named proxies of the instance
+// instanceID to its agent, just before the agent binds them, when the backend
+// holds them.
+func (s *Service) releaseProxyHolds(instanceID string, names []string) {
+	holder, ok := s.backend.(proxyHolder)
+	if !ok {
+		return
 	}
 
-	// Empty advertiseHost binds 0.0.0.0 inside the proxy; mirror that here so the log
-	// reports the host actually bound.
-	host := advertiseHost
-	if host == "" {
-		host = "0.0.0.0"
+	holder.releaseProxies(instanceID, names)
+}
+
+// frontClient asks a, a running agent, to front the client listener of the
+// managed server front names, and returns the endpoint clients reach it on. It
+// is called only for an instance whose create asked for the proxy or for
+// toxics, which the create refuses unless the agent declares capture or toxics,
+// so an agent that does not implement agent.ClientEdge is a fault in the agent.
+// The caller must stop the agent and tear the instance down on failure.
+func (s *Service) frontClient(instanceID string, a agent.Agent, front agent.Front) (backend.Endpoint, error) {
+	edge, ok := a.(agent.ClientEdge)
+	if !ok {
+		capability := agent.CapabilityToxics
+		if front.Capture {
+			capability = agent.CapabilityCapture
+		}
+		return backend.Endpoint{}, fmt.Errorf("the %q agent declares the %q capability but does not implement agent.ClientEdge", s.agentName, capability)
 	}
-	s.log.Info("Trace proxy listening", "server", serverName, "address", net.JoinHostPort(host, strconv.Itoa(proxy.Port())))
-	return proxy, proxy.Port(), nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), traceSetupTimeout)
+	defer cancel()
+
+	ep, err := edge.Front(ctx, front)
+	if err != nil {
+		return backend.Endpoint{}, err
+	}
+
+	if front.Capture {
+		s.log.Info("Trace proxy listening", "instance", instanceID, "server", front.ServerName, "address", ep.String())
+	} else {
+		s.log.Info("Client proxy listening", "instance", instanceID, "server", front.ServerName, "address", ep.String())
+	}
+
+	return ep, nil
+}
+
+// stopAgent stops a, the agent a create of inst started, when the create fails
+// before the instance is published. A failure is logged. A nil a is no agent.
+func (s *Service) stopAgent(inst *instance, a agent.Agent) {
+	if a == nil {
+		return
+	}
+
+	err := a.Stop(context.Background())
+	if err != nil {
+		s.log.Error("Failed to stop agent", "instance", inst.ID, "err", err)
+	}
 }
 
 func (s *Service) createCluster(req micro.Request) {
@@ -854,13 +1169,9 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		return
 	}
 
-	if creq.Servers < 2 {
-		req.Error("002", "Invalid request: servers should be at least 2", nil)
-		return
-	}
-
-	if creq.Servers > maxServersPerCluster {
-		req.Error("002", fmt.Sprintf("Invalid request: servers should be at most %d", maxServersPerCluster), nil)
+	clusters, refusal := clusterRequestClusters(creq)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
 		return
 	}
 
@@ -871,6 +1182,12 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 
 	if err := validateJetStreamSnippet(creq.Snippets, creq.JetStream); err != nil {
 		req.Error("011", err.Error(), nil)
+		return
+	}
+
+	wait, refusal := newJetStreamWait(creq.WaitJetStream, creq.SystemCredentials, creq.JetStream, creq.Snippets, creq.Template)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
 		return
 	}
 
@@ -892,205 +1209,43 @@ func (s *Service) createClusterAttempt(req micro.Request, final bool) (retry boo
 		return
 	}
 
-	if proxied && s.capturer == nil {
+	if proxied && s.agents == nil {
 		req.Error("014", "trace capture is not configured on this service", nil)
 		return
 	}
 
-	inst := s.newInstance("cluster", creq.Description)
-	short := shortID(inst.ID)
-	clusterName := "C_" + short
-	inst.Cluster = clusterName
-
-	// One route listener per node, reserved up front because every node's config
-	// lists the full set of route URLs. Each entry stays held until ITS node
-	// starts: it is moved into that node's hand-off set (and cleared here) right
-	// before that node's runServerWithConfig closes it. Closing them all on the
-	// first node's start — the previous behavior — freed the later nodes' route
-	// ports into the hand-over gap, where another spawn could grab the port and
-	// crash the binding node.
-	routeLns := make([]*net.TCPListener, creq.Servers)
-	rollback := func() {
-		closeListeners(routeLns) // route listeners for nodes that have not started
-		s.dropInstance(inst.ID)
-	}
-
-	if err := os.MkdirAll(inst.RootDir, 0700); err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Failed to create instance dir: %v", err), nil)
+	if proxied && !s.agentDeclares(agent.CapabilityCapture) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityCapture), nil)
 		return
 	}
 
-	advertiseHost := effectiveAdvertiseHost(s.advertiseHost, creq.TLS)
-
-	var tlsFiles *tlsInstanceFiles
-	var tlsResp *api.TLSMaterial
-	if creq.TLS != nil {
-		var err error
-		tlsFiles, tlsResp, err = s.setupInstanceTLS(inst, creq.TLS, advertiseHost)
-		if err != nil {
-			rollback()
-			req.Error("008", fmt.Sprintf("TLS setup failed: %v", err), nil)
+	if creq.Toxics {
+		code, msg := s.toxicsRefusal("cluster", creq.Template)
+		if code != "" {
+			req.Error(code, msg, nil)
 			return
 		}
 	}
 
-	clusterPorts := make([]int, creq.Servers)
-	clusterUrls := make([]string, creq.Servers)
-	for i := 0; i < creq.Servers; i++ {
-		p, ln, err := s.reservePort(inst)
-		if err != nil {
-			rollback()
-			req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-			return
-		}
-		clusterPorts[i] = p
-		clusterUrls[i] = fmt.Sprintf("localhost:%d", p)
-		routeLns[i] = ln
+	inst := s.newInstance("cluster", creq.Description)
+
+	spec := instanceSpec{
+		Kind:          "cluster",
+		Servers:       clusters[0].Servers,
+		ClusterList:   clusters,
+		JetStream:     creq.JetStream,
+		Description:   creq.Description,
+		Snippets:      creq.Snippets,
+		MainTemplate:  mainTemplate,
+		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
+		Proxy:         proxied,
+		StoreCaptures: creq.Trace,
+		Toxics:        creq.Toxics,
+		JetStreamWait: wait,
 	}
+	setSpecTLS(&spec, creq.TLS)
 
-	resp := api.CreateResponse{
-		ID:          inst.ID,
-		Description: inst.Description,
-		Kind:        inst.Kind,
-		Servers:     []*api.ManagedServer{},
-		TLS:         tlsResp,
-	}
-
-	for i := 1; i <= creq.Servers; i++ {
-		// Hand-off set for this node: its own route listener plus the client
-		// (and snippet) listeners reserved below. runServerWithConfig closes
-		// exactly these right before Start(); the other nodes' route listeners
-		// stay held until their own iteration.
-		nodeLns := []*net.TCPListener{routeLns[i-1]}
-		routeLns[i-1] = nil // ownership moved into nodeLns
-
-		name := fmt.Sprintf("%s-n%d", short, i)
-		sd := filepath.Join(inst.RootDir, fmt.Sprintf("n%d", i))
-		snippetsDir := filepath.Join(sd, "snippets")
-		if err := os.MkdirAll(snippetsDir, 0700); err != nil {
-			closeListeners(nodeLns)
-			rollback()
-			req.Error("002", "Failed to create server directory", nil)
-			return
-		}
-
-		clientPort, clientLn, err := s.reservePort(inst)
-		if err != nil {
-			closeListeners(nodeLns)
-			rollback()
-			req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-			return
-		}
-		nodeLns = append(nodeLns, clientLn)
-
-		listenerPorts, listenerLns, err := s.reserveListenerPorts(inst, listenersForSnippets(creq.Snippets))
-		if err != nil {
-			closeListeners(nodeLns)
-			rollback()
-			req.Error("006", err.Error(), nil)
-			return
-		}
-		nodeLns = append(nodeLns, listenerLns...)
-
-		var tlsInclude string
-		if tlsFiles != nil {
-			tlsInclude, err = writeServerTLSSnippet(snippetsDir, tlsFiles)
-			if err != nil {
-				rollback()
-				req.Error("008", fmt.Sprintf("TLS snippet failed: %v", err), nil)
-				return
-			}
-		}
-
-		td := populateTemplateData(inst, serverPlan{
-			name:          name,
-			serverDir:     sd,
-			serverIndex:   i,
-			clientPort:    clientPort,
-			advertiseHost: advertiseHost,
-			jetStream:     creq.JetStream,
-			clusterName:   clusterName,
-			clusterPort:   clusterPorts[i-1],
-			routes:        clusterUrls,
-			clusterSize:   creq.Servers,
-			listenerPorts: listenerPorts,
-			tlsInclude:    tlsInclude,
-			tlsFiles:      tlsFiles,
-		})
-
-		if err := renderAndWriteSnippets(td, creq.Snippets, snippetsDir); err != nil {
-			closeListeners(nodeLns)
-			rollback()
-			req.Error("002", fmt.Sprintf("Snippet failure: %v", err), nil)
-			return
-		}
-
-		serverConfig, err := renderConfig(td, mainTemplate)
-		if err != nil {
-			closeListeners(nodeLns)
-			rollback()
-			req.Error("002", fmt.Sprintf("Template parse failure: %v", err), nil)
-			return
-		}
-
-		// nodeLns (incl. this node's route listener) are closed inside
-		// runServerWithConfig on every path; routeLns then holds only the route
-		// listeners of nodes that have not started yet.
-		srv, cfgPath, err := runServerWithConfig(s.log, serverConfig, sd, nodeLns)
-		if err != nil {
-			rollback()
-			if s.retryAfter(err, final, inst.ID) {
-				return true
-			}
-			req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
-			return
-		}
-
-		port, err := clientPortOf(srv)
-		if err != nil {
-			s.log.Warn("Could not parse client port", "server", name, "err", err)
-		}
-
-		ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
-
-		// A single capture proxy fronts the first node of the cluster.
-		if proxied && i == 1 {
-			proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost, creq.Trace)
-			if terr != nil {
-				// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
-				// shut it down here to avoid leaking the started server on trace failure.
-				srv.Shutdown()
-				srv.WaitForShutdown()
-				rollback()
-				req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
-				return
-			}
-			ms.traceProxy = proxy
-			if listenerPorts == nil {
-				listenerPorts = map[string]int{}
-			}
-			listenerPorts["trace"] = tracePort
-			ms.ports = listenerPorts
-		}
-
-		s.mu.Lock()
-		inst.Servers = append(inst.Servers, ms)
-		s.mu.Unlock()
-
-		resp.Servers = append(resp.Servers, &api.ManagedServer{
-			Name:      name,
-			Port:      port,
-			Ports:     listenerPorts,
-			Cluster:   clusterName,
-			Advertise: advertiseHost,
-			Running:   srv.Running(),
-		})
-	}
-
-	req.RespondJSON(resp)
-
-	return false
+	return s.createFromSpec(req, final, inst, spec)
 }
 
 func (s *Service) createSuperCluster(req micro.Request) {
@@ -1106,23 +1261,9 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		return
 	}
 
-	if creq.Servers < 2 {
-		req.Error("002", "Invalid request: servers should be at least 2", nil)
-		return
-	}
-
-	if creq.Servers > maxServersPerCluster {
-		req.Error("002", fmt.Sprintf("Invalid request: servers should be at most %d", maxServersPerCluster), nil)
-		return
-	}
-
-	if creq.Clusters < 2 {
-		req.Error("004", "Invalid request: clusters should be at least 2", nil)
-		return
-	}
-
-	if creq.Clusters > maxClusters {
-		req.Error("004", fmt.Sprintf("Invalid request: clusters should be at most %d", maxClusters), nil)
+	clusters, refusal := superClusterRequestClusters(creq)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
 		return
 	}
 
@@ -1133,6 +1274,12 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 
 	if err := validateJetStreamSnippet(creq.Snippets, creq.JetStream); err != nil {
 		req.Error("011", err.Error(), nil)
+		return
+	}
+
+	wait, refusal := newJetStreamWait(creq.WaitJetStream, creq.SystemCredentials, creq.JetStream, creq.Snippets, creq.Template)
+	if refusal != nil {
+		req.Error(refusal.Code, refusal.Error(), nil)
 		return
 	}
 
@@ -1154,251 +1301,44 @@ func (s *Service) createSuperClusterAttempt(req micro.Request, final bool) (retr
 		return
 	}
 
-	if proxied && s.capturer == nil {
+	if proxied && s.agents == nil {
 		req.Error("014", "trace capture is not configured on this service", nil)
 		return
 	}
 
-	inst := s.newInstance("super-cluster", creq.Description)
-	short := shortID(inst.ID)
-
-	// One gateway listener per node in every cluster, and one route listener per
-	// node within each cluster. Both are reserved before the nodes that bind them
-	// exist, because every node's config lists the full set of route and gateway
-	// URLs. Each entry stays held until ITS node starts: the node moves it into
-	// its own hand-off set (clearing the slot here) right before that node's
-	// runServerWithConfig closes it. Closing them all on the first node's start
-	// would free every later node's route and gateway port into the hand-over
-	// gap, where another spawn could grab the port and crash the binding node.
-	gatewayLns := make([][]*net.TCPListener, creq.Clusters)
-	routeLns := make([][]*net.TCPListener, creq.Clusters)
-	rollback := func() {
-		for _, lns := range gatewayLns {
-			closeListeners(lns) // gateway listeners for nodes that have not started
-		}
-		for _, lns := range routeLns {
-			closeListeners(lns) // route listeners for nodes that have not started
-		}
-		s.dropInstance(inst.ID)
-	}
-
-	if err := os.MkdirAll(inst.RootDir, 0700); err != nil {
-		rollback()
-		req.Error("002", fmt.Sprintf("Failed to create instance dir: %v", err), nil)
+	if proxied && !s.agentDeclares(agent.CapabilityCapture) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityCapture), nil)
 		return
 	}
 
-	advertiseHost := effectiveAdvertiseHost(s.advertiseHost, creq.TLS)
-
-	var tlsFiles *tlsInstanceFiles
-	var tlsResp *api.TLSMaterial
-	if creq.TLS != nil {
-		var err error
-		tlsFiles, tlsResp, err = s.setupInstanceTLS(inst, creq.TLS, advertiseHost)
-		if err != nil {
-			rollback()
-			req.Error("008", fmt.Sprintf("TLS setup failed: %v", err), nil)
+	if creq.Toxics {
+		code, msg := s.toxicsRefusal("super-cluster", creq.Template)
+		if code != "" {
+			req.Error(code, msg, nil)
 			return
 		}
 	}
 
-	resp := api.CreateResponse{
-		ID:          inst.ID,
-		Description: inst.Description,
-		Kind:        inst.Kind,
-		Servers:     []*api.ManagedServer{},
-		TLS:         tlsResp,
+	inst := s.newInstance("super-cluster", creq.Description)
+
+	spec := instanceSpec{
+		Kind:          "super-cluster",
+		Servers:       creq.Servers,
+		Clusters:      creq.Clusters,
+		ClusterList:   clusters,
+		JetStream:     creq.JetStream,
+		Description:   creq.Description,
+		Snippets:      creq.Snippets,
+		MainTemplate:  mainTemplate,
+		AdvertiseHost: effectiveAdvertiseHost(s.advertiseHost, creq.TLS),
+		Proxy:         proxied,
+		StoreCaptures: creq.Trace,
+		Toxics:        creq.Toxics,
+		JetStreamWait: wait,
 	}
+	setSpecTLS(&spec, creq.TLS)
 
-	clusterNames := make([]string, creq.Clusters)
-	for c := 1; c <= creq.Clusters; c++ {
-		clusterNames[c-1] = fmt.Sprintf("SC_%s_%d", short, c)
-	}
-
-	// Allocate gateway ports for every cluster up front so each cluster's
-	// configuration can reference all the others' gateway URLs.
-	superClusterPorts := map[string][]int{}
-	superClusterUrls := map[string][]string{}
-	for ci, name := range clusterNames {
-		ports := make([]int, creq.Servers)
-		urls := make([]string, creq.Servers)
-		gatewayLns[ci] = make([]*net.TCPListener, creq.Servers)
-
-		for i := 0; i < creq.Servers; i++ {
-			p, ln, err := s.reservePort(inst)
-			if err != nil {
-				rollback()
-				req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-				return
-			}
-			ports[i] = p
-			urls[i] = fmt.Sprintf("localhost:%d", p)
-			gatewayLns[ci][i] = ln
-		}
-
-		superClusterPorts[name] = ports
-		superClusterUrls[name] = urls
-	}
-
-	for c := 1; c <= creq.Clusters; c++ {
-		clusterName := clusterNames[c-1]
-
-		clusterPorts := make([]int, creq.Servers)
-		clusterUrls := make([]string, creq.Servers)
-		routeLns[c-1] = make([]*net.TCPListener, creq.Servers)
-		for i := 0; i < creq.Servers; i++ {
-			p, ln, err := s.reservePort(inst)
-			if err != nil {
-				rollback()
-				req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-				return
-			}
-			clusterPorts[i] = p
-			clusterUrls[i] = fmt.Sprintf("localhost:%d", p)
-			routeLns[c-1][i] = ln
-		}
-
-		for i := 1; i <= creq.Servers; i++ {
-			// Hand-off set for this node: its own route and gateway listeners plus
-			// the client (and snippet) listeners reserved below. runServerWithConfig
-			// closes exactly these right before Start(); the other nodes' listeners
-			// stay held until their own iteration.
-			nodeLns := []*net.TCPListener{routeLns[c-1][i-1], gatewayLns[c-1][i-1]}
-			routeLns[c-1][i-1] = nil   // ownership moved into nodeLns
-			gatewayLns[c-1][i-1] = nil // ownership moved into nodeLns
-
-			name := fmt.Sprintf("%s-c%d_s%d", short, c, i)
-			sd := filepath.Join(inst.RootDir, fmt.Sprintf("c%d_s%d", c, i))
-			snippetsDir := filepath.Join(sd, "snippets")
-			if err := os.MkdirAll(snippetsDir, 0700); err != nil {
-				closeListeners(nodeLns)
-				rollback()
-				req.Error("002", "Failed to create server directory", nil)
-				return
-			}
-
-			clientPort, clientLn, err := s.reservePort(inst)
-			if err != nil {
-				closeListeners(nodeLns)
-				rollback()
-				req.Error("006", fmt.Sprintf("could not get free port: %v", err), nil)
-				return
-			}
-			nodeLns = append(nodeLns, clientLn)
-
-			listenerPorts, listenerLns, err := s.reserveListenerPorts(inst, listenersForSnippets(creq.Snippets))
-			if err != nil {
-				closeListeners(nodeLns)
-				rollback()
-				req.Error("006", err.Error(), nil)
-				return
-			}
-			nodeLns = append(nodeLns, listenerLns...)
-
-			var tlsInclude string
-			if tlsFiles != nil {
-				tlsInclude, err = writeServerTLSSnippet(snippetsDir, tlsFiles)
-				if err != nil {
-					closeListeners(nodeLns)
-					rollback()
-					req.Error("008", fmt.Sprintf("TLS snippet failed: %v", err), nil)
-					return
-				}
-			}
-
-			td := populateTemplateData(inst, serverPlan{
-				name:          name,
-				serverDir:     sd,
-				serverIndex:   i,
-				clusterIndex:  c,
-				clientPort:    clientPort,
-				advertiseHost: advertiseHost,
-				jetStream:     creq.JetStream,
-				clusterName:   clusterName,
-				clusterPort:   clusterPorts[i-1],
-				routes:        clusterUrls,
-				clusterSize:   creq.Servers,
-				clusters:      clusterNames,
-				gatewayPort:   superClusterPorts[clusterName][i-1],
-				gateways:      superClusterUrls,
-				listenerPorts: listenerPorts,
-				tlsInclude:    tlsInclude,
-				tlsFiles:      tlsFiles,
-			})
-
-			if err := renderAndWriteSnippets(td, creq.Snippets, snippetsDir); err != nil {
-				closeListeners(nodeLns)
-				rollback()
-				req.Error("002", fmt.Sprintf("Snippet failure: %v", err), nil)
-				return
-			}
-
-			serverConfig, err := renderConfig(td, mainTemplate)
-			if err != nil {
-				closeListeners(nodeLns)
-				rollback()
-				req.Error("002", fmt.Sprintf("Template parse failure: %v", err), nil)
-				return
-			}
-
-			// nodeLns (incl. this node's route and gateway listeners) are closed
-			// inside runServerWithConfig on every path; routeLns and gatewayLns then
-			// hold only the listeners of nodes that have not started yet.
-			srv, cfgPath, err := runServerWithConfig(s.log, serverConfig, sd, nodeLns)
-			if err != nil {
-				rollback()
-				if s.retryAfter(err, final, inst.ID) {
-					return true
-				}
-				req.Error("003", fmt.Sprintf("Server creation failed: %v", err), nil)
-				return
-			}
-
-			port, err := clientPortOf(srv)
-			if err != nil {
-				s.log.Warn("Could not parse client port", "server", name, "err", err)
-			}
-
-			ms := &managedServer{srv: srv, instanceID: inst.ID, rootDir: sd, configPath: cfgPath, ports: listenerPorts, clientPort: port, advertiseHost: advertiseHost, td: td, tlsFiles: tlsFiles}
-
-			// A single capture proxy fronts the first node of the first cluster.
-			if proxied && c == 1 && i == 1 {
-				proxy, tracePort, terr := s.startTraceProxy(inst, name, port, advertiseHost, creq.Trace)
-				if terr != nil {
-					// srv is not in inst.Servers yet, so rollback's teardown would not stop it;
-					// shut it down here to avoid leaking the started server on trace failure.
-					srv.Shutdown()
-					srv.WaitForShutdown()
-					rollback()
-					req.Error("012", fmt.Sprintf("trace setup failed: %v", terr), nil)
-					return
-				}
-				ms.traceProxy = proxy
-				if listenerPorts == nil {
-					listenerPorts = map[string]int{}
-				}
-				listenerPorts["trace"] = tracePort
-				ms.ports = listenerPorts
-			}
-
-			s.mu.Lock()
-			inst.Servers = append(inst.Servers, ms)
-			s.mu.Unlock()
-
-			resp.Servers = append(resp.Servers, &api.ManagedServer{
-				Name:      name,
-				Port:      port,
-				Ports:     listenerPorts,
-				Cluster:   clusterName,
-				Advertise: advertiseHost,
-				Running:   srv.Running(),
-			})
-		}
-	}
-
-	req.RespondJSON(resp)
-
-	return false
+	return s.createFromSpec(req, final, inst, spec)
 }
 
 func (s *Service) reset(req micro.Request) {
@@ -1410,7 +1350,7 @@ func (s *Service) reset(req micro.Request) {
 		return
 	}
 
-	req.RespondJSON(api.ResetResponse{Shutdown: true})
+	req.RespondJSON(api.ResetResponse{Type: api.TypeResetResponse, Shutdown: true})
 }
 
 func (s *Service) stopServer(req micro.Request) {
@@ -1428,30 +1368,43 @@ func (s *Service) stopServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
-	// Hold cfgMu so a concurrent start cannot replace ms.srv while it is read and
-	// shut down here: startServer holds cfgMu across its ms.srv store.
+	// Hold cfgMu so a concurrent start cannot start the node while it is checked
+	// and stopped here: startServer holds cfgMu across its start.
 	ms.cfgMu.Lock()
 	defer ms.cfgMu.Unlock()
 
-	if !ms.srv.Running() {
+	ctx := context.Background()
+
+	// A node whose instance a concurrent destroy tore down fails its status,
+	// and is not running.
+	st, err := ms.backendNode.Status(ctx)
+	if err != nil || !st.Running {
 		req.Error("003", "Server not running", nil)
 		return
 	}
 
-	ms.srv.Shutdown()
-	ms.srv.WaitForShutdown()
-	if ms.srv.Running() {
+	err = ms.backendNode.Stop(ctx)
+	if err != nil {
 		req.Error("004", "Server did not shut down", nil)
 		return
 	}
 
-	req.RespondJSON(api.StopServerResponse{Shutdown: true})
+	st, err = ms.backendNode.Status(ctx)
+	if err == nil && st.Running {
+		req.Error("004", "Server did not shut down", nil)
+		return
+	}
+
+	s.recordNodeEvent(ms, events.NodeStopped, creq.Name)
+
+	req.RespondJSON(api.StopServerResponse{Type: api.TypeStopServerResponse, Shutdown: true})
 }
 
 func (s *Service) startServer(req micro.Request) {
@@ -1469,55 +1422,64 @@ func (s *Service) startServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
 	// Hold cfgMu across the whole start: it keeps a concurrent start from
-	// replacing ms.srv underneath the running check, keeps two callers from both
-	// passing that check and starting the same server twice, and keeps a
-	// concurrent update from being mid-write when ProcessConfigFile reads
-	// configPath.
+	// starting the node underneath the running check, keeps two callers from
+	// both passing that check and starting the same server twice, and keeps a
+	// concurrent update from being mid-write when the start reads the config
+	// path.
 	ms.cfgMu.Lock()
 	defer ms.cfgMu.Unlock()
 
-	if ms.srv.Running() {
+	ctx := context.Background()
+	node := ms.backendNode
+
+	st, err := node.Status(ctx)
+	if err == nil && st.Running {
 		req.Error("003", "Server already running", nil)
 		return
 	}
 
-	if ms.configPath == "" {
-		req.Error("005", "Server cannot be restarted: no persisted config", nil)
-		return
-	}
-
-	srv, err := startFromConfig(s.log, ms.configPath)
-	if err != nil {
-		req.Error("005", fmt.Sprintf("Server restart failed: %v", err), nil)
-		return
-	}
+	err = node.Start(ctx)
 
 	// A concurrent destroy or reset may have removed the instance while this
-	// server was starting. Its teardown has already shut down the old server and
-	// will never see this one, so shut it down here rather than leave it holding
-	// its port for the life of the process.
+	// node was starting. A start its teardown refused fails, and one that
+	// finished first is stopped here, rather than left holding its port for the
+	// life of the process.
 	s.mu.Lock()
 	_, alive := s.instances[ms.instanceID]
-	if alive {
-		ms.srv = srv
-	}
 	s.mu.Unlock()
 
 	if !alive {
-		srv.Shutdown()
-		srv.WaitForShutdown()
+		if err == nil {
+			serr := node.Stop(ctx)
+			if serr != nil {
+				s.log.Warn("Could not stop server of a destroyed instance", "instance", ms.instanceID, "server", creq.Name, "err", serr)
+			}
+		}
 		req.Error("404", "Instance destroyed during start", nil)
 		return
 	}
 
-	req.RespondJSON(api.StartServerResponse{Started: true})
+	if err != nil {
+		var berr *inProcessError
+		if errors.As(err, &berr) {
+			req.Error(berr.Code, berr.Message, nil)
+			return
+		}
+		req.Error("005", fmt.Sprintf("Server restart failed: %v", err), nil)
+		return
+	}
+
+	s.recordNodeEvent(ms, events.NodeStarted, creq.Name)
+
+	req.RespondJSON(api.StartServerResponse{Type: api.TypeStartServerResponse, Started: true})
 }
 
 // stopInstance shuts down every running server in an instance while leaving its
@@ -1553,24 +1515,39 @@ func (s *Service) stopInstance(req micro.Request) {
 		return
 	}
 
+	ctx := context.Background()
+
 	results := make([]api.ServerStateResult, 0, len(servers))
 	for _, ms := range servers {
+		node := ms.backendNode
+
 		ms.cfgMu.Lock()
-		srv := ms.srv
-		if srv != nil && srv.Running() {
-			srv.Shutdown()
-			srv.WaitForShutdown()
+		// stopped reports whether this request stopped the node, rather than
+		// finding it stopped already.
+		stopped := false
+		st, err := node.Status(ctx)
+		if err == nil && st.Running {
+			err = node.Stop(ctx)
+			if err != nil {
+				s.log.Warn("Could not stop server", "instance", creq.InstanceID, "server", node.Name(), "err", err)
+			}
+			stopped = err == nil
 		}
-		res := api.ServerStateResult{}
-		if srv != nil {
-			res.Name = srv.Name()
-			res.Running = srv.Running()
+		// The plan name stands in when a destroy tore the node down meanwhile.
+		res := api.ServerStateResult{Name: node.Name()}
+		st, err = node.Status(ctx)
+		if err == nil {
+			res.Name = st.ServerName
+			res.Running = st.Running
+		}
+		if stopped && err == nil && !res.Running {
+			s.recordNodeEvent(ms, events.NodeStopped, res.Name)
 		}
 		ms.cfgMu.Unlock()
 		results = append(results, res)
 	}
 
-	req.RespondJSON(api.StopInstanceResponse{Servers: results})
+	req.RespondJSON(api.StopInstanceResponse{Type: api.TypeStopInstanceResponse, Servers: results})
 }
 
 // startInstance revives a stopped instance, restarting each non-running server
@@ -1606,30 +1583,57 @@ func (s *Service) startInstance(req micro.Request) {
 		return
 	}
 
+	ctx := context.Background()
+
 	results := make([]api.ServerStateResult, 0, len(servers))
 	for _, ms := range servers {
-		res := api.ServerStateResult{}
+		node := ms.backendNode
+		// The plan name stands in when a destroy tore the node down meanwhile.
+		res := api.ServerStateResult{Name: node.Name()}
 
 		ms.cfgMu.Lock()
-		if ms.srv != nil {
-			res.Name = ms.srv.Name()
+		st, err := node.Status(ctx)
+		if err == nil {
+			res.Name = st.ServerName
 		}
 
-		if ms.srv != nil && ms.srv.Running() {
+		if err == nil && st.Running {
 			res.Running = true
 			ms.cfgMu.Unlock()
 			results = append(results, res)
 			continue
 		}
 
-		if ms.configPath == "" {
+		err = node.Start(ctx)
+
+		// A concurrent destroy may have removed the instance while this node was
+		// starting. A start its teardown refused fails, and one that finished
+		// first is stopped here rather than leaked, and the request stops.
+		s.mu.Lock()
+		_, alive := s.instances[creq.InstanceID]
+		s.mu.Unlock()
+
+		if !alive {
+			if err == nil {
+				serr := node.Stop(ctx)
+				if serr != nil {
+					s.log.Warn("Could not stop server of a destroyed instance", "instance", creq.InstanceID, "server", node.Name(), "err", serr)
+				}
+			}
 			ms.cfgMu.Unlock()
-			res.Error = "no persisted config"
+			req.Error("404", "Instance destroyed during start", nil)
+			return
+		}
+
+		// A node with no config to start from reports the cause its error
+		// carries.
+		if errors.Is(err, errNoPersistedConfig) {
+			ms.cfgMu.Unlock()
+			res.Error = errNoPersistedConfig.Error()
 			results = append(results, res)
 			continue
 		}
 
-		srv, err := startFromConfig(s.log, ms.configPath)
 		if err != nil {
 			ms.cfgMu.Unlock()
 			res.Error = err.Error()
@@ -1637,30 +1641,21 @@ func (s *Service) startInstance(req micro.Request) {
 			continue
 		}
 
-		// A concurrent destroy may have removed the instance while this node was
-		// starting. If so, shut the freshly-started server down rather than leak
-		// it, and stop.
-		s.mu.Lock()
-		_, alive := s.instances[creq.InstanceID]
-		if alive {
-			ms.srv = srv
+		// The started node's state is read and recorded under cfgMu, so its
+		// event is ordered against the node's other changes.
+		st, err = node.Status(ctx)
+		if err == nil {
+			res.Name = st.ServerName
+			res.Running = st.Running
 		}
-		s.mu.Unlock()
+		if err == nil && res.Running {
+			s.recordNodeEvent(ms, events.NodeStarted, res.Name)
+		}
 		ms.cfgMu.Unlock()
-
-		if !alive {
-			srv.Shutdown()
-			srv.WaitForShutdown()
-			req.Error("404", "Instance destroyed during start", nil)
-			return
-		}
-
-		res.Name = srv.Name()
-		res.Running = srv.Running()
 		results = append(results, res)
 	}
 
-	req.RespondJSON(api.StartInstanceResponse{Servers: results})
+	req.RespondJSON(api.StartInstanceResponse{Type: api.TypeStartInstanceResponse, Servers: results})
 }
 
 func (s *Service) updateServer(req micro.Request) {
@@ -1678,9 +1673,10 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
@@ -1692,71 +1688,99 @@ func (s *Service) updateServer(req micro.Request) {
 		return
 	}
 
-	if err := validateTLSSnippetRefs(creq.Snippets, ms.td.TLS != nil); err != nil {
+	node := ms.node
+
+	if err := validateTLSSnippetRefs(creq.Snippets, node.TemplateData.TLS != nil); err != nil {
 		req.Error("007", err.Error(), nil)
 		return
 	}
 
-	if err := validateJetStreamSnippet(creq.Snippets, ms.td.JetStream); err != nil {
+	if err := validateJetStreamSnippet(creq.Snippets, node.TemplateData.JetStream); err != nil {
 		req.Error("011", err.Error(), nil)
 		return
 	}
 
-	// td.Ports is the listener set the running config was rendered with. ms.ports
-	// is the wire view, which also carries the capture proxy's port for a traced
-	// server; validating against that would reject every update of a traced
-	// server, since no snippet can ever produce a "trace" listener.
-	if err := validateListenerPortSet(creq.Snippets, ms.td.Ports); err != nil {
+	// The template data's Ports is the listener set the running config was
+	// rendered with. ms.ports is the wire view, which also carries the capture
+	// proxy's port for a traced server; validating against that would reject
+	// every update of a traced server, since no snippet can ever produce a
+	// "trace" listener.
+	if err := validateListenerPortSet(creq.Snippets, node.TemplateData.Ports); err != nil {
 		req.Error("008", err.Error(), nil)
 		return
 	}
 
-	if creq.TLSTimeout != nil && ms.tlsFiles == nil {
+	if creq.TLSTimeout != nil && node.TLS == nil {
 		req.Error("007", "server was not created with WithGeneratedTLS; cannot set tls_timeout", nil)
 		return
 	}
 
-	tdNew := cloneTemplateData(ms.td)
-	snippetsDir := filepath.Join(ms.rootDir, "snippets")
-
-	if err := renderAndWriteSnippets(tdNew, creq.Snippets, snippetsDir); err != nil {
-		req.Error("009", fmt.Sprintf("snippet render failed: %v", err), nil)
-		return
-	}
-
-	var newTLS *tlsInstanceFiles
-	if creq.TLSTimeout != nil {
-		cow := *ms.tlsFiles
-		cow.timeoutSeconds = *creq.TLSTimeout
-		if _, err := writeServerTLSSnippet(snippetsDir, &cow); err != nil {
-			req.Error("009", fmt.Sprintf("TLS snippet rewrite failed: %v", err), nil)
+	// The revision renders the proxies' addresses from the node's template
+	// data, so a custom template must reference them as it must on create.
+	if ms.toxics {
+		err := validateToxicsTemplate(node.TemplateData.Kind, creq.Template)
+		if err != nil {
+			req.Error("007", err.Error(), nil)
 			return
 		}
-		newTLS = &cow
 	}
 
 	mainTmpl := serverConfigTemplate
 	if creq.Template != "" {
 		mainTmpl = creq.Template
 	}
-	rendered, err := renderConfig(tdNew, mainTmpl)
+
+	// Render the whole next revision before anything is written, so a failed
+	// render writes nothing.
+	next, err := planRevision(node, creq.Snippets, mainTmpl, creq.TLSTimeout)
 	if err != nil {
-		req.Error("009", fmt.Sprintf("config render failed: %v", err), nil)
+		req.Error("009", revisionErrorMessage(err), nil)
 		return
 	}
 
-	if err := os.WriteFile(ms.configPath, rendered, 0600); err != nil {
-		req.Error("009", fmt.Sprintf("config write failed: %v", err), nil)
+	// The proxies of toxics read a plain CONNECT, so the revision must not
+	// enable TLS on routes or gateways either, must name its gateway for its
+	// cluster, and must keep the node's name as its server_name. A config
+	// these checks cannot read is refused.
+	if ms.toxics {
+		code, msg := toxicsConfigRefusal(s.dir, next, "009")
+		if code != "" {
+			req.Error(code, msg, nil)
+			return
+		}
+	}
+
+	err = ms.backendNode.Apply(context.Background(), &next.NodePlan)
+	if err != nil {
+		var berr *inProcessError
+		if errors.As(err, &berr) {
+			req.Error(berr.Code, berr.Message, nil)
+			return
+		}
+		req.Error("009", err.Error(), nil)
 		return
 	}
 
-	// Writing new config was successful, update the managedServer's templateData.
-	ms.td = tdNew
-	if newTLS != nil {
-		ms.tlsFiles = newTLS
-	}
+	// The node has the revision: drop its contents and swap it in for the
+	// node's plan, here and in the instance's plan. The old node plan is left
+	// as it was.
+	next.dropContents()
+	ms.node = next
 
-	req.RespondJSON(api.UpdateServerResponse{Updated: true})
+	s.mu.Lock()
+	inst := s.instances[ms.instanceID]
+	if inst != nil && inst.plan != nil {
+		i := slices.Index(inst.plan.nodes, node)
+		if i >= 0 {
+			inst.plan.nodes[i] = next
+			inst.plan.Nodes[i] = &next.NodePlan
+		}
+	}
+	s.mu.Unlock()
+
+	s.recordNodeEvent(ms, events.NodeUpdated, creq.Name)
+
+	req.RespondJSON(api.UpdateServerResponse{Type: api.TypeUpdateServerResponse, Updated: true})
 }
 
 func (s *Service) reloadServer(req micro.Request) {
@@ -1774,30 +1798,37 @@ func (s *Service) reloadServer(req micro.Request) {
 		return
 	}
 
-	ms := s.findServerByName(creq.Name)
-	if ms == nil {
-		req.Error("001", "Server not found", nil)
+	ms, err := s.findServerByName(creq.Name, creq.InstanceID)
+	if err != nil {
+		code, msg := serverLookupRefusal(err)
+		req.Error(code, msg, nil)
 		return
 	}
 
 	// Hold cfgMu across both the running check and the reload: it keeps a
-	// concurrent start from replacing ms.srv underneath them, keeps the server
-	// from stopping between the two, and stops Reload() (which re-reads
-	// configPath) observing a torn file mid-write from a concurrent update.
+	// concurrent start from starting the node underneath them, keeps the server
+	// from stopping between the two, and stops the reload (which re-reads the
+	// config path) observing a torn file mid-write from a concurrent update.
 	ms.cfgMu.Lock()
 	defer ms.cfgMu.Unlock()
 
-	if !ms.srv.Running() {
+	ctx := context.Background()
+
+	st, err := ms.backendNode.Status(ctx)
+	if err != nil || !st.Running {
 		req.Error("002", "Server not running", nil)
 		return
 	}
 
-	if err := ms.srv.Reload(); err != nil {
+	err = ms.backendNode.Reload(ctx)
+	if err != nil {
 		req.Error("010", fmt.Sprintf("reload failed: %v", err), nil)
 		return
 	}
 
-	req.RespondJSON(api.ReloadServerResponse{Reloaded: true})
+	s.recordNodeEvent(ms, events.NodeReloaded, creq.Name)
+
+	req.RespondJSON(api.ReloadServerResponse{Type: api.TypeReloadServerResponse, Reloaded: true})
 }
 
 func (s *Service) status(req micro.Request) {
@@ -1825,18 +1856,69 @@ func (s *Service) status(req micro.Request) {
 	}
 	s.mu.Unlock()
 
+	// Read each node's status with the lock released. A node that fails it
+	// keeps the plan's name and cluster from the snapshot and shows as not
+	// running.
+	ctx := context.Background()
+	for i := range snapshots {
+		for j := range snapshots[i].servers {
+			ss := &snapshots[i].servers[j]
+
+			st, err := ss.node.Status(ctx)
+			if err != nil {
+				s.log.Warn("Could not read server status", "instance", snapshots[i].id, "server", ss.name, "err", err)
+				continue
+			}
+
+			ss.name = st.ServerName
+			ss.cluster = st.Cluster
+			ss.running = st.Running
+			ss.clusterPort = st.ClusterPort
+			ss.version = st.Version
+		}
+	}
+
+	// Leave out an instance a destroy or reset removed while its nodes were read.
+	s.mu.Lock()
+	snapshots = slices.DeleteFunc(snapshots, func(snap instanceSnapshot) bool {
+		_, ok := s.instances[snap.id]
+		return !ok
+	})
+	s.mu.Unlock()
+
 	if creq.InstanceID != "" && len(snapshots) == 0 {
 		req.Error("404", "Instance not found", nil)
 		return
 	}
 
-	resp := api.StatusResponse{Instances: make([]api.InstanceStatus, 0, len(snapshots))}
+	// One backend runs every instance, so each reports its name and the
+	// capabilities it declares, in its order.
+	var capabilities []string
+	for _, c := range s.backend.Capabilities() {
+		capabilities = append(capabilities, string(c))
+	}
+
+	// Likewise the agent, when one is selected.
+	var agentCapabilities []string
+	if s.agents != nil {
+		for _, c := range s.agents.Capabilities() {
+			agentCapabilities = append(agentCapabilities, string(c))
+		}
+	}
+
+	resp := api.StatusResponse{Type: api.TypeStatusResponse, Instances: make([]api.InstanceStatus, 0, len(snapshots))}
 	for _, snap := range snapshots {
 		ist := api.InstanceStatus{
-			ID:          snap.id,
-			Description: snap.description,
-			Kind:        snap.kind,
-			Servers:     make([]api.ManagedServer, 0, len(snap.servers)),
+			ID:                snap.id,
+			Description:       snap.description,
+			Kind:              snap.kind,
+			Servers:           make([]api.ManagedServer, 0, len(snap.servers)),
+			Backend:           s.backendName,
+			Capabilities:      capabilities,
+			Agent:             s.agentName,
+			AgentCapabilities: agentCapabilities,
+			Links:             snap.links,
+			EventsSeq:         snap.eventsSeq,
 		}
 		for _, ms := range snap.servers {
 			// Port is the client port; the route/cluster port is exposed under
@@ -1855,38 +1937,52 @@ func (s *Service) status(req micro.Request) {
 				Ports:     ports,
 				Advertise: ms.advertiseHost,
 				Running:   ms.running,
+				Version:   ms.version,
 			})
 		}
-		ist.ShapingSets = s.shapingSetIDs(snap.id, snap.traceProxy)
+		ist.ShapingSets = s.shapingSetIDs(snap.id, snap.agent)
+		ist.Toxics = s.activeToxics(snap.id, snap.toxics)
 		resp.Instances = append(resp.Instances, ist)
 	}
 
 	req.RespondJSON(resp)
 }
 
-// shapingSetIDs returns the ids of the shaping sets applied to proxy, in the order
-// the proxy reports them. A nil proxy or one that does not implement Shaper has
-// none. On a report error it logs the error and returns none, so status never
+// activeToxics returns the toxics in place on the links of an instance, in
+// the order tx reports them. A nil tx, for an instance without link proxies,
+// has none. On an error it logs the error and returns none, so status never
 // fails on it.
-func (s *Service) shapingSetIDs(instanceID string, proxy CaptureProxy) []string {
-	if proxy == nil {
-		return nil
-	}
-	shaper, ok := proxy.(Shaper)
-	if !ok {
+func (s *Service) activeToxics(instanceID string, tx agent.Toxics) []api.ActiveToxic {
+	if tx == nil {
 		return nil
 	}
 
-	reports, err := shaper.ShapingReport("")
+	_, toxics, err := tx.ToxicReport(context.Background())
+	if err != nil {
+		s.log.Warn("Could not read toxics for status", "instance", instanceID, "err", err)
+		return nil
+	}
+
+	return withLinks(toxics)
+}
+
+// shapingSetIDs returns the ids of the shaping sets applied to a, in the order
+// the agent reports them. A nil agent or one without shaping has none. On any
+// other error it logs the error and returns none, so status never fails on it.
+func (s *Service) shapingSetIDs(instanceID string, a agent.Agent) []string {
+	if a == nil {
+		return nil
+	}
+
+	ids, err := a.ShapingSets(context.Background())
+	if errors.Is(err, agent.ErrUnsupported) {
+		return nil
+	}
 	if err != nil {
 		s.log.Warn("Could not read shaping sets for status", "instance", instanceID, "err", err)
 		return nil
 	}
 
-	ids := make([]string, 0, len(reports))
-	for _, r := range reports {
-		ids = append(ids, r.ID)
-	}
 	return ids
 }
 
@@ -1917,13 +2013,13 @@ func (s *Service) destroy(req micro.Request) {
 		return
 	}
 
-	s.tearDownInstance(inst)
-	req.RespondJSON(api.DestroyResponse{Destroyed: true})
+	s.tearDownInstance(inst, events.ReasonDestroy)
+	req.RespondJSON(api.DestroyResponse{Type: api.TypeDestroyResponse, Destroyed: true})
 }
 
 func (s *Service) list(req micro.Request) {
 	s.mu.Lock()
-	resp := api.ListResponse{Instances: make([]api.InstanceSummary, 0, len(s.instances))}
+	resp := api.ListResponse{Type: api.TypeListResponse, Instances: make([]api.InstanceSummary, 0, len(s.instances))}
 	for _, inst := range s.instances {
 		resp.Instances = append(resp.Instances, api.InstanceSummary{
 			ID:          inst.ID,
@@ -1932,6 +2028,10 @@ func (s *Service) list(req micro.Request) {
 			Cluster:     inst.Cluster,
 			Servers:     len(inst.Servers),
 			Created:     inst.Created,
+			JetStream:   inst.options.jetstream,
+			Trace:       inst.options.trace,
+			Proxy:       inst.options.proxy,
+			Toxics:      inst.options.toxics,
 		})
 	}
 	s.mu.Unlock()
@@ -1939,10 +2039,10 @@ func (s *Service) list(req micro.Request) {
 	req.RespondJSON(resp)
 }
 
-// shaperFor finds the capture proxy fronting an instance and asserts it can shape
-// traffic. It answers the request itself on any failure and returns nil, so a
-// handler returns when it gets nil back.
-func (s *Service) shaperFor(req micro.Request, instanceID string) Shaper {
+// agentFor finds the agent capturing the servers of an instance. It answers the
+// request itself on any failure and returns nil, so a handler returns when it
+// gets nil back.
+func (s *Service) agentFor(req micro.Request, instanceID string) agent.Agent {
 	if instanceID == "" {
 		req.Error("002", "Invalid request: instance_id is required", nil)
 		return nil
@@ -1950,9 +2050,9 @@ func (s *Service) shaperFor(req micro.Request, instanceID string) Shaper {
 
 	s.mu.Lock()
 	inst, ok := s.instances[instanceID]
-	var servers []*managedServer
+	var a agent.Agent
 	if ok {
-		servers = slices.Clone(inst.Servers)
+		a = capturingAgentOf(inst)
 	}
 	s.mu.Unlock()
 
@@ -1961,19 +2061,24 @@ func (s *Service) shaperFor(req micro.Request, instanceID string) Shaper {
 		return nil
 	}
 
-	proxy := traceProxyOf(servers)
-	if proxy == nil {
+	if a == nil {
 		req.Error("015", "Instance has no trace proxy", nil)
 		return nil
 	}
 
-	shaper, ok := proxy.(Shaper)
-	if !ok {
+	return a
+}
+
+// answerShapeError answers req with the error an agent's shaping call
+// returned: 016 when the agent has no shaping, 017 with the error's text
+// otherwise.
+func answerShapeError(req micro.Request, err error) {
+	if errors.Is(err, agent.ErrUnsupported) {
 		req.Error("016", "Shaping not supported by the trace capturer", nil)
-		return nil
+		return
 	}
 
-	return shaper
+	req.Error("017", err.Error(), nil)
 }
 
 func (s *Service) shapeSet(req micro.Request) {
@@ -1986,18 +2091,18 @@ func (s *Service) shapeSet(req micro.Request) {
 		return
 	}
 
-	shaper := s.shaperFor(req, creq.InstanceID)
-	if shaper == nil {
+	a := s.agentFor(req, creq.InstanceID)
+	if a == nil {
 		return
 	}
 
-	err = shaper.Shape(creq.Set)
+	err = a.Shape(context.Background(), creq.Set)
 	if err != nil {
-		req.Error("017", err.Error(), nil)
+		answerShapeError(req, err)
 		return
 	}
 
-	req.RespondJSON(api.ShapeSetResponse{Set: creq.Set.ID})
+	req.RespondJSON(api.ShapeSetResponse{Type: api.TypeShapeSetResponse, Set: creq.Set.ID})
 }
 
 func (s *Service) shapeClear(req micro.Request) {
@@ -2010,21 +2115,21 @@ func (s *Service) shapeClear(req micro.Request) {
 		return
 	}
 
-	shaper := s.shaperFor(req, creq.InstanceID)
-	if shaper == nil {
+	a := s.agentFor(req, creq.InstanceID)
+	if a == nil {
 		return
 	}
 
-	cleared, err := shaper.ClearShaping(creq.Set)
+	cleared, err := a.ClearShaping(context.Background(), creq.Set)
 	if err != nil {
-		req.Error("017", err.Error(), nil)
+		answerShapeError(req, err)
 		return
 	}
 	if cleared == nil {
 		cleared = []string{}
 	}
 
-	req.RespondJSON(api.ShapeClearResponse{Cleared: cleared})
+	req.RespondJSON(api.ShapeClearResponse{Type: api.TypeShapeClearResponse, Cleared: cleared})
 }
 
 func (s *Service) shapeReport(req micro.Request) {
@@ -2037,21 +2142,254 @@ func (s *Service) shapeReport(req micro.Request) {
 		return
 	}
 
-	shaper := s.shaperFor(req, creq.InstanceID)
-	if shaper == nil {
+	a := s.agentFor(req, creq.InstanceID)
+	if a == nil {
 		return
 	}
 
-	sets, err := shaper.ShapingReport(creq.Set)
+	sets, err := a.ShapingReport(context.Background(), creq.Set)
 	if err != nil {
-		req.Error("017", err.Error(), nil)
+		answerShapeError(req, err)
 		return
 	}
 	if sets == nil {
 		sets = []api.ShapingReport{}
 	}
+	// The agent's slice is copied before a nil Firings is made empty.
+	sets = slices.Clone(sets)
+	for i := range sets {
+		if sets[i].Firings == nil {
+			sets[i].Firings = []api.ShapingFiring{}
+		}
+	}
 
-	req.RespondJSON(api.ShapeReportResponse{Sets: sets})
+	req.RespondJSON(api.ShapeReportResponse{Type: api.TypeShapeReportResponse, Sets: sets})
+}
+
+func (s *Service) shapeList(req micro.Request) {
+	s.log.Info("Handling shape list request")
+
+	creq := api.ShapeListRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	a := s.agentFor(req, creq.InstanceID)
+	if a == nil {
+		return
+	}
+
+	// An agent that cannot list its sets is answered as one without shaping.
+	lister, ok := a.(agent.ShapingLister)
+	if !ok {
+		answerShapeError(req, agent.ErrUnsupported)
+		return
+	}
+
+	sets, err := lister.ListShaping(context.Background(), creq.Set)
+	if err != nil {
+		answerShapeError(req, err)
+		return
+	}
+	if sets == nil {
+		sets = []api.ShapingSet{}
+	}
+	// The agent's slice is copied before a nil Rules is made empty.
+	sets = slices.Clone(sets)
+	for i := range sets {
+		if sets[i].Rules == nil {
+			sets[i].Rules = []api.ShapingRule{}
+		}
+	}
+
+	req.RespondJSON(api.ShapeListResponse{Type: api.TypeShapeListResponse, Sets: sets})
+}
+
+// toxicsFor finds the toxics of the agent of an instance created with toxics.
+// It answers the request itself on any failure and returns nil, so a handler
+// returns when it gets nil back: 002 without an instance id, 014 when no agent
+// is selected, 018 when the agent does not declare toxics, 404 for an unknown
+// instance, 020 for an instance created without toxics, and 022 when the
+// agent declares toxics but does not implement agent.Toxics.
+func (s *Service) toxicsFor(req micro.Request, instanceID string) agent.Toxics {
+	if instanceID == "" {
+		req.Error("002", "Invalid request: instance_id is required", nil)
+		return nil
+	}
+
+	if s.agents == nil {
+		req.Error("014", "toxics is not configured on this service", nil)
+		return nil
+	}
+
+	if !s.agentDeclares(agent.CapabilityToxics) {
+		req.Error("018", fmt.Sprintf("the %q agent does not declare the %q capability", s.agentName, agent.CapabilityToxics), nil)
+		return nil
+	}
+
+	s.mu.Lock()
+	inst, ok := s.instances[instanceID]
+	var a agent.Agent
+	var proxied bool
+	if ok {
+		a = inst.agent
+		proxied = len(inst.links) > 0
+	}
+	s.mu.Unlock()
+
+	if !ok {
+		req.Error("404", "Instance not found", nil)
+		return nil
+	}
+
+	if !proxied || a == nil {
+		req.Error("020", "Instance has no link proxies: create it with toxics", nil)
+		return nil
+	}
+
+	tx, ok := a.(agent.Toxics)
+	if !ok {
+		req.Error("022", fmt.Sprintf("the %q agent declares the %q capability but does not implement agent.Toxics", s.agentName, agent.CapabilityToxics), nil)
+		return nil
+	}
+
+	return tx
+}
+
+// withLinks returns a copy of toxics in which a nil Links is empty, so every
+// toxic answers its links as an array. The agent's slice is left as it is.
+func withLinks(toxics []api.ActiveToxic) []api.ActiveToxic {
+	toxics = slices.Clone(toxics)
+	for i := range toxics {
+		if toxics[i].Links == nil {
+			toxics[i].Links = []string{}
+		}
+	}
+
+	return toxics
+}
+
+// answerToxicError answers req with the error an agent's toxics call
+// returned: 021 with the error's text when the call was refused for what it
+// asked, and 022 with the error's text otherwise.
+func answerToxicError(req micro.Request, err error) {
+	if errors.Is(err, agent.ErrInvalidToxic) {
+		req.Error("021", err.Error(), nil)
+		return
+	}
+
+	req.Error("022", err.Error(), nil)
+}
+
+func (s *Service) toxicAdd(req micro.Request) {
+	s.log.Info("Handling toxic add request")
+
+	creq := api.ToxicAddRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	added, err := tx.AddToxic(context.Background(), creq.Toxic)
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+	if added.Links == nil {
+		added.Links = []string{}
+	}
+
+	req.RespondJSON(api.ToxicAddResponse{Type: api.TypeToxicAddResponse, Toxic: added})
+}
+
+func (s *Service) toxicRemove(req micro.Request) {
+	s.log.Info("Handling toxic remove request")
+
+	creq := api.ToxicRemoveRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	err = tx.RemoveToxic(context.Background(), creq.Name)
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+
+	req.RespondJSON(api.ToxicRemoveResponse{Type: api.TypeToxicRemoveResponse, Removed: creq.Name})
+}
+
+func (s *Service) toxicClear(req micro.Request) {
+	s.log.Info("Handling toxic clear request")
+
+	creq := api.ToxicClearRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	cleared, err := tx.ClearToxics(context.Background())
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+	if cleared == nil {
+		cleared = []string{}
+	}
+
+	req.RespondJSON(api.ToxicClearResponse{Type: api.TypeToxicClearResponse, Cleared: cleared})
+}
+
+func (s *Service) toxicReport(req micro.Request) {
+	s.log.Info("Handling toxic report request")
+
+	creq := api.ToxicReportRequest{}
+	err := json.Unmarshal(req.Data(), &creq)
+	if err != nil {
+		req.Error("001", "Invalid request", nil)
+		return
+	}
+
+	tx := s.toxicsFor(req, creq.InstanceID)
+	if tx == nil {
+		return
+	}
+
+	links, toxics, err := tx.ToxicReport(context.Background())
+	if err != nil {
+		answerToxicError(req, err)
+		return
+	}
+	if links == nil {
+		links = []api.LinkToxics{}
+	}
+	if toxics == nil {
+		toxics = []api.ActiveToxic{}
+	}
+	toxics = withLinks(toxics)
+
+	req.RespondJSON(api.ToxicReportResponse{Type: api.TypeToxicReportResponse, Links: links, Toxics: toxics})
 }
 
 // instanceSnapshot is a lock-released view of an instance's metadata and the
@@ -2062,15 +2400,24 @@ type instanceSnapshot struct {
 	kind        string
 	description string
 	servers     []serverSnapshot
-	// traceProxy is the capture proxy fronting the instance, or nil when it has
-	// none. The status handler asks it for the applied shaping sets after the
-	// lock is released.
-	traceProxy CaptureProxy
+	// agent is the agent fronting the instance, or nil when it has none. The
+	// status handler asks it for the applied shaping sets after the lock is
+	// released.
+	agent agent.Agent
+	// eventsSeq is the instance's events_seq, read with the rest of the
+	// instance before any node state, so the snapshot is no older than it.
+	eventsSeq uint64
+	// links are the instance's proxied links, nil without toxics.
+	links []api.Link
+	// toxics is the toxics of the agent of an instance with link proxies, or
+	// nil for any other instance. The status handler asks it for the toxics
+	// in place after the lock is released.
+	toxics agent.Toxics
 }
 
-// serverSnapshot is a managed server's reportable state, read out while the
-// caller holds s.mu. It holds no *server.Server: startServer and startInstance
-// replace that pointer under s.mu, so reading it afterwards would race them.
+// serverSnapshot is a managed server's reportable state. snapshotInstance reads
+// what the service holds while the caller holds s.mu; the status handler fills
+// in what node.Status reports once the lock is released.
 type serverSnapshot struct {
 	name          string
 	cluster       string
@@ -2078,30 +2425,42 @@ type serverSnapshot struct {
 	ports         map[string]int
 	advertiseHost string
 	running       bool
-	clusterPort   int // 0 when the server has no cluster listener
+	clusterPort   int    // 0 when the server has no cluster listener
+	version       string // empty when node.Status failed
+	node          backend.Node
 }
 
-// snapshotInstance reads an instance and its servers into plain values. The
-// caller must hold s.mu.
+// snapshotInstance reads an instance and its servers into plain values, with
+// each server's name and cluster from the instance's plan until its node
+// reports its own. The caller must hold s.mu.
 func snapshotInstance(inst *instance) instanceSnapshot {
 	srvs := make([]serverSnapshot, 0, len(inst.Servers))
 	for _, ms := range inst.Servers {
 		snap := serverSnapshot{
+			name: ms.backendNode.Name(),
 			// clientPort is captured at create time, so it survives a stop; the
 			// route/cluster port is reported separately as clusterPort.
 			clientPort:    ms.clientPort,
 			ports:         maps.Clone(ms.ports),
 			advertiseHost: ms.advertiseHost,
+			node:          ms.backendNode,
 		}
-		if ms.srv != nil {
-			snap.name = ms.srv.Name()
-			snap.cluster = ms.srv.ClusterName()
-			snap.running = ms.srv.Running()
-			if addr := ms.srv.ClusterAddr(); addr != nil {
-				snap.clusterPort = addr.Port
+		if inst.plan != nil {
+			for _, np := range inst.plan.Nodes {
+				if np.Name == snap.name {
+					snap.cluster = np.Cluster
+				}
 			}
 		}
 		srvs = append(srvs, snap)
+	}
+
+	var toxics agent.Toxics
+	if len(inst.links) > 0 {
+		tx, ok := inst.agent.(agent.Toxics)
+		if ok {
+			toxics = tx
+		}
 	}
 
 	return instanceSnapshot{
@@ -2109,37 +2468,102 @@ func snapshotInstance(inst *instance) instanceSnapshot {
 		kind:        inst.Kind,
 		description: inst.Description,
 		servers:     srvs,
-		traceProxy:  traceProxyOf(inst.Servers),
+		agent:       capturingAgentOf(inst),
+		eventsSeq:   inst.eventsSeq,
+		links:       slices.Clone(inst.links),
+		toxics:      toxics,
 	}
 }
 
-// traceProxyOf returns the capture proxy fronting one of servers, or nil when none
-// is fronted. traceProxy is set before a server joins its instance and never
-// changes afterwards, so the caller may read the result without holding s.mu.
-func traceProxyOf(servers []*managedServer) CaptureProxy {
-	for _, ms := range servers {
-		if ms.traceProxy != nil {
-			return ms.traceProxy
-		}
+// capturingAgentOf returns the agent of inst when it captures the instance's
+// servers for trace or proxy, which the shaping calls act on, or nil
+// otherwise. The agent of an instance created with toxics alone does not
+// count. The caller must hold s.mu; agent and options never change once set,
+// so the result may be used after the lock is released.
+func capturingAgentOf(inst *instance) agent.Agent {
+	if !inst.options.trace && !inst.options.proxy {
+		return nil
 	}
-	return nil
+
+	return inst.agent
 }
 
-// findServerByName scans every instance for a server whose runtime name matches.
-// Server names are made globally unique by the short-id prefix, so the first
-// match is always the right one.
-func (s *Service) findServerByName(name string) *managedServer {
+// findServerByName finds the server whose runtime name, as its node's status
+// reports it, is name. With instanceID it searches only that instance, and an
+// unknown instance fails with errInstanceNotFound; without one it searches
+// every instance. The servers are read under s.mu and their nodes asked with
+// the lock released; a node that fails its status does not match. No match
+// fails with errServerNotFound, and more than one, in one instance or across
+// several, fails with errServerNameAmbiguous naming the instances holding the
+// name, rather than picking one of them.
+func (s *Service) findServerByName(name string, instanceID string) (*managedServer, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for _, inst := range s.instances {
-		for _, ms := range inst.Servers {
-			if ms.srv != nil && ms.srv.Name() == name {
-				return ms
-			}
+	var servers []*managedServer
+	if instanceID != "" {
+		inst, ok := s.instances[instanceID]
+		if !ok {
+			s.mu.Unlock()
+			return nil, errInstanceNotFound
+		}
+		servers = slices.Clone(inst.Servers)
+	} else {
+		for _, inst := range s.instances {
+			servers = append(servers, inst.Servers...)
 		}
 	}
-	return nil
+	s.mu.Unlock()
+
+	ctx := context.Background()
+	var matches []*managedServer
+	for _, ms := range servers {
+		st, err := ms.backendNode.Status(ctx)
+		if err != nil {
+			continue
+		}
+		if st.ServerName == name {
+			matches = append(matches, ms)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil, errServerNotFound
+	case 1:
+		return matches[0], nil
+	}
+
+	ids := make([]string, 0, len(matches))
+	for _, ms := range matches {
+		ids = append(ids, ms.instanceID)
+	}
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+
+	if len(ids) == 1 {
+		return nil, fmt.Errorf("%w: %d servers in instance %s are named %q", errServerNameAmbiguous, len(matches), ids[0], name)
+	}
+
+	// instance_id only resolves the name when no instance holds it twice.
+	if len(ids) < len(matches) {
+		return nil, fmt.Errorf("%w: %d servers in instances %s are named %q", errServerNameAmbiguous, len(matches), strings.Join(ids, ", "), name)
+	}
+
+	return nil, fmt.Errorf("%w: %d servers in instances %s are named %q, send instance_id to choose one", errServerNameAmbiguous, len(matches), strings.Join(ids, ", "), name)
+}
+
+// serverLookupRefusal returns the code and message a stop, start, update or
+// reload of a server answers when findServerByName fails with err: 404 for an
+// unknown instance, 023 for a name more than one server reports, and 001 for
+// a name none reports.
+func serverLookupRefusal(err error) (string, string) {
+	switch {
+	case errors.Is(err, errInstanceNotFound):
+		return "404", "Instance not found"
+	case errors.Is(err, errServerNameAmbiguous):
+		return "023", err.Error()
+	default:
+		return "001", "Server not found"
+	}
 }
 
 // reservePort takes a free TCP port for one of inst's servers from the service's
@@ -2182,9 +2606,14 @@ func clientPortOf(srv *server.Server) (int, error) {
 }
 
 // beforeServerStart, when set, runs in runServerWithConfig after the server's
-// port reservations are closed and before it starts. Tests use it to take a port
-// in that gap. Nil outside tests.
+// port reservations are closed and before it starts, and in startFromConfig
+// just before the server starts. Tests use it to take a port in that gap, or to
+// stall a start. Nil outside tests.
 var beforeServerStart func(opts *server.Options)
+
+// beforeEmbeddedStart, when set, runs in runEmbedded after the embedded server's
+// port is settled and before the server binds it. Tests use it to lose the port.
+var beforeEmbeddedStart func(port int)
 
 // runServerWithConfig writes the rendered NATS config to a file under rootDir,
 // closes the held port-reservation listeners, and starts the server. The
@@ -2234,7 +2663,7 @@ func runServerWithConfig(log *slog.Logger, config []byte, rootDir string, listen
 	log.Info("Starting server", "server", srv.Name(), "dir", rootDir)
 	srv.Start()
 
-	err = waitForStart(srv, guard)
+	err = waitForStart(srv, guard, serverStartTimeout)
 	if err != nil {
 		srv.Shutdown()
 		srv.WaitForShutdown()
@@ -2247,10 +2676,10 @@ func runServerWithConfig(log *slog.Logger, config []byte, rootDir string, listen
 }
 
 // startFromConfig rebuilds and starts a server from a previously-written config
-// file. Used by tester.start.server to bring a stopped server back online; the
-// underlying *server.Server cannot be restarted in place after Shutdown. A
-// server that fails to start is shut down and not retried: its ports are fixed
-// in the config its peers know.
+// file. Used by the in-process node's Start to bring a stopped server back
+// online; the underlying *server.Server cannot be restarted in place after
+// Shutdown. A server that fails to start is shut down and not retried: its
+// ports are fixed in the config its peers know.
 func startFromConfig(log *slog.Logger, configPath string) (*server.Server, error) {
 	opts, err := server.ProcessConfigFile(configPath)
 	if err != nil {
@@ -2265,10 +2694,14 @@ func startFromConfig(log *slog.Logger, configPath string) (*server.Server, error
 
 	guard := guardServerLogger(srv, opts, log)
 
+	if beforeServerStart != nil {
+		beforeServerStart(opts)
+	}
+
 	log.Info("Restarting server", "server", srv.Name())
 	srv.Start()
 
-	err = waitForStart(srv, guard)
+	err = waitForStart(srv, guard, serverStartTimeout)
 	if err != nil {
 		srv.Shutdown()
 		srv.WaitForShutdown()
@@ -2281,9 +2714,9 @@ func startFromConfig(log *slog.Logger, configPath string) (*server.Server, error
 }
 
 // cloneTemplateData returns a shallow copy of td with a fresh empty
-// Snippets map. Used by updateServer to render against a copy so an
-// in-progress update doesn't mutate the live ms.td before the new
-// config is written; ms.td is only swapped to the copy on success.
+// Snippets map. Used by planRevision to render against a copy so an
+// in-progress update doesn't mutate the node plan's template data; the
+// node plan is only swapped for one holding the copy on success.
 func cloneTemplateData(td *templateData) *templateData {
 	c := *td
 	c.Snippets = map[string]string{}
@@ -2320,7 +2753,9 @@ type templateData struct {
 	ClusterIndex int
 	ClusterPort  int
 	Routes       []string
-	ClusterSize  int
+	// ClusterSize is the number of servers in this node's own cluster,
+	// which can differ between the clusters of a super-cluster.
+	ClusterSize int
 
 	// Super-cluster.
 	Clusters    []string
@@ -2348,4 +2783,17 @@ type templateData struct {
 	// .TLS.CAFile/.CertFile/.KeyFile, so a listener snippet can build its own
 	// tls{} block (e.g. websocket wss). Nil unless generated TLS is requested.
 	TLS *templateTLS
+
+	// ClientAdvertise is the host:port of the server's client proxy, which an
+	// instance created with toxics renders as client_advertise. Empty without
+	// toxics.
+	ClientAdvertise string
+
+	// ClusterAdvertise and GatewayAdvertise are the host:port of the dead
+	// address an instance created with toxics renders as the advertise of its
+	// cluster and gateway blocks, so a peer that learns of a node by gossip
+	// is refused rather than going around the proxies. Empty without toxics,
+	// and for a block the instance does not have.
+	ClusterAdvertise string
+	GatewayAdvertise string
 }

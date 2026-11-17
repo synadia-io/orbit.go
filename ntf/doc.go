@@ -47,13 +47,41 @@ network rather than an in-memory shortcut. They bind the wildcard address, so on
 developer machine an instance is reachable from the local network for as long as it
 lives.
 
+# Waiting for JetStream
+
+A create returns once every server has started, before a JetStream cluster has
+elected its meta leader. A create request's wait_jetstream, in seconds, makes it
+answer only once every server reports JetStream enabled under one meta leader that
+lists every other server as a current peer, asked over the system account. It uses
+the built-in template's system user, or the request's system_credentials, which a
+custom template or an accounts or system_account snippet requires. A wait that
+times out answers 024 naming each server not ready, with the create response as
+its data, and leaves the instance in place.
+
 # Trace capture
 
-Options.NewCapturer supplies an implementation that fronts a managed server with a
-capture proxy recording the traffic that reaches it. Without one, requests asking for
-trace capture are refused. Only the first node of a cluster or super-cluster is
-fronted, and a traced instance cannot use generated TLS: the proxy forwards
-plaintext.
+Options.Agents registers network agent factories by name and Options.Agent selects
+one. The agent, defined in package agent, fronts a managed server with a proxy
+recording the traffic that reaches it. With no agent selected, requests asking for
+trace capture are refused. Every node is fronted by a capture proxy of its own,
+on a trace port from the service's range, and a traced instance cannot use
+generated TLS: the proxy forwards plaintext.
+
+# Clocks
+
+Events from different components are lined up by their timestamps, so a
+distributed deployment of ntf must run NTP on every host. The <group>.clock
+endpoint confirms that rather than replacing it: it reports the service host as
+the reference, each instance's agent as sharing the service's clock since it
+runs in the service's process, and, for each extra clock subject the request
+lists, that participant's offset from the service host with a round trip and an
+error bound, or the error if it does not answer. The caller judges the result
+against its own threshold.
+
+A component joins by answering clock requests on its own micro service, adding
+events.ClockHandler as the endpoint named clock under a group of its own, and
+the caller lists that endpoint's subject. A subject answered by several
+processes reaches one of them per request, mixing their clocks into one result.
 
 # What embedding this grants
 
@@ -67,8 +95,10 @@ CONNECT frames of every connection, credentials included. Any client may destroy
 instance; there is no tenancy, quota or rate limit.
 
 Treat running a Service as granting code execution on its host. On a shared server,
-put it in a dedicated account and scope subject permissions to its group. Options.Group
-namespaces the endpoints but not micro's own $SRV discovery subjects, so two services
-on one connection still collide there.
+put it in a dedicated account and scope subject permissions to its group. The service
+also needs ntf.events.<group>.> for its events and $JS.API.> for their stream.
+Options.Group namespaces the endpoints but not micro's own $SRV discovery subjects, so
+two services on one connection still collide there. On an unauthenticated server any
+client can publish forged events or delete the events stream.
 */
 package ntf

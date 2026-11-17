@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -61,6 +62,9 @@ type Instance struct {
 	// by the service when WithGeneratedTLS was set on the create call.
 	// Nil otherwise. Use TLSConfig(inst) to build a *tls.Config from it.
 	TLS *api.TLSMaterial
+	// Links lists the proxied links of an instance created WithToxics: its
+	// routes, gateways and client proxies. Nil otherwise.
+	Links []api.Link
 
 	m *Manager
 }
@@ -78,6 +82,20 @@ type createOptions struct {
 	connectOptions []nats.Option
 	tls            *api.TLSOptions
 	trace          bool
+	toxics         bool
+
+	// The JetStream wait, from WithJetStreamWait and WithSystemCredentials.
+	jetStreamWait     time.Duration
+	systemCredentials *api.Credential
+
+	// Names, from WithName, WithClusterName, WithServerNames and
+	// WithClusters. kindOpts records which of them were given, so a create
+	// of another kind refuses them.
+	name        string
+	clusterName string
+	serverNames []string
+	clusterList []api.ClusterSpec
+	kindOpts    []kindOpt
 }
 
 // TLSOpt customizes a WithGeneratedTLS call.
@@ -232,24 +250,44 @@ func WithConnectOptions(opts ...nats.Option) createOpt {
 	return func(o *createOptions) { o.connectOptions = append(o.connectOptions, opts...) }
 }
 
-// WithTraceCapture fronts the instance's first server with a capture proxy on a random
-// port. The proxy keeps running for the life of the instance, but using it is opt-in and
-// a separate usage model from the normal connection: the convenience helpers (WithServer,
-// WithCluster, ...) still connect directly to the server, untraced.
+// WithTraceCapture fronts every server of the instance with a capture proxy of its own, on
+// a trace port from the service's range. The proxies keep running for the life of the
+// instance, but using them is opt-in and a separate usage model from the normal
+// connection: the convenience helpers (WithServer, WithCluster, ...) still connect
+// directly to the servers, untraced.
 //
-// To capture, dial the proxy yourself via ManagedServer.TraceURL (or Ports["trace"]), e.g.
-// nats.Connect(inst.Servers[0].TraceURL). Every connection that reaches the proxy has its
-// trace stored, in the expanded format, as an object in the management server's TRACES
-// object store; read them back with Instance.Captures or Instance.TraceStore. The proxy
-// also applies the shaping sets given to Instance.SetShaping.
+// To capture, dial a proxy yourself via its server's ManagedServer.TraceURL (or
+// Ports["trace"]), e.g. nats.Connect(inst.Servers[0].TraceURL). Every connection that
+// reaches a proxy has its trace stored, in the expanded format, as an object in the
+// management server's TRACES object store, with the server it reached; read them back with
+// Instance.Captures or Instance.TraceStore. The proxies also apply the shaping sets given
+// to Instance.SetShaping, on every server or on the one a set's Server names.
 //
-// For a cluster or super-cluster a single proxy fronts the first node, so only that server
-// carries a TraceURL.
+// In a cluster or super-cluster every server carries a TraceURL; the first server's is
+// the one a single trace URL has always been. With WithToxics as well, each proxy forwards
+// through its server's client proxy, so a capture records the faults its client saw.
 //
 // Trace capture is plaintext-only and is rejected in combination with WithGeneratedTLS.
 func WithTraceCapture() createOpt {
 	return func(o *createOptions) {
 		o.trace = true
+	}
+}
+
+// WithToxics puts a proxy of the service's network agent on every route, every
+// gateway between clusters and every server's client listener, so links can
+// be faulted. Each ManagedServer's Port and URL report its client proxy, so
+// the convenience helpers connect through it, and Instance.Links lists every
+// proxy and what it forwards to.
+//
+// It needs a service whose agent declares the toxics capability; any other
+// service refuses it with error code 014 or 018. Generated TLS on client ports
+// works with it, but TLS on routes or gateways is refused with 019. With
+// WithTemplate, the template must reference the variables that carry the
+// proxies; see the template environment.
+func WithToxics() createOpt {
+	return func(o *createOptions) {
+		o.toxics = true
 	}
 }
 
@@ -328,6 +366,13 @@ func WithTopLevel(body string) snippetOpt { return snippetOpt{key: "top", body: 
 // …), so the user's template has full access to topology data — but it
 // becomes responsible for emitting correct cluster {…} / gateway {…} blocks;
 // the service no longer guarantees topology correctness when this is set.
+//
+// With WithToxics the template must render .ClientAdvertise as
+// client_advertise; in a cluster also .Routes and .ClusterAdvertise as the
+// cluster advertise; and in a super-cluster also .Gateways and
+// .GatewayAdvertise as the gateway advertise, or traffic goes around the
+// proxies. The service refuses one that does not reference them, on create and
+// on UpdateServer.
 //
 // Reach for this only when no typed snippet helper expresses the change.
 // Composes with the typed helpers: snippet files are still rendered to disk
@@ -456,7 +501,9 @@ func (c *Client) withServer(t testing.TB, js bool, h func(testing.TB, *nats.Conn
 
 // WithJetStreamCluster creates a cluster with the given server count running
 // JetStream and connects to a random server. Pass CreateOptions to customize
-// the rendered config and the post-create nats.Connect.
+// the rendered config and the post-create nats.Connect, and WithClusterName and
+// WithServerNames to name the cluster and its servers; with WithServerNames the
+// server count may be zero.
 //
 // Usable from benchmarks; see Client for the *testing.B caveat.
 func (c *Client) WithJetStreamCluster(t testing.TB, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
@@ -467,7 +514,9 @@ func (c *Client) WithJetStreamCluster(t testing.TB, servers int, h func(testing.
 
 // WithCluster creates a non JetStream cluster with the given server count and
 // connects to a random server. Pass CreateOptions to customize the rendered
-// config and the post-create nats.Connect.
+// config and the post-create nats.Connect, and WithClusterName and
+// WithServerNames to name the cluster and its servers; with WithServerNames the
+// server count may be zero.
 //
 // Usable from benchmarks; see Client for the *testing.B caveat.
 func (c *Client) WithCluster(t testing.TB, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
@@ -483,8 +532,9 @@ func (c *Client) withCluster(t testing.TB, servers int, js bool, h func(testing.
 	inst := c.CreateCluster(t, servers, js, opts...)
 	defer inst.Destroy(t)
 
-	if len(inst.Servers) != servers {
-		t.Fatalf("expected number of servers to be %d got %d", servers, len(inst.Servers))
+	want := co.clusterSize(servers)
+	if len(inst.Servers) != want {
+		t.Fatalf("expected number of servers to be %d got %d", want, len(inst.Servers))
 	}
 
 	nc, err := nats.Connect(inst.RandomServer().URL, helperConnectOptions(t, co, inst)...)
@@ -521,7 +571,8 @@ func (c *Client) WaitForJetStream(t testing.TB, nc *nats.Conn) {
 // WithJetStreamSuperCluster creates a super-cluster with the given server and
 // cluster counts running JetStream and connects to a random server. Pass
 // CreateOptions to customize the rendered config and the post-create
-// nats.Connect.
+// nats.Connect. To give each cluster its own name, size and server names, pass
+// WithClusters with both counts zero.
 //
 // Usable from benchmarks; see Client for the *testing.B caveat.
 func (c *Client) WithJetStreamSuperCluster(t testing.TB, clusters int, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
@@ -532,7 +583,9 @@ func (c *Client) WithJetStreamSuperCluster(t testing.TB, clusters int, servers i
 
 // WithSuperCluster creates a non JetStream super-cluster with the given server
 // and cluster counts and connects to a random server. Pass CreateOptions to
-// customize the rendered config and the post-create nats.Connect.
+// customize the rendered config and the post-create nats.Connect. To give each
+// cluster its own name, size and server names, pass WithClusters with both
+// counts zero.
 //
 // Usable from benchmarks; see Client for the *testing.B caveat.
 func (c *Client) WithSuperCluster(t testing.TB, clusters int, servers int, h func(testing.TB, *nats.Conn, *Instance), opts ...CreateOption) {
@@ -548,8 +601,9 @@ func (c *Client) withSuperCluster(t testing.TB, clusters int, servers int, js bo
 	inst := c.CreateSuperCluster(t, clusters, servers, js, opts...)
 	defer inst.Destroy(t)
 
-	if len(inst.Servers) != servers*clusters {
-		t.Fatalf("expected number of servers to be %d got %d", servers*clusters, len(inst.Servers))
+	want := co.superClusterSize(clusters, servers)
+	if len(inst.Servers) != want {
+		t.Fatalf("expected number of servers to be %d got %d", want, len(inst.Servers))
 	}
 
 	nc, err := nats.Connect(inst.RandomServer().URL, helperConnectOptions(t, co, inst)...)
@@ -565,37 +619,60 @@ func (c *Client) withSuperCluster(t testing.TB, clusters int, servers int, js bo
 	h(t, nc, inst)
 }
 
-// CreateSuperCluster creates a super cluster
+// CreateSuperCluster creates a super cluster. See Manager.CreateSuperCluster for
+// WithClusters. A create whose WithJetStreamWait ends with JetStream not ready
+// destroys the instance the service left in place and fails the test.
 func (c *Client) CreateSuperCluster(t testing.TB, clusters int, servers int, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
 	inst, err := c.m.CreateSuperCluster(context.Background(), clusters, servers, js, withTestDescription(t, opts)...)
 	if err != nil {
-		t.Fatalf("could not create super-cluster: %v", err)
+		failCreate(t, "super-cluster", inst, err)
 	}
 	return inst
 }
 
-// CreateCluster creates a cluster
+// CreateCluster creates a cluster. See Manager.CreateCluster for
+// WithClusterName and WithServerNames. A create whose WithJetStreamWait ends
+// with JetStream not ready destroys the instance the service left in place and
+// fails the test.
 func (c *Client) CreateCluster(t testing.TB, servers int, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
 	inst, err := c.m.CreateCluster(context.Background(), servers, js, withTestDescription(t, opts)...)
 	if err != nil {
-		t.Fatalf("could not create cluster: %v", err)
+		failCreate(t, "cluster", inst, err)
 	}
 	return inst
 }
 
-// CreateServer creates a server
+// CreateServer creates a server. See Manager.CreateServer for WithName. A
+// create whose WithJetStreamWait ends with JetStream not ready destroys the
+// instance the service left in place and fails the test.
 func (c *Client) CreateServer(t testing.TB, js bool, opts ...CreateOption) *Instance {
 	t.Helper()
 
 	inst, err := c.m.CreateServer(context.Background(), js, withTestDescription(t, opts)...)
 	if err != nil {
-		t.Fatalf("could not create server: %v", err)
+		failCreate(t, "server", inst, err)
 	}
 	return inst
+}
+
+// failCreate fails t with err, the error of a create of kind. It first
+// destroys inst, the instance a create whose JetStream wait ended unready left
+// in place, when there is one, since the test never gets to. An instance
+// already gone, destroyed while the wait ended, is not an error.
+func failCreate(t testing.TB, kind string, inst *Instance, err error) {
+	t.Helper()
+
+	if inst != nil {
+		_, derr := inst.m.Destroy(context.Background(), inst.ID)
+		if derr != nil && !errors.Is(derr, ErrInstanceNotFound) {
+			t.Errorf("could not destroy instance %s left by the failed create: %v", inst.ID, derr)
+		}
+	}
+	t.Fatalf("could not create %s: %v", kind, err)
 }
 
 // List returns a lightweight summary of every instance currently held by the
@@ -663,11 +740,15 @@ func serverName(server *api.ManagedServer) string {
 	return server.Name
 }
 
-// StopServer stops a single server within this instance.
+// StopServer stops a single server within this instance. It uses
+// Manager.StopInstanceServer, so it reaches this instance's server even when
+// another instance holds a server of the same name. server must be one of
+// this instance's servers: a server of another instance, whose name this
+// instance does not hold, fails the test on a service that accepts instance IDs.
 func (i *Instance) StopServer(t testing.TB, server *api.ManagedServer) *api.StopServerResponse {
 	t.Helper()
 
-	resp, err := i.m.StopServer(context.Background(), serverName(server))
+	resp, err := i.m.StopInstanceServer(context.Background(), i.ID, serverName(server))
 	if err != nil {
 		t.Fatalf("could not stop server: %v", err)
 	}
@@ -675,11 +756,12 @@ func (i *Instance) StopServer(t testing.TB, server *api.ManagedServer) *api.Stop
 }
 
 // StartServer starts a single server within this instance that was previously
-// stopped.
+// stopped. Like StopServer, it reaches this instance's server even when another
+// instance holds a server of the same name.
 func (i *Instance) StartServer(t testing.TB, server *api.ManagedServer) *api.StartServerResponse {
 	t.Helper()
 
-	resp, err := i.m.StartServer(context.Background(), serverName(server))
+	resp, err := i.m.StartInstanceServer(context.Background(), i.ID, serverName(server))
 	if err != nil {
 		t.Fatalf("could not start server: %v", err)
 	}
@@ -693,11 +775,12 @@ func (i *Instance) StartServer(t testing.TB, server *api.ManagedServer) *api.Sta
 //
 // The set of port-bearing snippets present at create time (websocket, mqtt,
 // leafnode) is fixed for the server's lifetime; an update that adds or drops
-// one is rejected.
+// one is rejected. Like StopServer, it reaches this instance's server even when
+// another instance holds a server of the same name.
 func (i *Instance) UpdateServer(t testing.TB, server *api.ManagedServer, opts ...UpdateOption) *api.UpdateServerResponse {
 	t.Helper()
 
-	resp, err := i.m.UpdateServer(context.Background(), serverName(server), opts...)
+	resp, err := i.m.UpdateInstanceServer(context.Background(), i.ID, serverName(server), opts...)
 	if err != nil {
 		t.Fatalf("could not update server: %v", err)
 	}
@@ -706,11 +789,12 @@ func (i *Instance) UpdateServer(t testing.TB, server *api.ManagedServer, opts ..
 
 // ReloadServer signals the running server to re-read its on-disk config
 // (nats-server Reload()). Pair it with a prior UpdateServer to apply a staged
-// change without restarting.
+// change without restarting. Like StopServer, it reaches this instance's server
+// even when another instance holds a server of the same name.
 func (i *Instance) ReloadServer(t testing.TB, server *api.ManagedServer) *api.ReloadServerResponse {
 	t.Helper()
 
-	resp, err := i.m.ReloadServer(context.Background(), serverName(server))
+	resp, err := i.m.ReloadInstanceServer(context.Background(), i.ID, serverName(server))
 	if err != nil {
 		t.Fatalf("could not reload server: %v", err)
 	}
@@ -743,9 +827,9 @@ func (i *Instance) TraceStore(t testing.TB) jetstream.ObjectStore {
 	return store
 }
 
-// SetShaping applies set to this instance's capture proxy, replacing a set with the
-// same ID and resetting its counters. The instance must have been created with
-// WithTraceCapture.
+// SetShaping applies set to this instance's capture proxies, on every server or on the
+// one set.Server names, replacing a set with the same ID and resetting its counters.
+// The instance must have been created with WithTraceCapture.
 func (i *Instance) SetShaping(t testing.TB, set api.ShapingSet) *api.ShapeSetResponse {
 	t.Helper()
 
@@ -757,7 +841,7 @@ func (i *Instance) SetShaping(t testing.TB, set api.ShapingSet) *api.ShapeSetRes
 }
 
 // ClearShaping removes the shaping set with ID setID from this instance's capture
-// proxy, or every set when setID is empty.
+// proxies, or every set when setID is empty.
 func (i *Instance) ClearShaping(t testing.TB, setID string) *api.ShapeClearResponse {
 	t.Helper()
 
@@ -769,7 +853,8 @@ func (i *Instance) ClearShaping(t testing.TB, setID string) *api.ShapeClearRespo
 }
 
 // ShapingReport reports every firing of the shaping set with ID setID on this
-// instance's capture proxy, or of every set when setID is empty.
+// instance's capture proxies, or of every set when setID is empty, each set's
+// firings merged across its servers with a count per server in Servers.
 func (i *Instance) ShapingReport(t testing.TB, setID string) *api.ShapeReportResponse {
 	t.Helper()
 
@@ -778,6 +863,74 @@ func (i *Instance) ShapingReport(t testing.TB, setID string) *api.ShapeReportRes
 		t.Fatalf("could not report shaping: %v", err)
 	}
 	return resp
+}
+
+// AddToxic adds toxic to this instance's links. The instance must have been
+// created with WithToxics. See Manager.AddToxic.
+func (i *Instance) AddToxic(t testing.TB, toxic api.Toxic) *api.ToxicAddResponse {
+	t.Helper()
+
+	resp, err := i.m.AddToxic(context.Background(), i.ID, toxic)
+	if err != nil {
+		t.Fatalf("could not add toxic %s: %v", toxic.Name, err)
+	}
+	return resp
+}
+
+// RemoveToxic removes the toxic named name from this instance's links.
+func (i *Instance) RemoveToxic(t testing.TB, name string) *api.ToxicRemoveResponse {
+	t.Helper()
+
+	resp, err := i.m.RemoveToxic(context.Background(), i.ID, name)
+	if err != nil {
+		t.Fatalf("could not remove toxic %s: %v", name, err)
+	}
+	return resp
+}
+
+// ClearToxics removes every toxic from this instance's links.
+func (i *Instance) ClearToxics(t testing.TB) *api.ToxicClearResponse {
+	t.Helper()
+
+	resp, err := i.m.ClearToxics(context.Background(), i.ID)
+	if err != nil {
+		t.Fatalf("could not clear toxics: %v", err)
+	}
+	return resp
+}
+
+// ToxicReport reports every proxied link of this instance with the toxics on
+// it, and every toxic in place.
+func (i *Instance) ToxicReport(t testing.TB) *api.ToxicReportResponse {
+	t.Helper()
+
+	resp, err := i.m.ToxicReport(context.Background(), i.ID)
+	if err != nil {
+		t.Fatalf("could not report toxics: %v", err)
+	}
+	return resp
+}
+
+// Unplug cuts every route, gateway and client link of server, both ways, with a
+// cut named "unplug-<server name>", as pulling its network cable would: its
+// connections go silent until the servers' ping timers close them. It returns
+// restore, which removes the cut. The instance must have been created with
+// WithToxics.
+func (i *Instance) Unplug(t testing.TB, server *api.ManagedServer) (restore func()) {
+	t.Helper()
+
+	if serverName(server) == "" {
+		t.Fatalf("could not unplug: %v", ErrServerRequired)
+	}
+
+	name := "unplug-" + server.Name
+	i.AddToxic(t, api.Toxic{Name: name, Selector: api.ToxicSelector{Node: server.Name}, Type: api.ToxicCut})
+
+	return func() {
+		t.Helper()
+
+		i.RemoveToxic(t, name)
+	}
 }
 
 // Captures returns this instance's captures whose CONNECT name is clientName,

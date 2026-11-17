@@ -37,10 +37,10 @@ const (
 	serverStartPoll = 50 * time.Millisecond
 )
 
-// fatalGuard is a managed server's logger. It passes every call to the logger
+// fatalGuard is a server's logger. It passes every call to the logger
 // nats-server would have built for the server, except Fatalf: nats-server's file
 // and stderr loggers implement that with log.Logger.Fatalf, which calls os.Exit(1)
-// and would take the whole service down with one managed server. fatalGuard logs
+// and would take the whole service down with one server. fatalGuard logs
 // the line to the server's own log and to the service log instead, records it,
 // and returns, leaving the start path to shut the server down.
 type fatalGuard struct {
@@ -59,7 +59,7 @@ type fatalGuard struct {
 func (g *fatalGuard) Fatalf(format string, v ...any) {
 	msg := fmt.Sprintf(format, v...)
 	g.Logger.Errorf("Fatal: %s", msg)
-	g.log.Error("Managed server reported a fatal error", "server", g.name, "err", msg)
+	g.log.Error("Server reported a fatal error", "server", g.name, "err", msg)
 
 	cause := ErrServerFatal
 	if isListenFailure(v) {
@@ -128,9 +128,23 @@ func guardServerLogger(srv *server.Server, opts *server.Options, log *slog.Logge
 	return guard
 }
 
+// discardLogger drops everything. It stands in for the logger ConfigureLogger does
+// not build for a server with NoLog set, so that a fatalGuard can still wrap one.
+type discardLogger struct{}
+
+func (discardLogger) Noticef(string, ...any) {}
+func (discardLogger) Warnf(string, ...any)   {}
+func (discardLogger) Fatalf(string, ...any)  {}
+func (discardLogger) Errorf(string, ...any)  {}
+func (discardLogger) Debugf(string, ...any)  {}
+func (discardLogger) Tracef(string, ...any)  {}
+
 // newServerLogger builds the logger nats-server's ConfigureLogger builds for opts.
 func newServerLogger(opts *server.Options) server.Logger {
 	switch {
+	case opts.NoLog:
+		return discardLogger{}
+
 	case opts.LogFile != "":
 		l := srvlog.NewFileLogger(opts.LogFile, opts.Logtime, opts.Debug, opts.Trace, true, srvlog.LogUTC(opts.LogtimeUTC))
 		if opts.LogSizeLimit > 0 {
@@ -158,11 +172,12 @@ func newServerLogger(opts *server.Options) server.Logger {
 	}
 }
 
-// waitForStart waits for srv to accept connections. It returns the fatal error
-// guard recorded as soon as there is one, even when the server also became ready:
-// a fatal error that did not stop startup still leaves the server broken.
-func waitForStart(srv *server.Server, guard *fatalGuard) error {
-	deadline := time.Now().Add(serverStartTimeout)
+// waitForStart waits up to timeout for srv to accept connections. It returns the
+// fatal error guard recorded as soon as there is one, even when the server also
+// became ready: a fatal error that did not stop startup still leaves the server
+// broken.
+func waitForStart(srv *server.Server, guard *fatalGuard, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 
 	for {
 		ready := srv.ReadyForConnections(serverStartPoll)
@@ -175,7 +190,7 @@ func waitForStart(srv *server.Server, guard *fatalGuard) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("not ready for connections after %v", serverStartTimeout)
+			return fmt.Errorf("not ready for connections after %v", timeout)
 		}
 	}
 }

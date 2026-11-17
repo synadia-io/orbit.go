@@ -190,7 +190,7 @@ func TestGetPrefixedSubject(t *testing.T) {
 				Domain: "DOMAIN",
 			},
 			subject:  "DIRECT.GET.TEST",
-			expected: "$JS.DOMAIN.DIRECT.GET.TEST",
+			expected: "$JS.DOMAIN.API.DIRECT.GET.TEST",
 		},
 		{
 			name:     "default prefix",

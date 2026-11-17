@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/events/schemas/ntf/clock/v1/reply.json",
+  "description": "A participant's answer to a clock request, with its clock when the request arrived and when it replied",
+  "title": "io.synadia.ntf.clock.v1.reply",
+  "type": "object",
+  "required": [
+    "type",
+    "received",
+    "sent"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.clock.v1.reply"
+    },
+    "received": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The participant's clock when the request arrived, in RFC 3339 with nanoseconds"
+    },
+    "sent": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The participant's clock when it sent the reply, in RFC 3339 with nanoseconds"
+    }
+  }
+}

@@ -1,0 +1,335 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/shape_set_request.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.shape_set_request",
+      "description": "The type id of the request"
+    },
+    "instance_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The instance to add the set to"
+    },
+    "set": {
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The set's id, unique across the instance"
+        },
+        "connection_name": {
+          "type": "string",
+          "description": "A regular expression the CONNECT name of a connection must match"
+        },
+        "server": {
+          "type": "string",
+          "description": "The server whose capture proxy the set applies to, every server when empty"
+        },
+        "rules": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array"
+            }
+          ],
+          "items": {
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The rule's id"
+              },
+              "match": {
+                "properties": {
+                  "direction": {
+                    "type": "string",
+                    "description": "The direction of the frame, to_server or from_server, either when empty"
+                  },
+                  "verb": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array",
+                    "description": "Wire verbs to match, such as PUB or MSG"
+                  },
+                  "subject": {
+                    "properties": {
+                      "exact": {
+                        "type": "string",
+                        "description": "The whole subject"
+                      },
+                      "wildcard": {
+                        "type": "string",
+                        "description": "A NATS subject filter"
+                      },
+                      "grammar": {
+                        "type": "string",
+                        "description": "A traceassert subject grammar"
+                      },
+                      "where": {
+                        "additionalProperties": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "properties": {
+                                "gte": {
+                                  "type": "number",
+                                  "description": "The minimum value of the int capture"
+                                },
+                                "lte": {
+                                  "type": "number",
+                                  "description": "The maximum value of the int capture"
+                                },
+                                "in": {
+                                  "items": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "number"
+                                      },
+                                      {
+                                        "type": "boolean"
+                                      }
+                                    ]
+                                  },
+                                  "type": "array",
+                                  "minItems": 1,
+                                  "description": "The allowed values of the capture"
+                                }
+                              },
+                              "additionalProperties": false,
+                              "type": "object",
+                              "minProperties": 1,
+                              "description": "Operators the capture must satisfy, all of them"
+                            }
+                          ]
+                        },
+                        "type": "object",
+                        "description": "Constraints on the captures of the grammar, by name"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "type": "object",
+                    "description": "Matches the frame's subject"
+                  },
+                  "reply": {
+                    "properties": {
+                      "exact": {
+                        "type": "string",
+                        "description": "The whole subject"
+                      },
+                      "wildcard": {
+                        "type": "string",
+                        "description": "A NATS subject filter"
+                      },
+                      "grammar": {
+                        "type": "string",
+                        "description": "A traceassert subject grammar"
+                      },
+                      "where": {
+                        "additionalProperties": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "properties": {
+                                "gte": {
+                                  "type": "number",
+                                  "description": "The minimum value of the int capture"
+                                },
+                                "lte": {
+                                  "type": "number",
+                                  "description": "The maximum value of the int capture"
+                                },
+                                "in": {
+                                  "items": {
+                                    "oneOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "number"
+                                      },
+                                      {
+                                        "type": "boolean"
+                                      }
+                                    ]
+                                  },
+                                  "type": "array",
+                                  "minItems": 1,
+                                  "description": "The allowed values of the capture"
+                                }
+                              },
+                              "additionalProperties": false,
+                              "type": "object",
+                              "minProperties": 1,
+                              "description": "Operators the capture must satisfy, all of them"
+                            }
+                          ]
+                        },
+                        "type": "object",
+                        "description": "Constraints on the captures of the grammar, by name"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "type": "object",
+                    "description": "Matches the frame's reply subject"
+                  },
+                  "header": {
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "description": "The header the frame must carry"
+                      },
+                      "value": {
+                        "type": "string",
+                        "description": "The header value to match, any when empty"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "type": "object",
+                    "description": "Matches a header of the frame"
+                  },
+                  "payload": {
+                    "properties": {
+                      "json": {
+                        "additionalProperties": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "type": "object",
+                        "description": "gjson paths and the values to match"
+                      },
+                      "prefix": {
+                        "type": "string",
+                        "description": "Bytes the payload must start with"
+                      },
+                      "empty": {
+                        "type": "boolean",
+                        "description": "Matches a payload of zero length"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "type": "object",
+                    "description": "Matches the frame's payload"
+                  },
+                  "sid": {
+                    "type": "string",
+                    "description": "Matches the sid of a SUB, UNSUB or MSG"
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object",
+                "description": "Selects the frames the rule acts on"
+              },
+              "action": {
+                "allOf": [
+                  {
+                    "if": {
+                      "type": "string"
+                    },
+                    "then": {
+                      "type": "string",
+                      "description": "A drop or disconnect, by its kind"
+                    }
+                  },
+                  {
+                    "if": {
+                      "not": {
+                        "type": "string"
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "stall": {
+                          "type": "string",
+                          "description": "Pauses the frame's direction for this long, a Go duration string"
+                        },
+                        "throttle": {
+                          "properties": {
+                            "rate": {
+                              "type": "string",
+                              "description": "The rate, such as 50/s"
+                            },
+                            "burst": {
+                              "type": "integer",
+                              "description": "The burst allowance"
+                            }
+                          },
+                          "additionalProperties": false,
+                          "type": "object",
+                          "description": "Limits the frame's direction to rate with a burst allowance"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "type": "object",
+                      "maxProperties": 1,
+                      "minProperties": 1,
+                      "description": "A stall or throttle, keyed by its kind"
+                    }
+                  }
+                ],
+                "description": "What the rule does to a frame it fires on"
+              },
+              "nth": {
+                "type": "integer",
+                "description": "Fires on the Nth matching frame only, ignored when zero"
+              },
+              "every": {
+                "type": "integer",
+                "description": "Fires on every Nth matching frame, ignored when zero"
+              },
+              "limit": {
+                "type": "integer",
+                "description": "Caps how often the rule fires, no cap when zero"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "description": "The rules, evaluated in order, only the first that fires acts on the frame"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "The shaping set to add"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "instance_id"
+  ],
+  "title": "io.synadia.ntf.tester.v1.shape_set_request"
+}

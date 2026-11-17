@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/destroy_response.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.destroy_response",
+      "description": "The type id of the response"
+    },
+    "destroyed": {
+      "type": "boolean",
+      "description": "Whether the instance was destroyed"
+    }
+  },
+  "type": "object",
+  "title": "io.synadia.ntf.tester.v1.destroy_response"
+}

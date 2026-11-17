@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/synadia-io/orbit.go/main/ntf/api/schemas/ntf/tester/v1/shape_list_request.json",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "io.synadia.ntf.tester.v1.shape_list_request",
+      "description": "The type id of the request"
+    },
+    "instance_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The instance whose sets to list"
+    },
+    "set": {
+      "type": "string",
+      "description": "The id of the set to list, every set when empty"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "instance_id"
+  ],
+  "title": "io.synadia.ntf.tester.v1.shape_list_request"
+}
