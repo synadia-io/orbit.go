@@ -204,9 +204,9 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 			n.Files = append(n.Files, managedTLSFile(n))
 			td.TLSInclude = filepath.ToSlash(filepath.Join("snippets", "_tls_managed.conf"))
 			td.TLS = &templateTLS{
-				CAFile:   tlsFiles.caPath,
-				CertFile: tlsFiles.serverCert,
-				KeyFile:  tlsFiles.serverKey,
+				CAFile:   filepath.ToSlash(tlsFiles.caPath),
+				CertFile: filepath.ToSlash(tlsFiles.serverCert),
+				KeyFile:  filepath.ToSlash(tlsFiles.serverKey),
 			}
 		}
 
