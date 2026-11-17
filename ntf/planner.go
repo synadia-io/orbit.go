@@ -202,7 +202,7 @@ func planInstance(spec instanceSpec, id string, place backend.Placement, version
 		if tlsFiles != nil {
 			n.TLS = tlsFiles
 			n.Files = append(n.Files, managedTLSFile(n))
-			td.TLSInclude = filepath.Join("snippets", "_tls_managed.conf")
+			td.TLSInclude = filepath.ToSlash(filepath.Join("snippets", "_tls_managed.conf"))
 			td.TLS = &templateTLS{
 				CAFile:   tlsFiles.caPath,
 				CertFile: tlsFiles.serverCert,
@@ -576,9 +576,11 @@ func planTemplateData(plan *instancePlan, n *nodePlan, spec instanceSpec, dir, s
 	td.ShortID = plan.ShortID
 	td.InstanceID = plan.ID
 	td.ServerIndex = n.ServerIndex
-	td.ServerDir = dir
-	td.StoreDir = storeDir
-	td.LogFile = filepath.Join(dir, "server.log")
+	// Forward slashes keep Windows paths valid inside quoted NATS config
+	// strings, where a backslash starts an escape sequence.
+	td.ServerDir = filepath.ToSlash(dir)
+	td.StoreDir = filepath.ToSlash(storeDir)
+	td.LogFile = filepath.ToSlash(filepath.Join(dir, "server.log"))
 	td.Host = "localhost"
 	td.AdvertiseHost = spec.AdvertiseHost
 	td.ClientPort = listenerOf(n, "client").Endpoint.Port
@@ -708,7 +710,7 @@ func renderTLSSnippet(files *tlsInstanceFiles) []byte {
     verify:    %s
     timeout:   %s%s
 }
-`, files.serverCert, files.serverKey, files.caPath, verify, timeout, handshakeFirst)
+`, filepath.ToSlash(files.serverCert), filepath.ToSlash(files.serverKey), filepath.ToSlash(files.caPath), verify, timeout, handshakeFirst)
 }
 
 // renderSnippets renders each of the caller's snippets through text/template
@@ -732,7 +734,7 @@ func renderSnippets(td *templateData, snippets map[string]string, snippetsDir st
 		}
 
 		files = append(files, backend.File{Path: filepath.Join(snippetsDir, name+".conf"), Data: out.Bytes(), Mode: 0600})
-		td.Snippets[name] = filepath.Join(filepath.Base(snippetsDir), name+".conf")
+		td.Snippets[name] = filepath.ToSlash(filepath.Join(filepath.Base(snippetsDir), name+".conf"))
 	}
 
 	return files, nil
