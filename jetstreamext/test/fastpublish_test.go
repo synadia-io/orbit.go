@@ -475,7 +475,7 @@ func TestFastPublisher_ReplyPrefixUnchangedOnFlowChange(t *testing.T) {
 	batch, err := jetstreamext.NewFastPublisher(js,
 		jetstreamext.FastPublishFlowControl{
 			Flow:               10,
-			MaxOutstandingAcks: 5,
+			MaxOutstandingAcks: 3,
 			AckTimeout:         5 * time.Second,
 		},
 	)
@@ -699,5 +699,39 @@ func TestFastPublisher_StallEveryMessage(t *testing.T) {
 	}
 	if ack.BatchSize != msgCount+1 {
 		t.Fatalf("Expected BatchSize %d, got %d", msgCount+1, ack.BatchSize)
+	}
+}
+
+func TestFastPublisher_MaxOutstandingAcksLimit(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer shutdownJSServerAndRemoveStorage(t, s)
+	nc, js := jsClient(t, s)
+	defer nc.Close()
+
+	tests := []struct {
+		name               string
+		maxOutstandingAcks uint16
+		withError          error
+	}{
+		{name: "default", maxOutstandingAcks: 0},
+		{name: "at limit", maxOutstandingAcks: 3},
+		{name: "above limit", maxOutstandingAcks: 4, withError: jetstreamext.ErrInvalidOption},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := jetstreamext.NewFastPublisher(js,
+				jetstreamext.FastPublishFlowControl{MaxOutstandingAcks: test.maxOutstandingAcks},
+			)
+			if test.withError != nil {
+				if !errors.Is(err, test.withError) {
+					t.Fatalf("Expected error %v, got %v", test.withError, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Unexpected error creating publisher: %v", err)
+			}
+		})
 	}
 }

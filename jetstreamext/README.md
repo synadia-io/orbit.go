@@ -301,7 +301,7 @@ less.
 ```go
 fp, err := jetstreamext.NewFastPublisher(js, jetstreamext.FastPublishFlowControl{
     Flow:               200,              // initial ack frequency (default: 100)
-    MaxOutstandingAcks: 3,                // max unacked batches before stalling (default: 2)
+    MaxOutstandingAcks: 3,                // max unacked batches before stalling (default: 2, max: 3)
     AckTimeout:         10 * time.Second, // timeout waiting for acks
 })
 ```
