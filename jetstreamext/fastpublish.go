@@ -73,8 +73,10 @@ type (
 		// Default: 100
 		Flow uint16
 
-		// MaxOutstandingAcks limits how many unacknowledged messages before stalling.
-		// When this limit is reached, Add/AddMsg will block until acks are received.
+		// MaxOutstandingAcks limits how many flow acks may be outstanding before stalling.
+		// Each flow ack covers Flow messages. When this limit is reached, Add/AddMsg
+		// will block until acks are received. Values above 3 are rejected with
+		// ErrInvalidOption.
 		// Default: 2
 		MaxOutstandingAcks uint16
 
@@ -171,6 +173,8 @@ type (
 const (
 	defaultFastFlow           = 100
 	defaultMaxOutstandingAcks = 2
+	// maxOutstandingAcksLimit is the most outstanding acks ADR-50 allows a client to configure.
+	maxOutstandingAcksLimit = 3
 )
 
 const (
