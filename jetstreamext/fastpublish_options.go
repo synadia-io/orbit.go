@@ -21,6 +21,9 @@ func (fc FastPublishFlowControl) configureFastPublisher(opts *fastPublisherOpts)
 	if fc.AckTimeout < 0 {
 		return fmt.Errorf("%w: ack timeout must be non-negative", ErrInvalidOption)
 	}
+	if fc.MaxOutstandingAcks > maxOutstandingAcksLimit {
+		return fmt.Errorf("%w: max outstanding acks must not exceed %d", ErrInvalidOption, maxOutstandingAcksLimit)
+	}
 
 	if fc.Flow > 0 {
 		opts.flow = fc.Flow
