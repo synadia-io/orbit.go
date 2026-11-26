@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/nats-io/nats.go v1.56.0
 	github.com/nats-io/nuid v1.0.1
-	github.com/synadia-io/orbit.go/natsext v0.1.3
+	github.com/synadia-io/orbit.go/natsext v0.1.4
 )
 
 require (
