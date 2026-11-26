@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/nats-io/nats.go v1.56.0
-	github.com/synadia-io/orbit.go/jetstreamext v0.3.2
+	github.com/synadia-io/orbit.go/jetstreamext v0.4.0
 )
 
 require (
